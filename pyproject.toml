@@ -21,13 +21,13 @@ dev = [
     "mypy>=1.13",
     "httpx>=0.27",
 ]
-# ulmen 压缩 serde 实验专用：实验结论为「不启用」（见 tests/test_ulmen_serde_experiment.py），
+# ulmen 压缩 serde 实验专用：实验结论为「不启用」（见 tests/e2e/test_ulmen_serde_experiment.py），
 # 仅为复现实验保留，不进入运行时依赖。
 experiment = [
     "ulmen-langgraph>=0.1.0",
 ]
 
-# 服务型项目，不打包发布；源码平铺于 src/，运行与测试均通过 pythonpath 引入。
+# 服务型项目，不打包发布；源码按依赖层级分包于 src/，运行与测试均通过 pythonpath 引入。
 [tool.uv]
 package = false
 

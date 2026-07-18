@@ -36,14 +36,14 @@ MIXED_FEEDBACK = "引言口吻克制些；第二章补充行业数据佐证"
 
 def _build_app(real: bool):
     """按模式构建应用：空转注入假 LLM 与内存存档器，--real 走生产路径。"""
-    from app import create_app
+    from service.app import create_app
 
     if real:
         return create_app()
 
     from langgraph.checkpoint.memory import InMemorySaver
 
-    from llm_client import FakeLLM
+    from llm.llm_client import FakeLLM
     from tests.llm_response_plans import TRUNK_RESPONSES
 
     fake = FakeLLM(list(TRUNK_RESPONSES))

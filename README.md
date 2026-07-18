@@ -69,7 +69,7 @@ cp .env.example .env          # 按下文约定填写
 ## 启动方式
 
 ```bash
-uvicorn --app-dir src --factory app:create_app --host 0.0.0.0 --port 8000
+uvicorn --app-dir src --factory service.app:create_app --host 0.0.0.0 --port 8000
 ```
 
 主要接口：
@@ -110,7 +110,7 @@ python scripts/demo.py --real    # 生产同构演示：真实 LLM + Postgres + 
 ## ulmen 压缩 serde 实验结论：不启用
 
 PRD 约定 ulmen-langgraph 压缩仅作为实验性可选 serde 接入存档器，且「关闭开关后历史存档必须仍可读取，做不到则不启用」。
-实验结论（`tests/test_ulmen_serde_experiment.py` 固化为回归证据）：
+实验结论（`tests/e2e/test_ulmen_serde_experiment.py` 固化为回归证据）：
 
 - 正向兼容成立：开启压缩后可以读取此前未压缩写入的历史存档。
 - 反向兼容不成立：压缩写入的存档在关闭开关后，纯 PostgresSaver 读取不报错而是静默解出损坏数据（msgpack 把 ULMZ 魔数首字节当作整数解码并丢弃其余内容）。

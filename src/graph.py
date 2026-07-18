@@ -22,16 +22,19 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-import observability
-from assembler_config import AssemblerConfig
-from citation_validator import make_citation_validator_node
-from framework_orchestrator import make_framework_orchestrator_node
-from human_review_gate import make_human_review_gate_node
-from llm_client import LLMFactory, default_llm_factory
-from reference_orchestrator import make_reference_orchestrator_node
-from state import WorkflowStatus, WritingAgentState
-from subagents import Subagent, make_stub_rewriter_loop, make_stub_search_agent
-from writing_orchestrator import make_writing_orchestrator_node
+from agents.contracts import Subagent
+from agents.rewriter_loop import make_stub_rewriter_loop
+from agents.search_agent import make_stub_search_agent
+from assembly.assembler_config import AssemblerConfig
+from domain.state import WorkflowStatus, WritingAgentState
+from domain.units import MAIN_NODES
+from llm import observability
+from llm.llm_client import LLMFactory, default_llm_factory
+from nodes.citation_validator import ValidatorConfig, make_citation_validator_node
+from nodes.framework_orchestrator import make_framework_orchestrator_node
+from nodes.human_review_gate import make_human_review_gate_node
+from nodes.reference_orchestrator import make_reference_orchestrator_node
+from nodes.writing_orchestrator import make_writing_orchestrator_node
 
 PG_DSN_ENV = "HYPOARGUS_PG_DSN"
 
@@ -46,7 +49,7 @@ NODE_STATUS: dict[str, WorkflowStatus] = {
     "human_review_gate": WorkflowStatus.AWAIT_USER_REVIEW,
 }
 
-MAIN_NODES: tuple[str, ...] = tuple(NODE_STATUS)
+assert tuple(NODE_STATUS) == MAIN_NODES, "NODE_STATUS 必须与运行单元名册的主节点一致"
 
 
 def route_after_citation_validator(state: WritingAgentState) -> str:
@@ -102,7 +105,11 @@ def build_graph(
             effective_rewriter_loop, effective_search_agent, assembler_config
         ),
         "citation_validator": make_citation_validator_node(
-            llm_factory, citation_max_retries, assembler_config
+            llm_factory,
+            ValidatorConfig(max_retries=citation_max_retries)
+            if citation_max_retries is not None
+            else None,
+            assembler_config,
         ),
         "human_review_gate": make_human_review_gate_node(
             llm_factory, assembler_config
