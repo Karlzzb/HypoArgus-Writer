@@ -1,0 +1,32 @@
+[project]
+name = "hypoargus-writer"
+version = "0.1.0"
+description = "纯 LangGraph 单一技术栈的工业级结构化写作后端服务"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "langgraph>=1.0,<2",
+    "langgraph-checkpoint-postgres>=2.0",
+    "psycopg[binary,pool]>=3.2",
+    "openai>=1.60",
+    "pydantic>=2.9",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "mypy>=1.13",
+]
+
+# 服务型项目，不打包发布；源码平铺于 src/，运行与测试均通过 pythonpath 引入。
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.mypy]
+mypy_path = "src"
+python_version = "3.11"
+check_untyped_defs = true
