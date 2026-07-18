@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from env_config import read_positive_int
+
 # 进程启动即把 .env 载入环境变量（不覆盖已有值），使「.env 中独立配置」真实生效。
 load_dotenv()
 
@@ -30,20 +32,6 @@ _LIMIT_DEFAULTS: tuple[tuple[str, int], ...] = (
 )
 
 
-def _read_limit(env: Mapping[str, str], name: str, default: int) -> int:
-    """读取单个上限：空值回落缺省，非正整数抛出 ValueError 并指明变量名。"""
-    raw = env.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ValueError(f"环境变量 {name} 必须是正整数，当前值：{raw!r}") from None
-    if value <= 0:
-        raise ValueError(f"环境变量 {name} 必须是正整数，当前值：{raw!r}")
-    return value
-
-
 def load_framework_limits(env: Mapping[str, str] | None = None) -> FrameworkLimits:
     """读取论证体系数量上限配置，未设置或为空的变量回落缺省值。
 
@@ -52,7 +40,9 @@ def load_framework_limits(env: Mapping[str, str] | None = None) -> FrameworkLimi
     if env is None:
         env = os.environ
 
-    values = {name: _read_limit(env, name, default) for name, default in _LIMIT_DEFAULTS}
+    values = {
+        name: read_positive_int(env, name, default) for name, default in _LIMIT_DEFAULTS
+    }
     return FrameworkLimits(
         max_points_per_chapter=values["FRAMEWORK_MAX_POINTS_PER_CHAPTER"],
         max_hypotheses_per_point=values["FRAMEWORK_MAX_HYPOTHESES_PER_POINT"],

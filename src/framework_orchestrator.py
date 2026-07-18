@@ -18,6 +18,8 @@ from typing import Any, Protocol
 
 from framework_config import FrameworkLimits, load_framework_limits
 from llm_client import LLM, LLMFactory
+from llm_json import JSON_ONLY_RULE
+from llm_json import invoke_json
 from state import (
     ArgumentPoint,
     ChapterSpec,
@@ -40,8 +42,6 @@ HYPOTHESIS_ANGLES: tuple[str, ...] = (
     "预言",
     "反事实",
 )
-
-_JSON_ONLY_RULE = "只输出 JSON，不要输出任何多余文字、解释或代码围栏。"
 
 _ANGLE_GUIDE = (
     "六角度含义：\n"
@@ -78,37 +78,6 @@ def _fill_placeholders(text: str) -> str:
     return VARIABLE_PATTERN.sub(lambda match: f"【待补充：{match.group(1)}】", text)
 
 
-def _parse_json(raw: str, step: str) -> Any:
-    """剥掉围栏等噪音，从首个 JSON 起始符解析；失败抛含步骤名的 ValueError。"""
-    for index, char in enumerate(raw):
-        if char in "[{":
-            try:
-                value, _ = json.JSONDecoder().raw_decode(raw[index:])
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"步骤「{step}」的 LLM 应答不是合法 JSON：{exc}"
-                ) from None
-            return value
-    raise ValueError(f"步骤「{step}」的 LLM 应答中找不到 JSON：{raw[:200]!r}")
-
-
-def _invoke_json(llm: LLM, step: str, system: str, user: str, expect: type) -> Any:
-    """执行一次 LLM 调用并解析 JSON，同时校验顶层类型。"""
-    payload = _parse_json(
-        llm.invoke(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ]
-        ),
-        step,
-    )
-    if not isinstance(payload, expect):
-        expected = "对象" if expect is dict else "数组"
-        raise ValueError(f"步骤「{step}」的 LLM 应答顶层必须是 JSON {expected}")
-    return payload
-
-
 def _list_template_files(templates_dir: Path) -> list[str]:
     """模板目录下的候选模板文件名（索引文件自身除外）。"""
     return sorted(
@@ -132,14 +101,14 @@ def _identify_genre(
         '输出 JSON 对象：{"genre": "品类名", "template_file": "模板文件名或 null"}。'
         "仅当需求与某模板的适用场景明确匹配时才返回该文件名；"
         "把握不大时 template_file 返回 null 转自由结构模式，不要勉强匹配。"
-        + _JSON_ONLY_RULE
+        + JSON_ONLY_RULE
     )
     user = (
         f"模板索引：\n{index_text}\n\n"
         f"模板文件名列表：{template_files}\n\n"
         f"用户身份：{user_identity}\n用户写作需求：{user_intent}"
     )
-    payload = _invoke_json(llm, "品类识别", system, user, dict)
+    payload = invoke_json(llm, "品类识别", system, user, dict)
 
     genre_raw = payload.get("genre")
     genre = genre_raw.strip() if isinstance(genre_raw, str) else ""
@@ -175,7 +144,7 @@ def _instantiate_template_outline(
         "输出 JSON 数组，逐章一项："
         '{"index": 骨架序号, "applicable": true|false, '
         '"title": "实例化标题", "subsections": ["实例化子标题", ...]}。'
-        + _JSON_ONLY_RULE
+        + JSON_ONLY_RULE
     )
     user = (
         f"模板文档标题：{skeleton.doc_title}\n"
@@ -183,7 +152,7 @@ def _instantiate_template_outline(
         f"章节骨架：\n{json.dumps(skeleton_payload, ensure_ascii=False, indent=2)}\n\n"
         f"用户身份：{user_identity}\n用户写作需求：{user_intent}"
     )
-    payload = _invoke_json(llm, "模板大纲实例化", system, user, list)
+    payload = invoke_json(llm, "模板大纲实例化", system, user, list)
 
     by_index: dict[int, dict[str, Any]] = {}
     for item in payload:
@@ -225,10 +194,10 @@ def _generate_free_outline(
         "章节标题是文章的二级标题，子标题是三级标题。"
         "用户需求未提供的具体信息在标题中写 【待补充：信息名】 醒目占位继续。"
         '输出 JSON 数组，逐章一项：{"title": "章节标题", "subsections": ["子标题", ...]}。'
-        + _JSON_ONLY_RULE
+        + JSON_ONLY_RULE
     )
     user = f"用户身份：{user_identity}\n用户写作需求：{user_intent}"
-    payload = _invoke_json(llm, "自由结构大纲", system, user, list)
+    payload = invoke_json(llm, "自由结构大纲", system, user, list)
 
     chapters: list[_OutlineChapter] = []
     for item in payload:
@@ -268,7 +237,7 @@ def _generate_points(
         "你是章节论点生成器。为指定章节生成中心论点，"
         "每条论点是该章存在的理由之一，是后续假说与检索的锚点。"
         f"数量不超过 {max_points} 条。"
-        '输出 JSON 数组，逐条一项：{"text": "论点表述"}。' + _JSON_ONLY_RULE
+        '输出 JSON 数组，逐条一项：{"text": "论点表述"}。' + JSON_ONLY_RULE
     )
     user = (
         f"用户身份：{user_identity}\n用户写作需求：{user_intent}\n"
@@ -278,7 +247,7 @@ def _generate_points(
         f"上一章标题：{prev_title or '（无，本章是首章）'}\n"
         f"下一章标题：{next_title or '（无，本章是末章）'}"
     )
-    payload = _invoke_json(llm, "章节论点生成", system, user, list)
+    payload = invoke_json(llm, "章节论点生成", system, user, list)
 
     texts = [
         item["text"].strip()
@@ -314,14 +283,14 @@ def _generate_hypotheses(
         "输出 JSON 数组，逐条一项："
         '{"text": "假说表述", "refute_condition": "证伪条件", '
         '"angle": "六角度之一", "evidence_retrievable": true|false}。'
-        + _JSON_ONLY_RULE
+        + JSON_ONLY_RULE
     )
     user = (
         f"用户写作需求：{user_intent}\n文章品类：{genre or '（未识别）'}\n"
         f"章节标题：{chapter.title}\n章节子标题：{list(chapter.subsections)}\n\n"
         f"待发散的论点：{point_text}"
     )
-    payload = _invoke_json(llm, "论点假说生成", system, user, list)
+    payload = invoke_json(llm, "论点假说生成", system, user, list)
 
     hypotheses: list[tuple[str, str, str]] = []
     for item in payload:

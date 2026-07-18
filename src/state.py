@@ -101,6 +101,33 @@ class RevisionRound(BaseModel):
     """更早轮次压缩后的一句话摘要；最近轮次保留原文时为 None。"""
 
 
+class CitationIssue(BaseModel):
+    """引文对账发现的单条问题。"""
+
+    kind: Literal[
+        "orphan_marker",
+        "unused_material",
+        "cross_chapter",
+        "semantic_mismatch",
+        "self_check_failed",
+    ]
+    """orphan_marker 无来源的标注；unused_material 未被引用的素材；
+    cross_chapter 跨章误引；semantic_mismatch 语义核查不通过；
+    self_check_failed 单章自检（双层校验第一层）不通过。"""
+    chapter_id: str
+    material_id: str
+    detail: str
+
+
+class CitationReport(BaseModel):
+    """citation_validator 全局终审结论。"""
+
+    passed: bool
+    issues: list[CitationIssue] = []
+    failed_chapter_ids: list[str] = []
+    """终审不合格、需定向回退重写的章节。"""
+
+
 class WritingAgentState(TypedDict, total=False):
     """LangGraph 图状态：全流程唯一事实源，经 Postgres 存档器持久化。"""
 
@@ -113,6 +140,16 @@ class WritingAgentState(TypedDict, total=False):
     citation_library: list[Material]
     chapter_drafts: list[ChapterDraft]
     revision_ledger: list[RevisionRound]
+    pending_directives: list[RevisionDirective]
+    """本轮待执行的修订指令；writing_orchestrator 执行完毕后清空。"""
+    revised_chapter_ids: list[str]
+    """本轮被修改章节；citation_validator 据此做增量核查，核查完毕后清空。"""
+    citation_report: CitationReport | None
+    """最近一次终审结论。"""
+    citation_retry_count: int
+    """终审失败定向回退的已重试次数；超限强制进入人工中断点。"""
+    citation_warnings: list[str]
+    """重试超限携带的未决引文警告，交人工裁决。"""
     status: WorkflowStatus
     iteration_round: int
     execution_trace_id: str
@@ -133,6 +170,11 @@ def initial_state(
         citation_library=[],
         chapter_drafts=[],
         revision_ledger=[],
+        pending_directives=[],
+        revised_chapter_ids=[],
+        citation_report=None,
+        citation_retry_count=0,
+        citation_warnings=[],
         status=WorkflowStatus.IDLE,
         iteration_round=0,
         execution_trace_id=execution_trace_id,

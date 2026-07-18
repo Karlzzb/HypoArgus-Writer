@@ -1,15 +1,16 @@
-"""LangGraph 刚性流水线图骨架：5 个主节点的接线。
+"""LangGraph 迭代闭环图：5 个主节点的接线与条件路由。
 
-framework_orchestrator（论证框架生成）、reference_orchestrator（检索调度）、
-writing_orchestrator（串行写作总控）已接入真实业务逻辑，后两者经黑盒适配层
-调用子智能体（本期打桩）；citation_validator 与 human_review_gate 仍为占位实现：
-仅通过统一封装层做一次 LLM 调用、推进状态机枚举、记录当前节点生效的
-LLM 配置元数据，真实业务逻辑在后续 issue 填充。
+主流程：framework_orchestrator（论证框架生成）→ reference_orchestrator（检索调度）
+→ writing_orchestrator（串行写作总控）→ citation_validator（引文终审门禁）
+→ human_review_gate（人工中断点与迭代路由）。
 
-流水线：framework_orchestrator → reference_orchestrator → writing_orchestrator
-→ citation_validator → human_review_gate。
-本期无真实人工中断，human_review_gate 占位实现停在 AWAIT_USER_REVIEW；
-FINISHED / ERROR_FAILED 由后续迭代路由 issue 启用。
+闭环路由：
+- citation_validator 终审失败且未超重试上限时，定向回退 writing_orchestrator
+  只重写不合格章节；通过或超限（携未决引文警告）进入 human_review_gate。
+- human_review_gate 经 LangGraph interrupt 真实中断等待人工；恢复后定稿走
+  FINISHED 收束，修订指令回到 writing_orchestrator，再经 citation_validator
+  增量核查回到中断点，无限循环直至定稿。
+- human_review_gate 是全流程唯一安全汇点：机器环节失败若干次后都塌缩到这里。
 """
 
 import os
@@ -21,7 +22,9 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from citation_validator import make_citation_validator_node
 from framework_orchestrator import make_framework_orchestrator_node
+from human_review_gate import make_human_review_gate_node
 from llm_client import LLMFactory, default_llm_factory
 from reference_orchestrator import make_reference_orchestrator_node
 from state import WorkflowStatus, WritingAgentState
@@ -30,7 +33,9 @@ from writing_orchestrator import make_writing_orchestrator_node
 
 PG_DSN_ENV = "HYPOARGUS_PG_DSN"
 
-# 主节点名 → 进入该节点后状态机应处的枚举值。
+# 主节点名 → 主路径上进入该节点后状态机所处的枚举值。
+# citation_validator 与 human_review_gate 会按路由结果改写状态
+# （见各节点实现），此处记录的是其主路径值。
 NODE_STATUS: dict[str, WorkflowStatus] = {
     "framework_orchestrator": WorkflowStatus.FRAMEWORK_BUILDING,
     "reference_orchestrator": WorkflowStatus.REFERENCE_FETCHING,
@@ -42,23 +47,22 @@ NODE_STATUS: dict[str, WorkflowStatus] = {
 MAIN_NODES: tuple[str, ...] = tuple(NODE_STATUS)
 
 
-def _make_placeholder_node(unit: str, llm_factory: LLMFactory):
-    """构造占位节点：推进状态机并经统一封装层空跑一次 LLM 调用。"""
+def route_after_citation_validator(state: WritingAgentState) -> str:
+    """终审后的路由：失败且未超限定向回退写作，通过或超限进入人工中断点。
 
-    def node(state: WritingAgentState) -> WritingAgentState:
-        llm = llm_factory(unit)
-        llm.invoke(
-            [
-                {"role": "system", "content": f"占位实现，无实际业务：{unit}"},
-                {"role": "user", "content": state.get("user_intent", "")},
-            ]
-        )
-        return WritingAgentState(
-            status=NODE_STATUS[unit],
-            current_node_llm_config={"unit": unit, **llm.metadata},
-        )
+    判定信号是 citation_validator 显式写入的状态机值：CITATION_CHECKING
+    表示还有重试预算、回退重写；AWAIT_USER_REVIEW 表示通过或超限交人工。
+    """
+    if state.get("status") == WorkflowStatus.CITATION_CHECKING:
+        return "writing_orchestrator"
+    return "human_review_gate"
 
-    return node
+
+def route_after_human_review_gate(state: WritingAgentState) -> str:
+    """人工中断点恢复后的路由：定稿收束，修订指令回到写作节点。"""
+    if state.get("status") == WorkflowStatus.FINISHED:
+        return END
+    return "writing_orchestrator"
 
 
 def build_graph(
@@ -66,29 +70,50 @@ def build_graph(
     checkpointer: BaseCheckpointSaver | None = None,
     search_agent: Subagent | None = None,
     rewriter_loop: Subagent | None = None,
+    citation_max_retries: int | None = None,
 ) -> CompiledStateGraph:
-    """构建并编译刚性流水线。
+    """构建并编译迭代闭环图。
 
     llm_factory 是注入确定性假 LLM 的测试接缝；
-    search_agent / rewriter_loop 未注入时使用本期打桩适配器。
+    search_agent / rewriter_loop 未注入时使用本期打桩适配器；
+    citation_max_retries 未注入时按环境变量 CITATION_MAX_RETRIES（缺省 2）。
+    人工中断点依赖存档器恢复，生产运行必须传入 checkpointer。
     """
-    builder = StateGraph(WritingAgentState)
-    builder.add_node(MAIN_NODES[0], make_framework_orchestrator_node(llm_factory))
-    builder.add_node(
-        MAIN_NODES[1],
-        make_reference_orchestrator_node(search_agent or make_stub_search_agent()),
-    )
-    builder.add_node(
-        MAIN_NODES[2],
-        make_writing_orchestrator_node(rewriter_loop or make_stub_rewriter_loop()),
-    )
-    for unit in MAIN_NODES[3:]:
-        builder.add_node(unit, _make_placeholder_node(unit, llm_factory))
+    effective_search_agent = search_agent or make_stub_search_agent()
+    effective_rewriter_loop = rewriter_loop or make_stub_rewriter_loop()
 
-    builder.add_edge(START, MAIN_NODES[0])
-    for upstream, downstream in zip(MAIN_NODES, MAIN_NODES[1:]):
-        builder.add_edge(upstream, downstream)
-    builder.add_edge(MAIN_NODES[-1], END)
+    builder = StateGraph(WritingAgentState)
+    builder.add_node(
+        "framework_orchestrator", make_framework_orchestrator_node(llm_factory)
+    )
+    builder.add_node(
+        "reference_orchestrator",
+        make_reference_orchestrator_node(effective_search_agent),
+    )
+    builder.add_node(
+        "writing_orchestrator",
+        make_writing_orchestrator_node(effective_rewriter_loop, effective_search_agent),
+    )
+    builder.add_node(
+        "citation_validator",
+        make_citation_validator_node(llm_factory, citation_max_retries),
+    )
+    builder.add_node("human_review_gate", make_human_review_gate_node(llm_factory))
+
+    builder.add_edge(START, "framework_orchestrator")
+    builder.add_edge("framework_orchestrator", "reference_orchestrator")
+    builder.add_edge("reference_orchestrator", "writing_orchestrator")
+    builder.add_edge("writing_orchestrator", "citation_validator")
+    builder.add_conditional_edges(
+        "citation_validator",
+        route_after_citation_validator,
+        ["writing_orchestrator", "human_review_gate"],
+    )
+    builder.add_conditional_edges(
+        "human_review_gate",
+        route_after_human_review_gate,
+        ["writing_orchestrator", END],
+    )
 
     return builder.compile(checkpointer=checkpointer)
 
