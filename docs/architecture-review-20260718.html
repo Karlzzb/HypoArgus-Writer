@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>架构评审 — HypoArgus-Writer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { border-style: dashed; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+      .modlabel { font-size: 0.65rem; letter-spacing: 0.1em; text-transform: uppercase; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+      <header class="space-y-2">
+        <h1 class="font-serif text-3xl">架构评审 — HypoArgus-Writer</h1>
+        <p class="text-sm text-slate-500">2026-07-18 · 图例：实线框 = 模块 · 虚线 = 接缝（seam） · 红色 = 越缝泄漏 · 深色厚框 = 深模块</p>
+      </header>
+
+      <section id="candidates" class="space-y-10">
+
+        <!-- ============ 候选 1 ============ -->
+        <article id="c1" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <div class="flex items-center gap-3">
+            <h2 class="font-serif text-2xl">按依赖层级分包：让目录结构说出导入图已经在说的话</h2>
+            <span class="rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+            <span class="rounded-full bg-slate-100 text-slate-600 text-xs px-3 py-1">in-process</span>
+          </div>
+
+          <p class="font-mono text-sm text-slate-600">src/*.py（全部 24 个文件）· pyproject.toml · tests/*.py</p>
+
+          <div class="grid grid-cols-2 gap-6">
+            <!-- Before: flat grid -->
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="modlabel text-slate-400 mb-3">Before — 平铺</p>
+              <div class="grid grid-cols-3 gap-1 text-[0.6rem] font-mono">
+                <div class="border border-slate-300 rounded px-1 py-0.5">app</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">task_service</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">graph</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">state</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">subagents</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">llm_client</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">llm_config</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">llm_json</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">env_config</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">context_assembler</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">assembler_config</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">framework_config</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">framework_orchestrator</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">reference_orchestrator</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">writing_orchestrator</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">citation_validator</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">human_review_gate</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">citation_reconciler</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">template_skeleton</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">bibliography</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">event_broker</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">event_envelope</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">graph_event_stream</div>
+                <div class="border border-slate-300 rounded px-1 py-0.5">observability</div>
+              </div>
+              <p class="text-xs text-slate-500 mt-3">24 个模块同级并排，层级关系只存在于导入语句里。</p>
+            </div>
+            <!-- After: layered bands -->
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="modlabel text-slate-400 mb-3">After — 目录即层级</p>
+              <div class="space-y-1 text-xs font-mono">
+                <div class="border-l-4 border-indigo-400 bg-indigo-50 rounded px-2 py-1">service/ <span class="text-slate-500">app · task_service · event_broker · event_envelope · graph_event_stream</span></div>
+                <div class="border-l-4 border-indigo-300 bg-white border rounded px-2 py-1">graph.py <span class="text-slate-500">（主链装配，单文件留在顶层）</span></div>
+                <div class="border-l-4 border-emerald-400 bg-emerald-50 rounded px-2 py-1">nodes/ <span class="text-slate-500">framework · reference · writing · citation_validator · human_review_gate</span></div>
+                <div class="border-l-4 border-emerald-500 bg-emerald-50 rounded px-2 py-1">agents/ <span class="text-slate-500">contracts · search_agent · rewriter_loop（见候选 2）</span></div>
+                <div class="border-l-4 border-amber-400 bg-amber-50 rounded px-2 py-1">assembly/ <span class="text-slate-500">context_assembler · assembler_config</span></div>
+                <div class="border-l-4 border-stone-400 bg-stone-100 rounded px-2 py-1">llm/ <span class="text-slate-500">llm_config · llm_client · llm_json · observability</span></div>
+                <div class="border-l-4 border-slate-500 bg-slate-100 rounded px-2 py-1">domain/ <span class="text-slate-500">state · framework_config · template_skeleton · citation_reconciler · bibliography · env_config</span></div>
+              </div>
+              <p class="text-xs text-slate-500 mt-3">依赖只向下：service → graph → nodes → agents/assembly → llm → domain。tests/ 镜像同一结构。</p>
+            </div>
+          </div>
+
+          <div class="space-y-2 text-sm">
+            <p><strong>问题</strong> — 导入图实际上是一个干净的 DAG，簇已经存在；但目录是平的，理解任何一个概念都要在 24 个同级文件里跳，新会话的 AI 或新人无法从目录读出层级。</p>
+            <p><strong>方案</strong> — 按既有依赖方向分包（不改任何接口，纯移动 + 改导入路径），每个包配 <code>__init__.py</code> 声明对外接口，tests/ 镜像分组。</p>
+            <ul class="list-disc list-inside text-slate-700 space-y-1">
+              <li>局部性：一个簇的变更集中在一个目录</li>
+              <li>杠杆：<code>__init__.py</code> 成为每个包的窄接口</li>
+              <li>测试目录与模块一一对应</li>
+              <li>零行为变更，纯结构性移动</li>
+            </ul>
+          </div>
+        </article>
+
+        <!-- ============ 候选 2 ============ -->
+        <article id="c2" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <div class="flex items-center gap-3">
+            <h2 class="font-serif text-2xl">拆开 subagents.py：每个子智能体独立成模块，事件契约中立化</h2>
+            <span class="rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold px-3 py-1">Strong</span>
+            <span class="rounded-full bg-slate-100 text-slate-600 text-xs px-3 py-1">ports &amp; adapters</span>
+          </div>
+
+          <p class="font-mono text-sm text-slate-600">src/subagents.py · src/task_service.py · src/graph_event_stream.py · src/observability.py</p>
+
+          <div class="grid grid-cols-2 gap-6">
+            <!-- Before -->
+            <div class="rounded-lg border border-slate-200 p-4 relative">
+              <p class="modlabel text-slate-400 mb-3">Before — 一个文件装四种东西</p>
+              <div class="border-2 border-slate-400 rounded-lg overflow-hidden text-xs font-mono">
+                <p class="modlabel bg-slate-100 px-2 py-1 text-slate-500">subagents.py（201 行）</p>
+                <div class="px-2 py-1.5 border-t border-red-300 bg-red-50 text-red-700">事件词汇：EventHook · SUBAGENT_START/END ⚠</div>
+                <div class="px-2 py-1.5 border-t border-slate-200">契约：SearchTask/Result · RewriteTask/Result · Subagent 协议</div>
+                <div class="px-2 py-1.5 border-t border-slate-200">SubagentAdapter（事件包裹适配器）</div>
+                <div class="px-2 py-1.5 border-t border-slate-200">打桩实现：stub_search_agent · stub_rewriter_loop</div>
+              </div>
+              <p class="text-xs text-red-600 mt-3">泄漏：task_service、graph_event_stream、observability 三个服务侧模块为了拿事件词汇而导入子智能体模块 —— 事件契约住错了地方。</p>
+            </div>
+            <!-- After -->
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="modlabel text-slate-400 mb-3">After — agents/ 包 + 中立 events</p>
+              <div class="space-y-1.5 text-xs font-mono">
+                <div class="border border-slate-300 rounded px-2 py-1 bg-stone-100">domain/events.py <span class="text-slate-500">EventHook · SUBAGENT_START/END —— 服务侧改从这里导入</span></div>
+                <div class="deep text-slate-100 rounded-lg px-2 py-2 space-y-1">
+                  <p class="modlabel text-slate-400">agents/</p>
+                  <div class="border border-slate-600 rounded px-2 py-1">contracts.py <span class="text-slate-400">任务/结果 TypedDict · Subagent 协议 · SubagentAdapter</span></div>
+                  <div class="border border-slate-600 seam rounded px-2 py-1">search_agent.py <span class="text-slate-400">打桩实现 + 未来真实现，同一接口</span></div>
+                  <div class="border border-slate-600 seam rounded px-2 py-1">rewriter_loop.py <span class="text-slate-400">draft/revise 双模式，独立测试</span></div>
+                </div>
+              </div>
+              <p class="text-xs text-slate-500 mt-3">编排器只依赖 contracts；打桩与真实现是同一接缝上的两个适配器 —— 两个适配器证明接缝是真的。</p>
+            </div>
+          </div>
+
+          <div class="space-y-2 text-sm">
+            <p><strong>问题</strong> — subagents.py 同时承载事件词汇、契约、适配器、两个打桩实现四种职责；服务侧三个模块被迫导入它只为拿两个事件常量，未来真实现（真检索、真改写循环）再塞进来会让这个文件失控。</p>
+            <p><strong>方案</strong> — 事件词汇迁到中立的 events 模块；agents/ 包内契约独立成 contracts，search_agent 与 rewriter_loop 各占一个文件，打桩与真实现并列在各自文件里，工厂按配置选择。</p>
+            <ul class="list-disc list-inside text-slate-700 space-y-1">
+              <li>每个子智能体独立测试、独立替换</li>
+              <li>服务侧不再依赖子智能体模块</li>
+              <li>真实现落地时接缝已就位</li>
+              <li>契约即测试面，一处声明</li>
+            </ul>
+          </div>
+        </article>
+
+        <!-- ============ 候选 3 ============ -->
+        <article id="c3" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <div class="flex items-center gap-3">
+            <h2 class="font-serif text-2xl">citation_validator 的隐式环境变量：把配置收回接口</h2>
+            <span class="rounded-full bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1">Worth exploring</span>
+            <span class="rounded-full bg-slate-100 text-slate-600 text-xs px-3 py-1">local-substitutable</span>
+          </div>
+
+          <p class="font-mono text-sm text-slate-600">src/citation_validator.py · src/env_config.py</p>
+
+          <div class="grid grid-cols-2 gap-6">
+            <!-- Before: mass diagram -->
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="modlabel text-slate-400 mb-3">Before — 接口偷偷变宽</p>
+              <div class="flex items-end gap-4 h-48">
+                <div class="flex flex-col w-1/2">
+                  <div class="bg-red-100 border border-red-300 rounded-t px-2 py-1 text-[0.65rem] h-20 flex flex-col justify-center">
+                    <span>make_citation_validator_node(...)</span>
+                    <span class="text-red-600">+ CITATION_MAX_RETRIES（环境变量）</span>
+                    <span class="text-red-600">+ os.environ 读取时机</span>
+                  </div>
+                  <div class="bg-slate-200 rounded-b px-2 py-1 text-[0.65rem] h-24 flex items-center">实现（213 行）</div>
+                  <p class="modlabel text-slate-400 mt-1">接口 ≈ 实现的一半高</p>
+                </div>
+                <p class="text-xs text-slate-500 w-1/2">调用方必须知道的环境变量也是接口的一部分 —— 只是没写在签名里。其余节点都走配置数据类（framework_config、assembler_config），唯独此处直读环境。</p>
+              </div>
+            </div>
+            <!-- After: mass diagram -->
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="modlabel text-slate-400 mb-3">After — 配置注入，接口收窄</p>
+              <div class="flex items-end gap-4 h-48">
+                <div class="flex flex-col w-1/2">
+                  <div class="bg-emerald-100 border border-emerald-300 rounded-t px-2 py-1 text-[0.65rem] h-10 flex items-center">make_citation_validator_node(cfg: ValidatorConfig, ...)</div>
+                  <div class="deep text-slate-200 rounded-b px-2 py-1 text-[0.65rem] h-32 flex items-center">实现（不变，环境读取集中到配置构造一处）</div>
+                  <p class="modlabel text-slate-400 mt-1">接口窄，实现深</p>
+                </div>
+                <p class="text-xs text-slate-500 w-1/2">与其余节点同一配置模式；测试不再需要 monkeypatch 环境变量，直接传配置。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-2 text-sm">
+            <p><strong>问题</strong> — 节点在模块层直读环境变量，配置成了接口的隐藏部分，且与项目其余节点的配置数据类模式不一致。</p>
+            <p><strong>方案</strong> — 引入 ValidatorConfig 数据类（含 max_retries），环境读取集中在配置构造函数，节点工厂改为注入。</p>
+            <ul class="list-disc list-inside text-slate-700 space-y-1">
+              <li>接口收窄：签名说出全部依赖</li>
+              <li>测试免 monkeypatch，直接传值</li>
+              <li>配置模式全库统一</li>
+            </ul>
+          </div>
+        </article>
+
+        <!-- ============ 候选 4 ============ -->
+        <article id="c4" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <div class="flex items-center gap-3">
+            <h2 class="font-serif text-2xl">MAIN_NODES：服务侧对图拓扑命名的反向依赖</h2>
+            <span class="rounded-full bg-slate-200 text-slate-700 text-xs font-semibold px-3 py-1">Speculative</span>
+            <span class="rounded-full bg-slate-100 text-slate-600 text-xs px-3 py-1">in-process</span>
+          </div>
+
+          <p class="font-mono text-sm text-slate-600">src/graph.py · src/graph_event_stream.py · src/task_service.py</p>
+
+          <div class="grid grid-cols-2 gap-6">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="modlabel text-slate-400 mb-3">Before</p>
+              <pre class="mermaid">
+flowchart LR
+  GES[graph_event_stream] -.->|MAIN_NODES| G[graph.py]
+  TS[task_service] -.->|MAIN_NODES| G
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class GES,TS leak
+              </pre>
+            </div>
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="modlabel text-slate-400 mb-3">After</p>
+              <pre class="mermaid">
+flowchart LR
+  GES[graph_event_stream] --> R[domain/units.py<br/>运行单元名册]
+  TS[task_service] --> R
+  G[graph.py] --> R
+              </pre>
+            </div>
+          </div>
+
+          <div class="space-y-2 text-sm">
+            <p><strong>问题</strong> — 事件渲染与任务管理为了拿主节点名单而导入图装配模块，把事件展示耦合到图拓扑命名上。</p>
+            <p><strong>方案</strong> — 运行单元名册（CONTEXT.md 的「运行单元」概念：5 主节点 + 2 子智能体）落为 domain 层的一个中立模块，graph 与服务侧同源引用。</p>
+            <ul class="list-disc list-inside text-slate-700 space-y-1">
+              <li>依赖方向恢复单向</li>
+              <li>「运行单元」从词汇表落进代码</li>
+            </ul>
+            <p class="text-xs text-slate-500">当前只是轻微摩擦，可作为候选 1 分包时的顺手一步，不值得单独立项。</p>
+          </div>
+        </article>
+
+      </section>
+
+      <!-- ============ Top recommendation ============ -->
+      <section id="top-recommendation" class="rounded-xl deep text-slate-100 p-8 space-y-3">
+        <p class="modlabel text-slate-400">首选建议</p>
+        <h2 class="font-serif text-2xl"><a href="#c1" class="underline decoration-slate-500">候选 1 分包重构</a>，并把<a href="#c2" class="underline decoration-slate-500">候选 2 拆分 subagents.py</a> 作为其中 agents/ 包的落地方式一并做</h2>
+        <p class="text-sm text-slate-300">导入图已经是干净的 DAG，分包是零风险的纯移动；而 subagents.py 是唯一一个必须切开才能分对包的文件（事件词汇属于 domain，契约与实现属于 agents）。两者合为一次重构，候选 3、4 可顺手带上。</p>
+      </section>
+
+    </main>
+  </body>
+</html>
