@@ -11,13 +11,17 @@
 - 首写模式（其余情形）：按大纲顺序逐章串行 draft，
   后一章必须等前一章结果，用其 chapter_summary 承接摘要链。
 
-修订与回退模式各章独立，prev_chapter_summary 取大纲中前一章的现有摘要即可，
-无需重建串行摘要链。
+三种模式的素材与前文摘要一律经 context_assembler 现场装配：任务包的
+prev_chapter_summary 注入装配后的 summary_chain 段（该章之前的全部前章摘要链，
+超阈值即压缩、未超时原样拼接，首章为空串），素材取装配后的 chapter_materials 段。
 """
 
 import asyncio
+import json
 from typing import Protocol
 
+from assembler_config import AssemblerConfig, load_assembler_config
+from context_assembler import assemble_with
 from state import (
     ChapterDraft,
     ChapterSpec,
@@ -69,21 +73,25 @@ def _chapter_spec_payload(chapter: ChapterSpec) -> ChapterSpecPayload:
     )
 
 
-def _chapter_materials(
-    citation_library: list[Material], chapter_id: str
-) -> list[MaterialPayload]:
-    """筛选该章且 verdict=pass 的素材，转为任务包字典。"""
+def _materials_from_segment(chapter_materials_json: str) -> list[MaterialPayload]:
+    """把 chapter_materials 段（该章 verdict=pass 素材的 JSON）转为任务包条目。
+
+    段文本由 context_assembler.extract_chapter_materials 装配（已按章过滤并只留
+    通过校验的素材），此处只取任务包所需字段，丢弃 chapter_id/url 等无关字段。
+    段缺失（空串）时视为该章无素材。
+    """
+    if not chapter_materials_json:
+        return []
     return [
         MaterialPayload(
-            id=material.id,
-            hypothesis_id=material.hypothesis_id,
-            source=material.source,
-            excerpt=material.excerpt,
-            relevance_score=material.relevance_score,
-            verdict=material.verdict,
+            id=material["id"],
+            hypothesis_id=material["hypothesis_id"],
+            source=material["source"],
+            excerpt=material["excerpt"],
+            relevance_score=material["relevance_score"],
+            verdict=material["verdict"],
         )
-        for material in citation_library
-        if material.chapter_id == chapter_id and material.verdict == "pass"
+        for material in json.loads(chapter_materials_json)
     ]
 
 
@@ -119,21 +127,38 @@ def _report_repair_payload(
 
 
 def make_writing_orchestrator_node(
-    rewriter_loop: Subagent, search_agent: Subagent
+    rewriter_loop: Subagent,
+    search_agent: Subagent,
+    assembler_config: AssemblerConfig | None = None,
 ) -> WritingOrchestratorNode:
-    """构造 writing_orchestrator 节点函数：注入 rewriter_loop 与 search_agent 适配器。"""
+    """构造 writing_orchestrator 节点函数：注入 rewriter_loop 与 search_agent 适配器。
 
-    async def _write_all_chapters(state: WritingAgentState) -> list[ChapterDraft]:
-        """首写模式章节严格串行：await 前一章结果后才组装并下发后一章任务包。"""
-        citation_library = state.get("citation_library", [])
+    assembler_config 为 None 时在节点执行时读取环境变量装配配置。
+    """
+
+    async def _write_all_chapters(
+        state: WritingAgentState, config: AssemblerConfig
+    ) -> list[ChapterDraft]:
+        """首写模式章节严格串行：await 前一章结果后才组装并下发后一章任务包。
+
+        任务包的素材与前文摘要链一律经装配入口取得：以已完成草稿现场覆盖 state
+        的章节草稿再装配，summary_chain 段随之给出该章之前的全部前章摘要链
+        （超阈值即压缩，未超时为原样拼接；首章为空串），rewriter 由此得到完整前文链。
+        """
         drafts: list[ChapterDraft] = []
-        prev_chapter_summary = ""
         for chapter in state.get("outline", []):
+            context = assemble_with(
+                state,
+                {"chapter_drafts": list(drafts)},
+                "writing_orchestrator",
+                config=config,
+                chapter_id=chapter.id,
+            )
             task = RewriteTask(
                 mode="draft",
                 chapter_spec=_chapter_spec_payload(chapter),
-                materials=_chapter_materials(citation_library, chapter.id),
-                prev_chapter_summary=prev_chapter_summary,
+                materials=_materials_from_segment(context.text("chapter_materials")),
+                prev_chapter_summary=context.text("summary_chain"),
             )
             result = await rewriter_loop.run(dict(task))
             self_check = result["self_check"]
@@ -148,15 +173,19 @@ def make_writing_orchestrator_node(
                     ),
                 )
             )
-            prev_chapter_summary = result["chapter_summary"]
         return drafts
 
     async def _augment_evidence(
         state: WritingAgentState,
         grouped: dict[str, list[RevisionDirective]],
         library: list[Material],
+        config: AssemblerConfig,
     ) -> None:
-        """对含补充佐证指令的章节做增量检索：新素材入库，既有 id 的条目跳过。"""
+        """对含补充佐证指令的章节做增量检索：新素材入库，既有 id 的条目跳过。
+
+        任务包的 existing_materials_digest 经 citation_digest 段装配得到：
+        以当前已累积引文库现场覆盖 state 再装配，反映本轮增量前的引文库状态。
+        """
         genre = state.get("genre", "")
         known_ids = {material.id for material in library}
         for chapter in state.get("outline", []):
@@ -166,11 +195,17 @@ def make_writing_orchestrator_node(
                 for directive in chapter_directives
             ):
                 continue
+            context = assemble_with(
+                state,
+                {"citation_library": list(library)},
+                "search_agent",
+                config=config,
+            )
             task = SearchTask(
                 chapter_id=chapter.id,
                 hypotheses=_flatten_hypotheses(chapter),
                 genre=genre,
-                existing_materials_digest=f"引文库已有素材 {len(library)} 条",
+                existing_materials_digest=context.text("citation_digest"),
             )
             result = await search_agent.run(dict(task))
             # 素材必须逐条回链本章假说；回链不上的脏数据不入库。
@@ -200,10 +235,13 @@ def make_writing_orchestrator_node(
         state: WritingAgentState,
         payloads_by_chapter: dict[str, list[RevisionDirectivePayload]],
         library: list[Material],
+        config: AssemblerConfig,
     ) -> tuple[list[ChapterDraft], list[str]]:
         """按大纲顺序对目标章节逐章调 rewriter_loop（mode=revise），其余章节原样保留。
 
-        prev_chapter_summary 取大纲中前一章的现有摘要（首章为空串）；
+        素材与前文摘要链一律经装配入口取得：素材以增量检索后的引文库现场覆盖
+        state 再按 chapter_id 装配；prev_chapter_summary 注入 summary_chain 段
+        （该章之前的前章摘要链，首章为空串），不受本轮改写影响。
         目标章节没有现存草稿时抛 ValueError（防御性校验）。
         """
         drafts_by_id = {
@@ -211,17 +249,25 @@ def make_writing_orchestrator_node(
         }
         new_drafts: list[ChapterDraft] = []
         revised_ids: list[str] = []
-        prev_chapter_summary = ""
         for chapter in state.get("outline", []):
             draft = drafts_by_id.get(chapter.id)
             if chapter.id in payloads_by_chapter:
                 if draft is None:
                     raise ValueError(f"目标章节 {chapter.id} 没有现存草稿可供修订")
+                context = assemble_with(
+                    state,
+                    {"citation_library": list(library)},
+                    "writing_orchestrator",
+                    config=config,
+                    chapter_id=chapter.id,
+                )
                 task = RewriteTask(
                     mode="revise",
                     chapter_spec=_chapter_spec_payload(chapter),
-                    materials=_chapter_materials(library, chapter.id),
-                    prev_chapter_summary=prev_chapter_summary,
+                    materials=_materials_from_segment(
+                        context.text("chapter_materials")
+                    ),
+                    prev_chapter_summary=context.text("summary_chain"),
                     revision_directives=payloads_by_chapter[chapter.id],
                     current_text=draft.text,
                 )
@@ -241,17 +287,17 @@ def make_writing_orchestrator_node(
                 revised_ids.append(chapter.id)
             elif draft is not None:
                 new_drafts.append(draft)
-            # prev_chapter_summary 用现有摘要，不受本轮改写影响。
-            prev_chapter_summary = draft.summary if draft is not None else ""
         return new_drafts, revised_ids
 
     async def _run_directive_revision(
-        state: WritingAgentState, directives: list[RevisionDirective]
+        state: WritingAgentState,
+        directives: list[RevisionDirective],
+        config: AssemblerConfig,
     ) -> tuple[list[ChapterDraft], list[Material], list[str]]:
         """修订模式：增量检索后按指令定向改写。"""
         grouped = _grouped_directives(directives, state.get("outline", []))
         library = list(state.get("citation_library", []))
-        await _augment_evidence(state, grouped, library)
+        await _augment_evidence(state, grouped, library, config)
         payloads_by_chapter = {
             chapter_id: [
                 RevisionDirectivePayload(
@@ -262,12 +308,12 @@ def make_writing_orchestrator_node(
             for chapter_id, chapter_directives in grouped.items()
         }
         new_drafts, revised_ids = await _revise_targets(
-            state, payloads_by_chapter, library
+            state, payloads_by_chapter, library, config
         )
         return new_drafts, library, revised_ids
 
     async def _run_report_fallback(
-        state: WritingAgentState, report: CitationReport
+        state: WritingAgentState, report: CitationReport, config: AssemblerConfig
     ) -> tuple[list[ChapterDraft], list[Material], list[str]]:
         """终审回退模式：只重写不合格章节，指令由报告问题拼出。"""
         library = list(state.get("citation_library", []))
@@ -276,24 +322,27 @@ def make_writing_orchestrator_node(
             for chapter_id in report.failed_chapter_ids
         }
         new_drafts, revised_ids = await _revise_targets(
-            state, payloads_by_chapter, library
+            state, payloads_by_chapter, library, config
         )
         return new_drafts, library, revised_ids
 
     def node(state: WritingAgentState) -> WritingAgentState:
+        config = assembler_config
+        if config is None:
+            config = load_assembler_config()
         pending_directives = state.get("pending_directives", [])
         report = state.get("citation_report")
         if pending_directives:
             chapter_drafts, library, revised_ids = asyncio.run(
-                _run_directive_revision(state, pending_directives)
+                _run_directive_revision(state, pending_directives, config)
             )
         elif report is not None and not report.passed and report.failed_chapter_ids:
             chapter_drafts, library, revised_ids = asyncio.run(
-                _run_report_fallback(state, report)
+                _run_report_fallback(state, report, config)
             )
         else:
             return WritingAgentState(
-                chapter_drafts=asyncio.run(_write_all_chapters(state)),
+                chapter_drafts=asyncio.run(_write_all_chapters(state, config)),
                 revised_chapter_ids=[],
                 status=WorkflowStatus.ARTICLE_WRITING,
                 current_node_llm_config={"unit": "writing_orchestrator"},

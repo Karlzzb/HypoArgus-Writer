@@ -13,6 +13,8 @@ from typing import Any, Protocol
 
 from langgraph.types import interrupt
 
+from assembler_config import AssemblerConfig, load_assembler_config
+from context_assembler import assemble, digest_of_round
 from llm_client import LLM, LLMFactory
 from llm_json import JSON_ONLY_RULE
 from llm_json import invoke_json
@@ -56,24 +58,37 @@ def _validate_decision(decision: Any) -> tuple[str, str]:
 
 
 def _parse_directives(
-    llm: LLM, outline: list[ChapterSpec], feedback: str
+    llm: LLM,
+    outline: list[ChapterSpec],
+    chapter_list: str,
+    revision_ledger: str,
+    feedback: str,
 ) -> list[RevisionDirective]:
-    """LLM 意见解析：把自然语言意见拆解为修订指令列表，程序侧过滤非法条目。"""
+    """LLM 意见解析：把自然语言意见拆解为修订指令列表，程序侧过滤非法条目。
+
+    章节清单、历史修订台账、本轮意见均取自装配段（chapter_list、revision_ledger、
+    user_feedback）。历史台账仅作背景帮助 LLM 理解历次要求，只解析本轮意见。
+    outline 仅用于程序侧校验目标章节合法性，不进入 prompt。
+    """
     chapter_ids = {chapter.id for chapter in outline}
-    chapter_lines = "\n".join(
-        f"- {chapter.id}：{chapter.title}" for chapter in outline
-    )
     system = (
         "你是修订意见解析器。把用户一次提交的自然语言修改意见，"
         "拆解为逐章的结构化修订指令列表。\n"
         + _TYPE_GUIDE
-        + "\n输出 JSON 数组，逐条一项："
+        + "\n历史修订台账仅作背景帮助你理解历次要求，只解析本轮意见，"
+        "不要为历史轮次生成指令。"
+        "\n输出 JSON 数组，逐条一项："
         '{"target_chapter_id": "章节 id", '
         '"type": "rewrite_only" 或 "evidence_augmented", '
         '"instruction": "该章要做什么的一句话中文指令"}。'
         + JSON_ONLY_RULE
     )
-    user = f"章节清单：\n{chapter_lines}\n\n用户修改意见：{feedback}"
+    ledger_block = f"历史修订台账（仅作背景）：\n{revision_ledger}\n\n" if revision_ledger else ""
+    user = (
+        f"章节清单：\n{chapter_list}\n\n"
+        f"{ledger_block}"
+        f"本轮用户修改意见：{feedback}"
+    )
     payload = invoke_json(llm, "修订意见解析", system, user, list)
 
     directives: list[RevisionDirective] = []
@@ -101,10 +116,18 @@ def _parse_directives(
     return directives
 
 
-def make_human_review_gate_node(llm_factory: LLMFactory) -> HumanReviewGateNode:
-    """构造 human_review_gate 节点函数。"""
+def make_human_review_gate_node(
+    llm_factory: LLMFactory, assembler_config: AssemblerConfig | None = None
+) -> HumanReviewGateNode:
+    """构造 human_review_gate 节点函数。
+
+    assembler_config 为 None 时在节点执行时读取环境变量装配配置。
+    """
 
     def node(state: WritingAgentState) -> WritingAgentState:
+        config = assembler_config
+        if config is None:
+            config = load_assembler_config()
         outline = state.get("outline", [])
         error: str | None = None
         # 安全汇点循环：契约不符或解析失败都回到中断点重新等待人工，永不转死。
@@ -128,7 +151,20 @@ def make_human_review_gate_node(llm_factory: LLMFactory) -> HumanReviewGateNode:
                         current_node_llm_config={"unit": "human_review_gate"},
                     )
                 llm = llm_factory("human_review_gate")
-                directives = _parse_directives(llm, outline, feedback)
+                # 章节清单、历史台账、本轮意见经装配段现场取得（不失忆）。
+                context = assemble(
+                    state,
+                    "human_review_gate",
+                    config=config,
+                    feedback=feedback,
+                )
+                directives = _parse_directives(
+                    llm,
+                    outline,
+                    context.text("chapter_list"),
+                    context.text("revision_ledger"),
+                    context.text("user_feedback"),
+                )
                 break
             except ValueError as exc:
                 error = str(exc)
@@ -140,6 +176,16 @@ def make_human_review_gate_node(llm_factory: LLMFactory) -> HumanReviewGateNode:
                 round_no=round_no, raw_feedback=feedback, directives=directives
             )
         ]
+        # 滑出保留窗口（最近 K 轮之外）的更早轮次落库一句话摘要：
+        # 摘要在写回 State 时一次生成并持久化，装配时直接取用，两处逻辑共用同一纯函数。
+        keep = config.ledger_keep_rounds
+        earlier, recent = ledger[:-keep], ledger[-keep:]
+        ledger = [
+            round_
+            if round_.digest is not None
+            else round_.model_copy(update={"digest": digest_of_round(round_, config)})
+            for round_ in earlier
+        ] + recent
         return WritingAgentState(
             pending_directives=directives,
             revision_ledger=ledger,

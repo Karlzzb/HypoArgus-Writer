@@ -22,6 +22,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from assembler_config import AssemblerConfig
 from citation_validator import make_citation_validator_node
 from framework_orchestrator import make_framework_orchestrator_node
 from human_review_gate import make_human_review_gate_node
@@ -71,12 +72,14 @@ def build_graph(
     search_agent: Subagent | None = None,
     rewriter_loop: Subagent | None = None,
     citation_max_retries: int | None = None,
+    assembler_config: AssemblerConfig | None = None,
 ) -> CompiledStateGraph:
     """构建并编译迭代闭环图。
 
     llm_factory 是注入确定性假 LLM 的测试接缝；
     search_agent / rewriter_loop 未注入时使用本期打桩适配器；
-    citation_max_retries 未注入时按环境变量 CITATION_MAX_RETRIES（缺省 2）。
+    citation_max_retries 未注入时按环境变量 CITATION_MAX_RETRIES（缺省 2）；
+    assembler_config 未注入时各节点执行期按环境变量读取装配配置。
     人工中断点依赖存档器恢复，生产运行必须传入 checkpointer。
     """
     effective_search_agent = search_agent or make_stub_search_agent()
@@ -84,21 +87,31 @@ def build_graph(
 
     builder = StateGraph(WritingAgentState)
     builder.add_node(
-        "framework_orchestrator", make_framework_orchestrator_node(llm_factory)
+        "framework_orchestrator",
+        make_framework_orchestrator_node(
+            llm_factory, assembler_config=assembler_config
+        ),
     )
     builder.add_node(
         "reference_orchestrator",
-        make_reference_orchestrator_node(effective_search_agent),
+        make_reference_orchestrator_node(effective_search_agent, assembler_config),
     )
     builder.add_node(
         "writing_orchestrator",
-        make_writing_orchestrator_node(effective_rewriter_loop, effective_search_agent),
+        make_writing_orchestrator_node(
+            effective_rewriter_loop, effective_search_agent, assembler_config
+        ),
     )
     builder.add_node(
         "citation_validator",
-        make_citation_validator_node(llm_factory, citation_max_retries),
+        make_citation_validator_node(
+            llm_factory, citation_max_retries, assembler_config
+        ),
     )
-    builder.add_node("human_review_gate", make_human_review_gate_node(llm_factory))
+    builder.add_node(
+        "human_review_gate",
+        make_human_review_gate_node(llm_factory, assembler_config),
+    )
 
     builder.add_edge(START, "framework_orchestrator")
     builder.add_edge("framework_orchestrator", "reference_orchestrator")

@@ -173,15 +173,17 @@ def test_素材入库回链假说与章节且fail素材保留():
     assert verdicts["m-ch1-p1-h1"] == "pass"
 
 
-def test_existing_materials_digest随入库素材数递增():
+def test_existing_materials_digest经引文库摘要段逐章反映增长():
     adapter = _make_adapter()
     node = make_reference_orchestrator_node(adapter)
 
     node(_build_state())
 
     digests = [task["existing_materials_digest"] for task in adapter.tasks]
-    # ch1 调用前引文库为空；ch3 调用前已累积 ch1 返回的 3 条素材。
-    assert digests == ["引文库已有素材 0 条", "引文库已有素材 3 条"]
+    # digest 改由 citation_digest 段装配：ch1 调用前引文库为空；
+    # ch3 调用前已累积 ch1 返回的 3 条素材（2 通过 1 未通过，均属 ch1）。
+    assert digests[0] == "引文库共 0 条素材。"
+    assert digests[1] == "引文库共 3 条素材。\n章节 ch1：通过 2 条，未通过 1 条"
 
 
 def test_状态机推进到REFERENCE_FETCHING且记录节点配置():

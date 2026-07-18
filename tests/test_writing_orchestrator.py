@@ -170,11 +170,16 @@ def test_任务包章节骨架含论点与全章扁平假说():
     )
 
 
-def test_摘要链承接_首章为空_后章取前章摘要():
+def test_摘要链承接_首章为空_后章收到完整前章摘要链():
     adapter, _ = _run_node()
+    # prev_chapter_summary 改注入 summary_chain 段：首章为空，
+    # 后章收到该章之前的全部前章摘要链（带章节标题前缀），而非仅紧邻一章。
     assert adapter.tasks[0]["prev_chapter_summary"] == ""
-    assert adapter.tasks[1]["prev_chapter_summary"] == "ch1 的摘要"
-    assert adapter.tasks[2]["prev_chapter_summary"] == "ch2 的摘要"
+    assert adapter.tasks[1]["prev_chapter_summary"] == "【第一章】ch1 的摘要"
+    assert (
+        adapter.tasks[2]["prev_chapter_summary"]
+        == "【第一章】ch1 的摘要\n【第二章】ch2 的摘要"
+    )
 
 
 def test_素材过滤_只有本章pass素材进任务包():
@@ -274,7 +279,12 @@ def test_修订模式_混合分支同轮执行():
     search_task = search.tasks[0]
     assert search_task["chapter_id"] == "ch2"
     assert [hyp["id"] for hyp in search_task["hypotheses"]] == ["ch2-p1-h1", "ch2-p1-h2"]
-    assert search_task["existing_materials_digest"] == "引文库已有素材 4 条"
+    # digest 改由 citation_digest 段装配：4 条素材，ch1 通过 1 未通过 1、ch2 通过 2。
+    assert search_task["existing_materials_digest"] == (
+        "引文库共 4 条素材。\n"
+        "章节 ch1：通过 1 条，未通过 1 条\n"
+        "章节 ch2：通过 2 条，未通过 0 条"
+    )
 
     # rewriter_loop 两次均 mode=revise，任务包带正确 directives 与 current_text。
     assert [task["chapter_spec"]["id"] for task in rewriter.tasks] == ["ch1", "ch2"]
@@ -288,7 +298,8 @@ def test_修订模式_混合分支同轮执行():
         {"type": "evidence_augmented", "instruction": "补充第二章数据佐证"}
     ]
     assert rewriter.tasks[1]["current_text"] == "ch2 旧正文"
-    assert rewriter.tasks[1]["prev_chapter_summary"] == "ch1 旧摘要"
+    # prev_chapter_summary 改注入 summary_chain 段：ch2 收到前一章带标题前缀的摘要链。
+    assert rewriter.tasks[1]["prev_chapter_summary"] == "【第一章】ch1 旧摘要"
     # ch2 任务包素材含新增素材 m-new。
     assert [material["id"] for material in rewriter.tasks[1]["materials"]] == [
         "m-3",
@@ -383,7 +394,8 @@ def test_终审回退模式_只重写不合格章节():
     task = rewriter.tasks[0]
     assert task["mode"] == "revise"
     assert task["current_text"] == "ch2 旧正文"
-    assert task["prev_chapter_summary"] == "ch1 旧摘要"
+    # prev_chapter_summary 改注入 summary_chain 段（带章节标题前缀）。
+    assert task["prev_chapter_summary"] == "【第一章】ch1 旧摘要"
     directives = task["revision_directives"]
     assert len(directives) == 1
     assert directives[0]["type"] == "rewrite_only"

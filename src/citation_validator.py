@@ -13,9 +13,11 @@
 import json
 import os
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Any, Protocol
 
-from citation_reconciler import MARKER_PATTERN, reconcile
+from assembler_config import AssemblerConfig
+from citation_reconciler import reconcile
+from context_assembler import assemble
 from env_config import read_positive_int
 from llm_client import LLM, LLMFactory
 from llm_json import JSON_ONLY_RULE, invoke_json
@@ -23,7 +25,6 @@ from state import (
     ChapterDraft,
     CitationIssue,
     CitationReport,
-    Material,
     WorkflowStatus,
     WritingAgentState,
 )
@@ -66,12 +67,15 @@ def _self_check_issues(drafts: list[ChapterDraft]) -> list[CitationIssue]:
 
 
 def _semantic_check_chapter(
-    llm: LLM, draft: ChapterDraft, cited: list[Material]
+    llm: LLM,
+    chapter_id: str,
+    chapter_text: str,
+    cited: list[dict[str, Any]],
 ) -> list[CitationIssue]:
-    """步骤 3：单章一次 LLM 调用，核查每处角标位置与素材观点是否对应。"""
-    cited_payload = [
-        {"id": material.id, "excerpt": material.excerpt} for material in cited
-    ]
+    """步骤 3：单章一次 LLM 调用，核查每处角标位置与素材观点是否对应。
+
+    正文与被引素材（含 id/excerpt）均取自装配后的 chapter_text、cited_materials 段。
+    """
     system = (
         "你是引文语义核查器。章节正文中形如 [素材id] 的角标是引文标注，"
         "逐条判断每个被引素材的摘录与其角标所在位置的观点是否对应。"
@@ -80,12 +84,12 @@ def _semantic_check_chapter(
         + JSON_ONLY_RULE
     )
     user = (
-        f"章节 {draft.chapter_id} 正文：\n{draft.text}\n\n"
-        f"该章被引素材：\n{json.dumps(cited_payload, ensure_ascii=False, indent=2)}"
+        f"章节 {chapter_id} 正文：\n{chapter_text}\n\n"
+        f"该章被引素材：\n{json.dumps(cited, ensure_ascii=False, indent=2)}"
     )
     payload = invoke_json(llm, "引文语义核查", system, user, list)
 
-    cited_ids = {material.id for material in cited}
+    cited_ids = {material["id"] for material in cited}
     issues: list[CitationIssue] = []
     for item in payload:
         if not isinstance(item, dict):
@@ -101,7 +105,7 @@ def _semantic_check_chapter(
         issues.append(
             CitationIssue(
                 kind="semantic_mismatch",
-                chapter_id=draft.chapter_id,
+                chapter_id=chapter_id,
                 material_id=material_id,
                 detail=f"素材 {material_id} 的标注位置与观点不对应：{reason_text}",
             )
@@ -120,11 +124,14 @@ def _ordered_failed_chapter_ids(
 
 
 def make_citation_validator_node(
-    llm_factory: LLMFactory, max_retries: int | None = None
+    llm_factory: LLMFactory,
+    max_retries: int | None = None,
+    assembler_config: AssemblerConfig | None = None,
 ) -> CitationValidatorNode:
     """构造 citation_validator 节点函数。
 
-    max_retries 为 None 时在节点执行时读取环境变量 CITATION_MAX_RETRIES（缺省 2）。
+    max_retries 为 None 时在节点执行时读取环境变量 CITATION_MAX_RETRIES（缺省 2）；
+    assembler_config 为 None 时在节点执行时读取环境变量装配配置。
     """
 
     def node(state: WritingAgentState) -> WritingAgentState:
@@ -144,17 +151,23 @@ def make_citation_validator_node(
         issues = reconcile(drafts, library, scope)
         # 步骤 2：单章自检合并。
         issues += _self_check_issues(scoped_drafts)
-        # 步骤 3：逐章 LLM 语义核查；该章没有任何角标素材时跳过调用。
-        materials_by_id = {material.id: material for material in library}
+        # 步骤 3：逐章 LLM 语义核查；正文与被引素材经装配段取得，
+        # 该章没有任何角标素材时跳过调用。
         for draft in scoped_drafts:
-            cited = [
-                materials_by_id[marker]
-                for marker in dict.fromkeys(MARKER_PATTERN.findall(draft.text))
-                if marker in materials_by_id
-            ]
+            context = assemble(
+                state,
+                "citation_validator",
+                config=assembler_config,
+                chapter_id=draft.chapter_id,
+            )
+            cited: list[dict[str, Any]] = json.loads(
+                context.text("cited_materials", "[]")
+            )
             if not cited:
                 continue
-            issues += _semantic_check_chapter(llm, draft, cited)
+            issues += _semantic_check_chapter(
+                llm, draft.chapter_id, context.text("chapter_text"), cited
+            )
 
         llm_config = {"unit": "citation_validator", **llm.metadata}
         if not issues:

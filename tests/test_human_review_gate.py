@@ -14,6 +14,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
+from assembler_config import AssemblerConfig
+from context_assembler import assemble
 from human_review_gate import make_human_review_gate_node
 from llm_client import FakeLLM
 from state import (
@@ -30,9 +32,9 @@ OUTLINE = [
 ]
 
 
-def _build_graph(fake: FakeLLM) -> Any:
+def _build_graph(fake: FakeLLM, assembler_config: AssemblerConfig | None = None) -> Any:
     """构建只含 human_review_gate 节点的最小图，用内存存档器编译。"""
-    node = make_human_review_gate_node(lambda unit: fake)
+    node = make_human_review_gate_node(lambda unit: fake, assembler_config)
     builder = StateGraph(WritingAgentState)
     builder.add_node("human_review_gate", node)
     builder.add_edge(START, "human_review_gate")
@@ -246,3 +248,53 @@ def test_恢复值契约不符_携错误说明重新中断(decision: Any) -> Non
     # 错误后仍可定稿收束，永不卡死。
     result = graph.invoke(Command(resume={"action": "finalize"}), config)
     assert result["status"] == WorkflowStatus.FINISHED
+
+
+def test_滑出保留窗口的早期轮次digest已持久化到State() -> None:
+    """多轮迭代后，最近 K 轮之外的早期轮次在写回 State 时已落库一句话摘要。"""
+    config = AssemblerConfig(
+        summary_chain_max_chars=800,
+        summary_digest_max_chars=60,
+        ledger_keep_rounds=2,
+        ledger_digest_max_chars=60,
+    )
+    fake = FakeLLM(
+        [
+            json.dumps(
+                [
+                    {
+                        "target_chapter_id": "ch1",
+                        "type": "rewrite_only",
+                        "instruction": "收紧语气",
+                    }
+                ],
+                ensure_ascii=False,
+            )
+        ]
+    )
+    graph = _build_graph(fake, config)
+    thread = _config()
+    existing = [
+        RevisionRound(round_no=1, raw_feedback="第一轮原文。多余部分。"),
+        RevisionRound(round_no=2, raw_feedback="第二轮原文。", digest="第二轮既有摘要"),
+        RevisionRound(round_no=3, raw_feedback="第三轮原文。"),
+    ]
+    graph.invoke(_state(revision_ledger=existing, iteration_round=3), thread)
+    result = graph.invoke(
+        Command(resume={"action": "revise", "feedback": "第四轮意见"}), thread
+    )
+
+    ledger = result["revision_ledger"]
+    assert [entry.round_no for entry in ledger] == [1, 2, 3, 4]
+    # 保留窗口 K=2：第 1、2 轮滑出窗口，digest 落库；既有 digest 不被覆盖。
+    assert ledger[0].digest == "第一轮原文。"
+    assert ledger[1].digest == "第二轮既有摘要"
+    assert ledger[2].digest is None
+    assert ledger[3].digest is None
+
+    # extract_revision_ledger 优先使用已持久化的 digest 装配摘要行。
+    context = assemble(
+        WritingAgentState(revision_ledger=ledger), "human_review_gate", config=config
+    )
+    assert "第1轮（摘要）：第一轮原文。" in context.text("revision_ledger")
+    assert "第2轮（摘要）：第二轮既有摘要" in context.text("revision_ledger")

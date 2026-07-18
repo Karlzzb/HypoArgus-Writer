@@ -10,6 +10,8 @@
 import asyncio
 from typing import Protocol
 
+from assembler_config import AssemblerConfig
+from context_assembler import assemble_with
 from state import ChapterSpec, Material, WorkflowStatus, WritingAgentState
 from subagents import HypothesisPayload, SearchTask, Subagent
 
@@ -35,22 +37,36 @@ def _flatten_hypotheses(chapter: ChapterSpec) -> list[HypothesisPayload]:
 
 def make_reference_orchestrator_node(
     search_agent: Subagent,
+    assembler_config: AssemblerConfig | None = None,
 ) -> ReferenceOrchestratorNode:
-    """构造 reference_orchestrator 节点函数。"""
+    """构造 reference_orchestrator 节点函数。
+
+    assembler_config 为 None 时在节点执行时读取环境变量装配配置。
+    """
 
     async def _run_all_chapters(state: WritingAgentState) -> list[Material]:
-        """串行逐章调用 search_agent，边调用边累积引文库。"""
+        """串行逐章调用 search_agent，边调用边累积引文库。
+
+        任务包的 existing_materials_digest 一律经 citation_digest 段装配得到：
+        以已累积素材现场覆盖 state 的引文库再装配，逐章反映引文库增长。
+        """
         genre = state.get("genre", "")
         library: list[Material] = []
         for chapter in state.get("outline", []):
             hypotheses = _flatten_hypotheses(chapter)
             if not hypotheses:
                 continue
+            context = assemble_with(
+                state,
+                {"citation_library": list(library)},
+                "search_agent",
+                config=assembler_config,
+            )
             task = SearchTask(
                 chapter_id=chapter.id,
                 hypotheses=hypotheses,
                 genre=genre,
-                existing_materials_digest=f"引文库已有素材 {len(library)} 条",
+                existing_materials_digest=context.text("citation_digest"),
             )
             result = await search_agent.run(dict(task))
             for material in result["materials"]:

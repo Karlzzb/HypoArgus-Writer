@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from assembler_config import AssemblerConfig
+from context_assembler import assemble
 from framework_config import FrameworkLimits, load_framework_limits
 from llm_client import LLM, LLMFactory
 from llm_json import JSON_ONLY_RULE
@@ -315,19 +317,25 @@ def make_framework_orchestrator_node(
     llm_factory: LLMFactory,
     templates_dir: Path | None = None,
     limits: FrameworkLimits | None = None,
+    assembler_config: AssemblerConfig | None = None,
 ) -> FrameworkOrchestratorNode:
     """构造 framework_orchestrator 节点函数。
 
     templates_dir 为 None 时使用仓库根 docs_templates/（以本文件位置定位）；
-    limits 为 None 时在节点执行时读取环境变量配置。
+    limits 为 None 时在节点执行时读取环境变量配置；
+    assembler_config 为 None 时在节点执行时读取环境变量装配配置。
     """
     resolved_templates_dir = templates_dir or _default_templates_dir()
 
     def node(state: WritingAgentState) -> WritingAgentState:
         effective_limits = limits if limits is not None else load_framework_limits()
         llm = llm_factory("framework_orchestrator")
-        user_intent = state.get("user_intent", "")
-        user_identity = state.get("user_identity", "")
+        # 用户意图与身份两段一律经装配入口取得，不再直接读 state。
+        context = assemble(
+            state, "framework_orchestrator", config=assembler_config
+        )
+        user_intent = context.text("user_intent")
+        user_identity = context.text("user_identity")
 
         genre, template_file = _identify_genre(
             llm, resolved_templates_dir, user_intent, user_identity

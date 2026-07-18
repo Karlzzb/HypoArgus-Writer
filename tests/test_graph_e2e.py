@@ -234,6 +234,97 @@ def test_混合修订意见_两类分支同轮执行且仅指定章节被修改(
     assert result["status"] == WorkflowStatus.FINISHED
 
 
+def _parse_call_user_contents(fake: FakeLLM) -> list[str]:
+    """从 FakeLLM 调用记录中筛出 human_review_gate 意见解析调用的 user 文本。"""
+    contents: list[str] = []
+    for messages in fake.calls:
+        roles = {message["role"]: message["content"] for message in messages}
+        if "修订意见解析器" in roles.get("system", ""):
+            contents.append(roles.get("user", ""))
+    return contents
+
+
+def test_多轮迭代human_review_gate不失忆_第2轮解析prompt含第1轮意见():
+    # 两轮修订：第 1 轮意见含独特可检索串；第 2 轮解析时历史台账须带上第 1 轮意见。
+    round1_directive = json.dumps(
+        [{"target_chapter_id": "ch1", "type": "rewrite_only", "instruction": "精炼引言"}],
+        ensure_ascii=False,
+    )
+    round2_directive = json.dumps(
+        [{"target_chapter_id": "ch2", "type": "rewrite_only", "instruction": "收束结论"}],
+        ensure_ascii=False,
+    )
+    # 首轮 2 条语义核查 + 第1轮解析 + 增量核查1条 + 第2轮解析 + 增量核查1条。
+    graph, fake, config = _build(
+        [
+            *FIRST_PASS_RESPONSES,
+            round1_directive,
+            SEMANTIC_PASS,
+            round2_directive,
+            SEMANTIC_PASS,
+        ]
+    )
+    round1_feedback = "第一轮独特意见：引言部分务必更精炼有力"
+    graph.invoke(initial_state("意图", "身份", "trace-memory"), config)
+    graph.invoke(
+        Command(resume={"action": "revise", "feedback": round1_feedback}), config
+    )
+    graph.invoke(
+        Command(resume={"action": "revise", "feedback": "第二轮意见：结论再收束"}), config
+    )
+
+    parse_users = _parse_call_user_contents(fake)
+    assert len(parse_users) == 2
+    # 第 1 轮解析时台账尚无历史轮次，第 2 轮解析 prompt 必含第 1 轮意见（不失忆）。
+    assert round1_feedback not in parse_users[0].split("本轮用户修改意见")[0]
+    assert round1_feedback in parse_users[1]
+
+    graph.invoke(Command(resume=FINALIZE), config)
+
+
+def test_rewriter任务包prev_chapter_summary含多个前章摘要链():
+    # 三章首写：末章任务包的 prev_chapter_summary 须含前两章摘要（摘要链验收）。
+    from subagents import SubagentAdapter, stub_rewriter_loop_run
+
+    framework_3ch = [
+        '{"genre": "行业评论", "template_file": null}',
+        '[{"title": "第一章", "subsections": []}, '
+        '{"title": "第二章", "subsections": []}, '
+        '{"title": "第三章", "subsections": []}]',
+        '[{"text": "论点一"}]',
+        '[{"text": "假说一", "refute_condition": "出现公开反例即证伪", '
+        '"angle": "假设", "evidence_retrievable": true}]',
+        '[{"text": "论点二"}]',
+        '[{"text": "假说二", "refute_condition": "出现公开反例即证伪", '
+        '"angle": "预言", "evidence_retrievable": true}]',
+        '[{"text": "论点三"}]',
+        '[{"text": "假说三", "refute_condition": "出现公开反例即证伪", '
+        '"angle": "边界条件", "evidence_retrievable": true}]',
+    ]
+
+    tasks: list[dict] = []
+
+    async def _recording_run(task: dict) -> dict:
+        tasks.append(task)
+        return await stub_rewriter_loop_run(task)
+
+    recorder = SubagentAdapter("rewriter_loop", _recording_run)
+    graph, _, config = _build(
+        [*framework_3ch, SEMANTIC_PASS, SEMANTIC_PASS, SEMANTIC_PASS],
+        rewriter_loop=recorder,
+    )
+    graph.invoke(initial_state("意图", "身份", "trace-chain"), config)
+
+    draft_tasks = [task for task in tasks if task["mode"] == "draft"]
+    assert [task["chapter_spec"]["id"] for task in draft_tasks] == ["ch1", "ch2", "ch3"]
+    # 首章为空；末章摘要链含前两章各自摘要（带章节标题前缀、逐行拼接）。
+    assert draft_tasks[0]["prev_chapter_summary"] == ""
+    chain = draft_tasks[2]["prev_chapter_summary"]
+    assert "【第一章】" in chain and "【第二章】" in chain
+    # 末章摘要链是逐行拼接的多章摘要，而非仅紧邻一章。
+    assert chain.count("\n") >= 1
+
+
 def test_终审失败只重写不合格章节_超限携警告进入中断点():
     semantic_fail = json.dumps(
         [{"material_id": "m-ch1-p1-h1", "aligned": False, "reason": "观点不对应"}],
