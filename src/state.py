@@ -23,6 +23,15 @@ class WorkflowStatus(str, enum.Enum):
     ERROR_FAILED = "ERROR_FAILED"
 
 
+def status_text(value: object, default: str = "") -> str:
+    """把状态机值序列化为纯字符串：枚举取 value，None 取 default，其余 str()。"""
+    if value is None:
+        return default
+    if isinstance(value, WorkflowStatus):
+        return value.value
+    return str(value)
+
+
 class Hypothesis(BaseModel):
     """假说：从论点派生的可证伪、可检索验证的具体命题。"""
 

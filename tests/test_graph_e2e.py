@@ -26,31 +26,18 @@ from graph import MAIN_NODES, build_graph, postgres_checkpointer
 from llm_client import FakeLLM
 from llm_config import RUNTIME_UNITS
 from state import WorkflowStatus, initial_state
+from tests.llm_response_plans import (
+    FIRST_PASS_RESPONSES,
+    FRAMEWORK_RESPONSES,
+    SEMANTIC_PASS,
+)
 
 TEST_PG_DSN = os.environ.get(
     "HYPOARGUS_TEST_PG_DSN",
     "postgresql://postgres:postgres@127.0.0.1:15432/postgres",
 )
 
-# framework_orchestrator 的最小应答序列：
-# 品类识别（自由结构）→ 大纲（2 章）→ 逐章论点 → 逐论点假说。
-FRAMEWORK_RESPONSES = [
-    '{"genre": "行业评论", "template_file": null}',
-    '[{"title": "第一章", "subsections": []}, {"title": "第二章", "subsections": []}]',
-    '[{"text": "论点一"}]',
-    '[{"text": "假说一", "refute_condition": "出现公开反例即证伪", '
-    '"angle": "假设", "evidence_retrievable": true}]',
-    '[{"text": "论点二"}]',
-    '[{"text": "假说二", "refute_condition": "出现公开反例即证伪", '
-    '"angle": "预言", "evidence_retrievable": true}]',
-]
 FRAMEWORK_LLM_CALLS = len(FRAMEWORK_RESPONSES)
-
-# 语义核查全部对应（无问题）的应答：每个受审章节一条。
-SEMANTIC_PASS = "[]"
-
-# 首轮全量核查通过所需的完整应答序列（2 章各一条语义核查）。
-FIRST_PASS_RESPONSES = [*FRAMEWORK_RESPONSES, SEMANTIC_PASS, SEMANTIC_PASS]
 
 FINALIZE = {"action": "finalize"}
 
