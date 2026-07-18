@@ -1,5 +1,9 @@
 """端到端空跑测试：注入假 LLM 跑整张图，验证状态机流转与 Postgres 持久化。
 
+framework_orchestrator 已是真实业务逻辑（多次 LLM 调用），为其预置最小 JSON
+应答序列（自由结构、1 章 1 论点 1 假说）；其余 4 个占位节点各调用一次 LLM，
+吃假 LLM 应答耗尽后的缺省文本。
+
 Postgres 连接串取环境变量 HYPOARGUS_TEST_PG_DSN，缺省指向本地测试库；
 库不可达时跳过持久化用例（其余用例仍必须全绿）。
 """
@@ -29,6 +33,26 @@ EXPECTED_STATUS_ORDER = [
     WorkflowStatus.AWAIT_USER_REVIEW,
 ]
 
+# framework_orchestrator 的最小应答序列：品类识别（自由结构）→ 大纲 → 论点 → 假说。
+FRAMEWORK_RESPONSES = [
+    '{"genre": "行业评论", "template_file": null}',
+    '[{"title": "第一章", "subsections": []}]',
+    '[{"text": "论点"}]',
+    '[{"text": "假说", "refute_condition": "出现公开反例即证伪", '
+    '"angle": "假设", "evidence_retrievable": true}]',
+]
+FRAMEWORK_LLM_CALLS = len(FRAMEWORK_RESPONSES)
+
+
+def _assert_framework_state(values: dict) -> None:
+    """framework 节点之后 State 必须含合规的大纲、论点与假说。"""
+    assert values["template_id"] is None
+    assert values["genre"] == "行业评论"
+    outline = values["outline"]
+    assert [chapter.id for chapter in outline] == ["ch1"]
+    assert outline[0].points[0].id == "ch1-p1"
+    assert outline[0].points[0].hypotheses[0].id == "ch1-p1-h1"
+
 
 def _pg_reachable(dsn: str) -> bool:
     parsed = urlparse(dsn)
@@ -48,7 +72,7 @@ def test_主节点清单与运行单元清单一致():
 
 
 def test_假LLM端到端空跑_状态机按序流转():
-    fake = FakeLLM()
+    fake = FakeLLM(list(FRAMEWORK_RESPONSES))
     graph = build_graph(llm_factory=lambda unit: fake)
 
     observed: list[WorkflowStatus] = []
@@ -59,12 +83,14 @@ def test_假LLM端到端空跑_状态机按序流转():
         for node_name, node_update in update.items():
             assert node_update["status"] == NODE_STATUS[node_name]
             observed.append(node_update["status"])
+            if node_name == MAIN_NODES[0]:
+                _assert_framework_state(node_update)
 
     assert observed == EXPECTED_STATUS_ORDER
 
 
-def test_每个主节点各经统一封装层调用一次LLM():
-    fake = FakeLLM()
+def test_LLM调用次数_framework多次其余节点各一次():
+    fake = FakeLLM(list(FRAMEWORK_RESPONSES))
     units_seen: list[str] = []
 
     def factory(unit: str) -> FakeLLM:
@@ -75,7 +101,9 @@ def test_每个主节点各经统一封装层调用一次LLM():
     result = graph.invoke(initial_state("意图", "身份", "trace-llm"))
 
     assert units_seen == list(MAIN_NODES)
-    assert len(fake.calls) == len(MAIN_NODES)
+    # framework 按应答序列多次调用，其余 4 个占位节点各调用一次。
+    assert len(fake.calls) == FRAMEWORK_LLM_CALLS + len(MAIN_NODES) - 1
+    _assert_framework_state(result)
     # 终态记录的是最后一个节点（human_review_gate）的配置元数据，且不含密钥。
     assert result["current_node_llm_config"]["unit"] == "human_review_gate"
     assert "api_key" not in result["current_node_llm_config"]
@@ -91,8 +119,11 @@ def test_状态经Postgres存档器持久化():
     config = {"configurable": {"thread_id": thread_id}}
 
     with postgres_checkpointer(TEST_PG_DSN) as saver:
+        # 每个节点各取一个新假 LLM：framework 消费完整应答序列，
+        # 占位节点单次调用只消费首条应答（内容不影响其行为）。
         graph = build_graph(
-            llm_factory=lambda unit: FakeLLM(), checkpointer=saver
+            llm_factory=lambda unit: FakeLLM(list(FRAMEWORK_RESPONSES)),
+            checkpointer=saver,
         )
         result = graph.invoke(
             initial_state("持久化测试", "专业撰稿人", "trace-pg"), config

@@ -1,7 +1,8 @@
-"""LangGraph 刚性流水线图骨架：5 个主节点的占位实现与接线。
+"""LangGraph 刚性流水线图骨架：5 个主节点的接线。
 
-本期各主节点为占位实现：仅通过统一封装层做一次 LLM 调用、推进状态机枚举、
-记录当前节点生效的 LLM 配置元数据；真实业务逻辑在后续 issue 填充。
+framework_orchestrator 已接入真实业务逻辑（论证框架生成）；
+其余 4 个主节点仍为占位实现：仅通过统一封装层做一次 LLM 调用、推进状态机枚举、
+记录当前节点生效的 LLM 配置元数据，真实业务逻辑在后续 issue 填充。
 
 流水线：framework_orchestrator → reference_orchestrator → writing_orchestrator
 → citation_validator → human_review_gate。
@@ -18,6 +19,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from framework_orchestrator import make_framework_orchestrator_node
 from llm_client import LLMFactory, default_llm_factory
 from state import WorkflowStatus, WritingAgentState
 
@@ -60,7 +62,8 @@ def build_graph(
 ) -> CompiledStateGraph:
     """构建并编译刚性流水线；llm_factory 是注入确定性假 LLM 的测试接缝。"""
     builder = StateGraph(WritingAgentState)
-    for unit in MAIN_NODES:
+    builder.add_node(MAIN_NODES[0], make_framework_orchestrator_node(llm_factory))
+    for unit in MAIN_NODES[1:]:
         builder.add_node(unit, _make_placeholder_node(unit, llm_factory))
 
     builder.add_edge(START, MAIN_NODES[0])

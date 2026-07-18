@@ -47,6 +47,8 @@ class ChapterSpec(BaseModel):
 
     id: str
     title: str
+    subsections: list[str] = []
+    """三级标题实例化文本；保留模板的一二级骨架层级。"""
     points: list[ArgumentPoint] = []
 
 
