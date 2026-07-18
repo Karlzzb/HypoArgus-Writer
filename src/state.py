@@ -65,6 +65,13 @@ class Material(BaseModel):
     verdict: Literal["pass", "fail"]
 
 
+class SelfCheck(BaseModel):
+    """rewriter_loop 的单章自检结果：双层校验的第一层。"""
+
+    citations_ok: bool = True
+    issues: list[str] = []
+
+
 class ChapterDraft(BaseModel):
     """单章正文与摘要：摘要供下一章串行承接，构成摘要链。"""
 
@@ -72,6 +79,7 @@ class ChapterDraft(BaseModel):
     text: str
     """章节正文，含原位角标（素材 id）。"""
     summary: str
+    self_check: SelfCheck = SelfCheck()
 
 
 class RevisionDirective(BaseModel):

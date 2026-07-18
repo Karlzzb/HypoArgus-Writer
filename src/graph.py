@@ -1,8 +1,10 @@
 """LangGraph 刚性流水线图骨架：5 个主节点的接线。
 
-framework_orchestrator 已接入真实业务逻辑（论证框架生成）；
-其余 4 个主节点仍为占位实现：仅通过统一封装层做一次 LLM 调用、推进状态机枚举、
-记录当前节点生效的 LLM 配置元数据，真实业务逻辑在后续 issue 填充。
+framework_orchestrator（论证框架生成）、reference_orchestrator（检索调度）、
+writing_orchestrator（串行写作总控）已接入真实业务逻辑，后两者经黑盒适配层
+调用子智能体（本期打桩）；citation_validator 与 human_review_gate 仍为占位实现：
+仅通过统一封装层做一次 LLM 调用、推进状态机枚举、记录当前节点生效的
+LLM 配置元数据，真实业务逻辑在后续 issue 填充。
 
 流水线：framework_orchestrator → reference_orchestrator → writing_orchestrator
 → citation_validator → human_review_gate。
@@ -21,7 +23,10 @@ from langgraph.graph.state import CompiledStateGraph
 
 from framework_orchestrator import make_framework_orchestrator_node
 from llm_client import LLMFactory, default_llm_factory
+from reference_orchestrator import make_reference_orchestrator_node
 from state import WorkflowStatus, WritingAgentState
+from subagents import Subagent, make_stub_rewriter_loop, make_stub_search_agent
+from writing_orchestrator import make_writing_orchestrator_node
 
 PG_DSN_ENV = "HYPOARGUS_PG_DSN"
 
@@ -59,11 +64,25 @@ def _make_placeholder_node(unit: str, llm_factory: LLMFactory):
 def build_graph(
     llm_factory: LLMFactory = default_llm_factory,
     checkpointer: BaseCheckpointSaver | None = None,
+    search_agent: Subagent | None = None,
+    rewriter_loop: Subagent | None = None,
 ) -> CompiledStateGraph:
-    """构建并编译刚性流水线；llm_factory 是注入确定性假 LLM 的测试接缝。"""
+    """构建并编译刚性流水线。
+
+    llm_factory 是注入确定性假 LLM 的测试接缝；
+    search_agent / rewriter_loop 未注入时使用本期打桩适配器。
+    """
     builder = StateGraph(WritingAgentState)
     builder.add_node(MAIN_NODES[0], make_framework_orchestrator_node(llm_factory))
-    for unit in MAIN_NODES[1:]:
+    builder.add_node(
+        MAIN_NODES[1],
+        make_reference_orchestrator_node(search_agent or make_stub_search_agent()),
+    )
+    builder.add_node(
+        MAIN_NODES[2],
+        make_writing_orchestrator_node(rewriter_loop or make_stub_rewriter_loop()),
+    )
+    for unit in MAIN_NODES[3:]:
         builder.add_node(unit, _make_placeholder_node(unit, llm_factory))
 
     builder.add_edge(START, MAIN_NODES[0])
