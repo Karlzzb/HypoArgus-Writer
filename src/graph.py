@@ -22,6 +22,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+import observability
 from assembler_config import AssemblerConfig
 from citation_validator import make_citation_validator_node
 from framework_orchestrator import make_framework_orchestrator_node
@@ -81,37 +82,36 @@ def build_graph(
     citation_max_retries 未注入时按环境变量 CITATION_MAX_RETRIES（缺省 2）；
     assembler_config 未注入时各节点执行期按环境变量读取装配配置。
     人工中断点依赖存档器恢复，生产运行必须传入 checkpointer。
+    Langfuse 启用时节点函数与子智能体适配层被包进运行单元 span。
     """
-    effective_search_agent = search_agent or make_stub_search_agent()
-    effective_rewriter_loop = rewriter_loop or make_stub_rewriter_loop()
+    effective_search_agent = observability.wrap_subagent(
+        search_agent or make_stub_search_agent()
+    )
+    effective_rewriter_loop = observability.wrap_subagent(
+        rewriter_loop or make_stub_rewriter_loop()
+    )
 
-    builder = StateGraph(WritingAgentState)
-    builder.add_node(
-        "framework_orchestrator",
-        make_framework_orchestrator_node(
+    node_functions = {
+        "framework_orchestrator": make_framework_orchestrator_node(
             llm_factory, assembler_config=assembler_config
         ),
-    )
-    builder.add_node(
-        "reference_orchestrator",
-        make_reference_orchestrator_node(effective_search_agent, assembler_config),
-    )
-    builder.add_node(
-        "writing_orchestrator",
-        make_writing_orchestrator_node(
+        "reference_orchestrator": make_reference_orchestrator_node(
+            effective_search_agent, assembler_config
+        ),
+        "writing_orchestrator": make_writing_orchestrator_node(
             effective_rewriter_loop, effective_search_agent, assembler_config
         ),
-    )
-    builder.add_node(
-        "citation_validator",
-        make_citation_validator_node(
+        "citation_validator": make_citation_validator_node(
             llm_factory, citation_max_retries, assembler_config
         ),
-    )
-    builder.add_node(
-        "human_review_gate",
-        make_human_review_gate_node(llm_factory, assembler_config),
-    )
+        "human_review_gate": make_human_review_gate_node(
+            llm_factory, assembler_config
+        ),
+    }
+
+    builder = StateGraph(WritingAgentState)
+    for name, node_fn in node_functions.items():
+        builder.add_node(name, observability.traced_node(name, node_fn))
 
     builder.add_edge(START, "framework_orchestrator")
     builder.add_edge("framework_orchestrator", "reference_orchestrator")

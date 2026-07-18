@@ -32,6 +32,8 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
+import observability
+from bibliography import render_article
 from event_broker import EventHub
 from event_envelope import new_envelope
 from graph import MAIN_NODES
@@ -303,6 +305,37 @@ class TaskManager:
             "running": entry.running,
         }
 
+    def render_bibliography(self, thread_id: str, format: str) -> dict[str, Any]:
+        """按书目格式渲染最终交付：重编号正文 + 书目列表。
+
+        引文内容存于 State 引文库，格式在交付时指定，两者完全解耦；
+        尚无章节正文（框架或检索阶段）时不可渲染。
+        """
+        self._ensure_entry(thread_id)
+        values = self._graph.get_state(self._thread_config(thread_id)).values
+        drafts = values.get("chapter_drafts", [])
+        if not drafts:
+            raise TaskConflict(f"任务 {thread_id} 尚无章节正文，不能渲染书目")
+        rendered = render_article(
+            drafts, values.get("citation_library", []), format
+        )
+        return {
+            "thread_id": thread_id,
+            "format": rendered.format,
+            "chapters": [
+                {"chapter_id": chapter.chapter_id, "text": chapter.text}
+                for chapter in rendered.chapters
+            ],
+            "bibliography": [
+                {
+                    "index": entry.index,
+                    "material_id": entry.material_id,
+                    "text": entry.text,
+                }
+                for entry in rendered.entries
+            ],
+        }
+
     def business_hub(self, thread_id: str) -> EventHub:
         """取任务的业务事件枢纽（SSE 订阅入口）。"""
         return self._require_entry(thread_id).hub
@@ -416,15 +449,24 @@ class TaskManager:
         graph_input: Any,
         config: RunnableConfig,
     ) -> None:
-        """工作线程内同步驱动图运行：翻译事件信封并发布业务状态事件。"""
+        """工作线程内同步驱动图运行：翻译事件信封并发布业务状态事件。
+
+        整次驱动包在 Langfuse 根 span 内（未启用时直通）：节点与子智能体
+        span、LLM generation 都在本线程内产生，天然挂到这条 trace 之下。
+        """
         self._hook_dispatcher.set_hook(emitter.make_subagent_hook())
         try:
-            for mode, chunk in self._graph.stream(
-                graph_input, config, stream_mode=["updates", "debug"]
+            with observability.run_span(
+                thread_id=entry.thread_id,
+                session_id=entry.session_id,
+                trace_id=entry.trace_id,
             ):
-                emitter.handle(mode, chunk)
-                if mode == "updates":
-                    self._publish_status_updates(entry, chunk)
+                for mode, chunk in self._graph.stream(
+                    graph_input, config, stream_mode=["updates", "debug"]
+                ):
+                    emitter.handle(mode, chunk)
+                    if mode == "updates":
+                        self._publish_status_updates(entry, chunk)
         finally:
             self._hook_dispatcher.clear_hook()
 

@@ -37,3 +37,28 @@ DIRECTIVE_RESPONSE = json.dumps(
     ensure_ascii=False,
 )
 REVISE_ROUND_RESPONSES = [DIRECTIVE_RESPONSE, SEMANTIC_PASS]
+
+# 一次意见混合两类分支且落在不同章节：ch1 纯改写、ch2 补充佐证。
+MIXED_DIRECTIVE_RESPONSE = json.dumps(
+    [
+        {
+            "target_chapter_id": "ch1",
+            "type": "rewrite_only",
+            "instruction": "引言口吻更克制",
+        },
+        {
+            "target_chapter_id": "ch2",
+            "type": "evidence_augmented",
+            "instruction": "补充行业数据佐证",
+        },
+    ],
+    ensure_ascii=False,
+)
+
+# 端到端主干完整编排：首轮全量核查 + 混合意见解析 + 增量核查重审两章各一条。
+TRUNK_RESPONSES = [
+    *FIRST_PASS_RESPONSES,
+    MIXED_DIRECTIVE_RESPONSE,
+    SEMANTIC_PASS,
+    SEMANTIC_PASS,
+]

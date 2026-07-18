@@ -2,6 +2,7 @@
 
 所有模型统一按 OpenAI 兼容接口封装；本层是测试注入确定性假 LLM 的接缝：
 节点代码只依赖 LLM 协议与 LLMFactory，不直接触碰 openai SDK。
+Langfuse 启用时客户端换成官方插桩版，每次调用自动上报 generation。
 """
 
 from collections.abc import Callable
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from openai import OpenAI
 
+import observability
 from llm_config import LLMConfig, load_llm_config
 
 Message = dict[str, str]
@@ -40,10 +42,11 @@ class OpenAICompatibleLLM:
 
     def invoke(self, messages: list[Message]) -> str:
         if self._client is None:
-            # 惰性创建，避免仅构造对象（如配置校验场景）就建立网络客户端。
-            from openai import OpenAI
+            # 惰性创建，避免仅构造对象（如配置校验场景）就建立网络客户端；
+            # 客户端类按 Langfuse 启用与否选择（插桩版是原版的子类，接口一致）。
+            client_class = observability.openai_client_class()
 
-            self._client = OpenAI(
+            self._client = client_class(
                 base_url=self._config.base_url, api_key=self._config.api_key
             )
         response = self._client.chat.completions.create(

@@ -211,6 +211,16 @@ def create_app(
         _manager().rollback(thread_id, request.checkpoint_id)
         return {"thread_id": thread_id, "checkpoint_id": request.checkpoint_id}
 
+    @app.get("/tasks/{thread_id}/bibliography")
+    async def render_bibliography(
+        thread_id: str, format: str = Query(default="gbt7714")
+    ) -> dict[str, Any]:
+        """按书目格式渲染最终交付（重编号正文 + 书目），格式与内容解耦。"""
+        try:
+            return _manager().render_bibliography(thread_id, format)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
     @app.get("/tasks/{thread_id}/checkpoints")
     async def list_checkpoints(thread_id: str) -> list[dict[str, Any]]:
         """检查点元数据清单（仅元数据，不含正文）。"""

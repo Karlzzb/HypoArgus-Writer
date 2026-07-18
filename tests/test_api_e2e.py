@@ -15,23 +15,26 @@ FakeLLM 响应计划复用 test_graph_e2e 的编排方式；
 import asyncio
 import json
 import threading
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
 import httpx
+import pytest
 import uvicorn
 from fastapi import FastAPI
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app import create_app
-from graph import build_graph
+from graph import build_graph, postgres_checkpointer
 from llm_client import FakeLLM
 from state import initial_state
 from tests.llm_response_plans import (
     FIRST_PASS_RESPONSES,
     REVISE_ROUND_RESPONSES,
     SEMANTIC_PASS,
+    TRUNK_RESPONSES,
 )
+from tests.test_graph_e2e import TEST_PG_DSN, _pg_reachable
 
 TIMEOUT = 30.0
 
@@ -650,3 +653,127 @@ def test_错误路径_未知任务404与非中断点提交409与非法入参422(
             assert response.status_code == 409
 
     asyncio.run(main())
+
+
+# ---- 端到端主干验收（issue #7）：混合两类修订分支 + 引文门禁 + 书目渲染 ----
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "memory",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(
+                not _pg_reachable(TEST_PG_DSN), reason="测试 Postgres 不可达"
+            ),
+        ),
+    ],
+)
+def test_端到端主干_混合修订两类分支经引文门禁定稿并渲染书目(backend: str):
+    async def main(saver: Any) -> None:
+        app = _make_app(TRUNK_RESPONSES, checkpointer=saver)
+        async with _client(app) as client:
+            thread_id, _ = await _create_task(client, f"sess-trunk-{backend}")
+
+            # 并发消费两条 SSE：业务流到审阅请求，可视化流到 gate_blocked。
+            (business, _), (graph_frames, _) = await asyncio.gather(
+                _read_sse(
+                    client,
+                    f"/tasks/{thread_id}/stream",
+                    _stop_on_review_count(1),
+                ),
+                _read_sse(
+                    client,
+                    f"/graph_events?thread_id={thread_id}",
+                    _stop_on_types({"gate_blocked"}),
+                ),
+            )
+            # 主干链路完整：可视化流可见五个主节点与两个子智能体的活动。
+            units = {f["data"]["unit"] for f in graph_frames}
+            assert {
+                "framework_orchestrator",
+                "reference_orchestrator",
+                "writing_orchestrator",
+                "citation_validator",
+                "human_review_gate",
+                "search_agent",
+                "rewriter_loop",
+            } <= units
+            # 引文门禁首轮通过：审阅请求不带未决引文警告。
+            review = next(f for f in business if f["event"] == "review_required")
+            assert review["data"]["data"]["citation_warnings"] == []
+
+            # 提交混合两类分支的修订意见，迭代一轮后回到中断点。
+            response = await client.post(
+                f"/tasks/{thread_id}/review",
+                json={
+                    "action": "revise",
+                    "feedback": "引言口吻克制些；第二章补充行业数据",
+                },
+            )
+            assert response.status_code == 202
+            business, _ = await _read_sse(
+                client, f"/tasks/{thread_id}/stream", _stop_on_review_count(2)
+            )
+            second = [f for f in business if f["event"] == "review_required"][1]
+            assert second["data"]["data"]["iteration_round"] == 1
+            assert second["data"]["data"]["citation_warnings"] == []
+
+            # 定稿：两类修订都已落实到对应章节。
+            response = await client.post(
+                f"/tasks/{thread_id}/review", json={"action": "finalize"}
+            )
+            assert response.status_code == 202
+            business, ended = await _read_sse(
+                client, f"/tasks/{thread_id}/stream", lambda frames: False
+            )
+            assert ended
+            finalized = next(f for f in business if f["event"] == "finalized")
+            chapters = {
+                c["chapter_id"]: c["text"]
+                for c in finalized["data"]["data"]["chapters"]
+            }
+            assert "引言口吻更克制" in chapters["ch1"]
+            assert "补充行业数据佐证" in chapters["ch2"]
+
+            # 书目渲染：正文角标重编号为数字序号，条目按格式产出。
+            response = await client.get(f"/tasks/{thread_id}/bibliography")
+            assert response.status_code == 200
+            rendered = response.json()
+            assert rendered["format"] == "gbt7714"
+            texts = " ".join(c["text"] for c in rendered["chapters"])
+            assert "[1]" in texts
+            assert "[m-" not in texts, "正文仍残留素材 ID 角标，未完成重编号"
+            assert rendered["bibliography"]
+            assert rendered["bibliography"][0]["text"].startswith("[1] ")
+
+            # 格式与内容解耦：同一引文库按另一格式渲染出不同条目文本。
+            apa = (
+                await client.get(
+                    f"/tasks/{thread_id}/bibliography?format=apa"
+                )
+            ).json()
+            assert [e["material_id"] for e in apa["bibliography"]] == [
+                e["material_id"] for e in rendered["bibliography"]
+            ]
+            assert apa["bibliography"][0]["text"] != rendered["bibliography"][0]["text"]
+
+            # 非法格式 400；未知任务 404。
+            response = await client.get(
+                f"/tasks/{thread_id}/bibliography?format=chicago"
+            )
+            assert response.status_code == 400
+            response = await client.get("/tasks/nope/bibliography")
+            assert response.status_code == 404
+
+            status = (await client.get(f"/tasks/{thread_id}")).json()
+            assert status["status"] == "FINISHED"
+
+    with ExitStack() as stack:
+        saver = (
+            stack.enter_context(postgres_checkpointer(TEST_PG_DSN))
+            if backend == "postgres"
+            else InMemorySaver()
+        )
+        asyncio.run(main(saver))
