@@ -56,6 +56,7 @@ python scripts/demo.py --real
 
 # 每次运行落盘一份构建过程档案（事件流、逐章产物、state 演进、最终全文与书目）
 # 缺省写入 var/demo_archive/<thread_id>.md，可用 --archive PATH 覆盖
+# 运行到定稿时另落一份成品文档（仅重编号正文 + 参考文献），同名加 -article 后缀
 python scripts/demo.py --archive out.md
 
 # 性能调测：LLM_DEBUG_TIMING=1 打印逐次 LLM 调用计时；

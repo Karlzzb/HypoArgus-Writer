@@ -15,6 +15,8 @@ Postgres 存档器（HYPOARGUS_PG_DSN）+ Langfuse 上报（LANGFUSE_* 已配置
 完整事件流、每章中间产物、逐章 state 演进快照、修订与终审往返、
 最终整篇文章与统一重编号书目。缺省写入 var/demo_archive/<thread_id>.md，
 可用 --archive PATH 覆盖。
+运行到定稿时另落一份成品文档（仅重编号正文 + 参考文献，不含过程记录），
+路径为过程档案同名加 -article 后缀。
 
 用法：
     python scripts/demo.py                    # 空转演示
@@ -118,6 +120,32 @@ class ArchiveRecorder:
         path = self.resolve_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self._render(), encoding="utf-8")
+        return path
+
+    def write_article(self) -> Path | None:
+        """成品文档单独落盘：仅重编号正文与书目，不含过程记录。
+
+        未到定稿（无章节可渲染）时不落盘，返回 None。
+        路径为过程档案同目录同名加 -article 后缀。
+        """
+        rendered = self.bibliographies.get("gbt7714") or {}
+        chapters = rendered.get("chapters") or (self.finalized or {}).get(
+            "chapters", []
+        )
+        if not chapters:
+            return None
+        archive_path = self.resolve_path()
+        path = archive_path.with_name(f"{archive_path.stem}-article.md")
+        lines: list[str] = []
+        for chapter in chapters:
+            lines += [chapter["text"], ""]
+        bibliography = rendered.get("bibliography") or []
+        if bibliography:
+            lines += ["## 参考文献", ""]
+            lines += [f"{entry['text']}" for entry in bibliography]
+            lines.append("")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), encoding="utf-8")
         return path
 
     # ---- 渲染 ----
@@ -644,6 +672,9 @@ async def _main(real: bool, archive_path: str | None) -> None:
         recorder.finished_at = time.time()
         archived = recorder.write()
         print(f"\n构建过程档案已落盘：{archived}")
+        article = recorder.write_article()
+        if article is not None:
+            print(f"成品文档已落盘：{article}")
     print("\n演示完成。")
 
 
