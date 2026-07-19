@@ -41,7 +41,11 @@ class OpenAICompatibleLLM:
     @property
     def metadata(self) -> dict[str, str]:
         """供状态与事件上报的配置元数据，不含密钥。"""
-        return {"model": self._config.model, "base_url": self._config.base_url}
+        return {
+            "model": self._config.model,
+            "base_url": self._config.base_url,
+            "enable_thinking": "1" if self._config.enable_thinking else "0",
+        }
 
     def invoke(self, messages: list[Message]) -> str:
         with self._client_lock:
@@ -56,6 +60,10 @@ class OpenAICompatibleLLM:
         response = self._client.chat.completions.create(
             model=self._config.model,
             messages=messages,  # type: ignore[arg-type]
+            # 思考开关显式下发（OpenAI 兼容扩展参数，qwen 系等服务商支持；
+            # 不认识该参数的服务商会忽略）。缺省关闭：结构化 JSON 任务上
+            # 思考 token 可达可见输出的数倍，延迟放大 5 倍以上。
+            extra_body={"enable_thinking": self._config.enable_thinking},
         )
         content = response.choices[0].message.content
         return content or ""

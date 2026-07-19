@@ -69,3 +69,36 @@ def test_base_url剥掉尾部斜杠():
 def test_非法运行单元名报错():
     with pytest.raises(ValueError, match="未知运行单元"):
         load_llm_config("not_a_unit", GLOBAL_ENV)
+
+
+def test_思考开关缺省关闭():
+    config = load_llm_config("framework_orchestrator", GLOBAL_ENV)
+    assert config.enable_thinking is False
+
+
+def test_思考开关前缀变量优先生效():
+    env = GLOBAL_ENV | {
+        "LLM_ENABLE_THINKING": "0",
+        "WRITING_ORCHESTRATOR_LLM_ENABLE_THINKING": "1",
+    }
+    assert load_llm_config("writing_orchestrator", env).enable_thinking is True
+    assert load_llm_config("search_agent", env).enable_thinking is False
+
+
+def test_思考开关回落全局变量():
+    env = GLOBAL_ENV | {"LLM_ENABLE_THINKING": "1"}
+    assert load_llm_config("search_agent", env).enable_thinking is True
+
+
+def test_思考开关空字符串视为未配置():
+    env = GLOBAL_ENV | {
+        "LLM_ENABLE_THINKING": "1",
+        "SEARCH_AGENT_LLM_ENABLE_THINKING": "  ",
+    }
+    assert load_llm_config("search_agent", env).enable_thinking is True
+
+
+def test_思考开关非法取值报错并指明变量名():
+    env = GLOBAL_ENV | {"SEARCH_AGENT_LLM_ENABLE_THINKING": "yes"}
+    with pytest.raises(ValueError, match="SEARCH_AGENT_LLM_ENABLE_THINKING"):
+        load_llm_config("search_agent", env)
