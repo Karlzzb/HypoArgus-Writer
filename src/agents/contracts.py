@@ -120,7 +120,22 @@ class SubagentAdapter:
         self._event_hook = event_hook
 
     async def run(self, task: dict[str, Any]) -> dict[str, Any]:
-        self._event_hook(SUBAGENT_START, {"unit": self.unit})
+        context = self._event_context(task)
+        self._event_hook(SUBAGENT_START, {"unit": self.unit, **context})
         result = await self._run_impl(task)
-        self._event_hook(SUBAGENT_END, {"unit": self.unit})
+        self._event_hook(SUBAGENT_END, {"unit": self.unit, **context})
         return result
+
+    @staticmethod
+    def _event_context(task: dict[str, Any]) -> dict[str, Any]:
+        """从任务包提取事件业务上下文：章节 id 与调用模式，取不到则为 None。
+
+        检索任务包的章节 id 在顶层，改写任务包的在章节骨架内；
+        调用模式仅改写任务包携带（draft/revise），检索任务包为 None。
+        """
+        chapter_id = task.get("chapter_id")
+        if chapter_id is None:
+            chapter_spec = task.get("chapter_spec")
+            if isinstance(chapter_spec, dict):
+                chapter_id = chapter_spec.get("id")
+        return {"chapter_id": chapter_id, "mode": task.get("mode")}

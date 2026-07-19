@@ -16,6 +16,7 @@ from service.event_envelope import EventEnvelope
 from graph import build_graph
 from service.graph_event_stream import GraphRunEmitter
 from llm.llm_client import FakeLLM
+from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
 from domain.state import WorkflowStatus, initial_state
 from agents.rewriter_loop import make_stub_rewriter_loop
 from agents.search_agent import make_stub_search_agent
@@ -279,6 +280,61 @@ def test_合成流块_seed后快照沿用检查点计数():
     assert branch.payload["to"] == "END"
 
 
+def test_合成流块_子智能体progress事件挂最近一次subagent_start():
+    events: list[EventEnvelope] = []
+    emitter = _make_emitter(events)
+    emitter.emit_root(type="progress", unit="graph", payload={})
+    # 先有当前主节点，subagent_start 才能挂到该节点的 node_start 之下。
+    emitter.handle("debug", _task_chunk("writing_orchestrator", 3))
+    hook = emitter.make_subagent_hook()
+
+    start_payload = {"unit": "rewriter_loop", "chapter_id": "ch-1", "mode": "draft"}
+    progress_payload = {
+        "unit": "rewriter_loop",
+        "chapter_id": "ch-1",
+        "mode": "draft",
+        "step": "llm_call_start",
+    }
+    hook(SUBAGENT_START, start_payload)
+    hook(SUBAGENT_PROGRESS, progress_payload)
+    hook(SUBAGENT_END, {"unit": "rewriter_loop", "chapter_id": "ch-1", "mode": "draft"})
+
+    start = next(event for event in events if event.type == "subagent_start")
+    end = next(event for event in events if event.type == "subagent_end")
+    # progress 信封复用既有 progress 类型，按 unit 区分子智能体来源。
+    progress = next(
+        event
+        for event in events
+        if event.type == "progress" and event.unit == "rewriter_loop"
+    )
+    assert progress.parent_id == start.event_id
+    # 载荷原样透传（含 step 等子智能体自带上下文），且是独立副本。
+    assert progress.payload == progress_payload
+    assert progress.payload is not progress_payload
+    # 启停配对链路不受 progress 分支影响。
+    assert end.parent_id == start.event_id
+    node_start = next(event for event in events if event.type == "node_start")
+    assert start.parent_id == node_start.event_id
+
+
+def test_合成流块_子智能体progress无前置start时挂根事件():
+    events: list[EventEnvelope] = []
+    emitter = _make_emitter(events)
+    root_id = emitter.emit_root(type="progress", unit="graph", payload={})
+    hook = emitter.make_subagent_hook()
+
+    hook(
+        SUBAGENT_PROGRESS,
+        {"unit": "rewriter_loop", "chapter_id": None, "mode": None, "step": "warmup"},
+    )
+
+    progress = events[-1]
+    assert progress.type == "progress"
+    assert progress.unit == "rewriter_loop"
+    assert progress.parent_id == root_id
+    assert progress.payload["step"] == "warmup"
+
+
 def _run_first_pass(events: list[EventEnvelope]):
     """真图首跑到人工中断点：返回（graph, config, emitter）。"""
     fake = FakeLLM(list(FIRST_PASS_RESPONSES))
@@ -396,6 +452,14 @@ def test_真图集成_子智能体事件成对且挂当前节点():
     start_ids = {event.event_id for event in starts}
     for event in ends:
         assert event.parent_id in start_ids
+
+    # 启停载荷携带任务上下文：章节 id 可判定时必带，mode 仅改写任务有。
+    for event in starts + ends:
+        assert event.payload["chapter_id"] in {"ch1", "ch2"}
+        if event.unit == "rewriter_loop":
+            assert event.payload["mode"] == "draft"
+        else:
+            assert event.payload["mode"] is None
 
 
 def test_真图集成_恢复定稿第二个emitter产出END分支():

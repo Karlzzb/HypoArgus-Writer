@@ -15,7 +15,7 @@
 父子链路规则：根事件（服务层经 emit_root 发出）→ node_start →
 节点派生事件（node_end / state_snapshot / llm_config_used / branch_taken /
 loop_iteration / progress / gate_blocked / node_error / subagent_start）→
-subagent_end 挂在对应 subagent_start 之下。
+subagent_end 与子智能体内部进度（progress）挂在对应 subagent_start 之下。
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Any
 from service.event_envelope import EventEnvelope, new_envelope
 from domain.units import MAIN_NODES
 from domain.state import WorkflowStatus, status_text
-from domain.events import SUBAGENT_END, SUBAGENT_START, EventHook
+from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START, EventHook
 
 # 条件路由节点 → 按状态机值判定的路由去向与理由。
 _BRANCH_RULES: dict[str, dict[WorkflowStatus, tuple[str, str]]] = {
@@ -119,7 +119,9 @@ class GraphRunEmitter:
         )
 
     def make_subagent_hook(self) -> EventHook:
-        """返回可注入子智能体适配层的事件钩子：把 subagent_start/subagent_end 转成信封发布。"""
+        """返回可注入子智能体适配层的事件钩子：把 subagent_start/subagent_end 转成信封发布，
+        子智能体内部进度（SUBAGENT_PROGRESS）转成信封既有的 progress 类型、父指向当前 subagent_start。
+        """
 
         def hook(event_type: str, payload: dict[str, Any]) -> None:
             unit = str(payload.get("unit", "subagent"))
@@ -131,12 +133,19 @@ class GraphRunEmitter:
                     parent_id=self._parent_for(self._current_node or ""),
                 )
                 self._subagent_start_ids[unit] = envelope.event_id
+            elif event_type == SUBAGENT_PROGRESS:
+                self._emit(
+                    type="progress",
+                    unit=unit,
+                    payload=dict(payload),
+                    parent_id=self._subagent_start_ids.get(unit, self._root_id),
+                )
             elif event_type == SUBAGENT_END:
                 self._emit(
                     type="subagent_end",
                     unit=unit,
                     payload=dict(payload),
-                    parent_id=self._subagent_start_ids.get(unit, self._root_id),
+                    parent_id=self._subagent_start_ids.pop(unit, self._root_id),
                 )
 
         return hook
