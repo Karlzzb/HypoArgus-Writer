@@ -209,10 +209,10 @@ Java 端                                  HypoArgus-Writer
   "thread_id": "9f3c...",
   "format": "gbt7714",
   "chapters": [
-    { "chapter_id": "ch-1", "text": "正文……角标已重编号为 [1] 形式" }
+    { "chapter_id": "ch1", "text": "正文……角标已重编号为 [1] 形式" }
   ],
   "bibliography": [
-    { "index": 1, "material_id": "m-h1", "text": "[1] 来源[EB/OL]. url." }
+    { "index": 1, "material_id": "m-ch1-p1-h1", "text": "[1] 来源[EB/OL]. url." }
   ]
 }
 ```

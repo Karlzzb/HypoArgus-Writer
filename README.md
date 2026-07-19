@@ -5,7 +5,7 @@
 
 ## 架构总览
 
-由 5 个 LangGraph 主节点组成刚性流水线，构成迭代闭环：
+由 5 个 LangGraph 主节点组成固定顺序流水线，构成迭代闭环：
 
 ```
 framework_orchestrator → reference_orchestrator → writing_orchestrator → citation_validator → human_review_gate
@@ -13,15 +13,15 @@ framework_orchestrator → reference_orchestrator → writing_orchestrator → c
 ```
 
 - 论证体系三层结构：章节 1—n 论点，论点 1—N 假说；假说可证伪、可检索验证，是检索任务的直接驱动源。
-- 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入；rewriter_loop 已为真实现（写作、风格校验、自审、修一次），search_agent 仍为打桩。
+- 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入；rewriter_loop 已为真实实现（写作、风格校验、自审、修一次），search_agent 仍为打桩。
 - 引用采用「正文角标 + 结构化引文库」分离方案；最终交付可按任意书目格式渲染，格式与内容解耦。
 - human_review_gate 是全流程唯一安全汇点：任何机器环节失败若干次后都塌缩到这里，系统永不卡死。
-- 全流程状态经 LangGraph 官方 Postgres 存档器持久化，支持断点续跑与历史版本回滚。
+- 全流程状态经 LangGraph 官方 Postgres 检查点保存器（checkpointer）持久化，支持断点续跑与历史版本回滚。
 
 ## 环境准备
 
 - Python 3.11（既有 conda 环境），依赖以 `pyproject.toml` 为唯一事实源，uv 作为安装器。
-- Postgres（生产运行必需，存档器建表自动完成）。
+- Postgres（生产运行必需，检查点保存器建表自动完成）。
 - 自建 Langfuse（可选，配置后自动上报全链路 LLM 调用）。
 
 ```bash
@@ -51,7 +51,7 @@ cp .env.example .env          # 按下文约定填写
 
 | 变量 | 说明 |
 | --- | --- |
-| `HYPOARGUS_PG_DSN` | Postgres 存档器连接串，生产必填 |
+| `HYPOARGUS_PG_DSN` | Postgres 检查点保存器连接串，生产必填 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 两者齐备即启用 Langfuse 上报，缺省不启用 |
 | `LANGFUSE_BASE_URL` | 自建 Langfuse 接口地址 |
 | `LANGFUSE_TIMEOUT` | 大 generation 事件导出超时（秒） |
@@ -91,8 +91,8 @@ uvicorn --app-dir src --factory service.app:create_app --host 0.0.0.0 --port 800
 ## 演示脚本
 
 ```bash
-python scripts/demo.py           # 空转演示：假 LLM + 内存存档器，离线可复现
-python scripts/demo.py --real    # 生产同构演示：真实 LLM + Postgres + Langfuse（需 .env 就绪）
+python scripts/demo.py           # 离线演示：假 LLM + 内存检查点保存器，离线可复现
+python scripts/demo.py --real    # 与生产一致的演示：真实 LLM + Postgres + Langfuse（需 .env 就绪）
 ```
 
 脚本驱动一遍完整闭环：创建任务 → 双 SSE 流 → 混合两类分支（纯改写 + 补充佐证）的修订迭代 → 引文门禁 → 定稿 → 两种书目格式渲染。
@@ -109,7 +109,7 @@ python scripts/demo.py --real    # 生产同构演示：真实 LLM + Postgres + 
 
 ## ulmen 压缩 serde 实验结论：不启用
 
-PRD 约定 ulmen-langgraph 压缩仅作为实验性可选 serde 接入存档器，且「关闭开关后历史存档必须仍可读取，做不到则不启用」。
+PRD 约定 ulmen-langgraph 压缩仅作为实验性可选序列化器接入检查点保存器，且「关闭开关后历史检查点必须仍可读取，做不到则不启用」。
 实验结论（`tests/e2e/test_ulmen_serde_experiment.py` 固化为回归证据）：
 
 - 正向兼容成立：开启压缩后可以读取此前未压缩写入的历史存档。
@@ -126,12 +126,16 @@ python -m mypy src      # 类型检查
 ```
 
 - 只测外部行为，不测实现细节；最高测试接缝为 FastAPI HTTP 层的端到端主干测试。
-- 第二道接缝是统一 LLM 调用封装层，注入确定性假 LLM 使主节点与真实现写作链路行为可复现；打桩子智能体仍可显式注入作测试替身。
+- 第二道接缝是统一 LLM 调用封装层，注入确定性假 LLM 使主节点与真实写作链路行为可复现；打桩子智能体仍可显式注入作测试替身。
 - 依赖 Postgres 的测试按 `HYPOARGUS_TEST_PG_DSN`（缺省 `postgresql://postgres:postgres@127.0.0.1:15432/postgres`）连接，不可达时自动跳过。
 
 ## 文档
 
 - `PRD.md` — 唯一有效产品需求文档。
 - `CONTEXT.md` — 领域词汇表，全部文档与注释使用平实中文术语。
+- `docs/development.md` — 开发者入门与日常开发指引。
+- `docs/api.md` — 对外 REST + SSE 接口契约（含 Java 端对接示例）。
+- `docs/deployment.md` — 面向运维人员的简明部署文档（含国内网络下的安装渠道建议）。
+- `docs/adr/` — 架构决策记录。
 - `docs_templates/` — 本地模板库（品类识别与大纲骨架来源）。
 - `docs/agents/` — 智能体协作约定（issue 跟踪、triage 标签、领域文档布局）。
