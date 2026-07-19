@@ -655,7 +655,7 @@ async def _main(real: bool, archive_path: str | None) -> None:
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     try:
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(600):
             while not server.started:
                 await asyncio.sleep(0.02)
         port = server.servers[0].sockets[0].getsockname()[1]
@@ -664,12 +664,12 @@ async def _main(real: bool, archive_path: str | None) -> None:
             base_url=f"http://127.0.0.1:{port}",
             # SSE 长连接不设 read timeout：业务阶段可能长时间无事件，
             # 靠 _consume_business 的整体超时兜底。
-            timeout=httpx.Timeout(10.0, read=None),
+            timeout=httpx.Timeout(100.0, read=None),
         ) as client:
             await _drive(client, recorder)
     finally:
         server.should_exit = True
-        thread.join(timeout=10)
+        thread.join(timeout=100)
         # 无论成败都落盘：异常中止时档案保留已采集部分，便于事后排查。
         recorder.finished_at = time.time()
         archived = recorder.write()
