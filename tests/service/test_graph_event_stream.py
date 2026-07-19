@@ -406,23 +406,27 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
     _, _, _ = _run_first_pass(events)
 
     root_id = events[0].event_id
-    node_starts = {
-        event.unit: event for event in events if event.type == "node_start"
-    }
-    assert set(node_starts) == {
+    # writing_orchestrator 自环：每章一个超步，node_start 每单元可能多条。
+    node_start_ids: dict[str, set[str]] = {}
+    for event in events:
+        if event.type == "node_start":
+            node_start_ids.setdefault(event.unit, set()).add(event.event_id)
+    assert set(node_start_ids) == {
         "framework_orchestrator",
         "reference_orchestrator",
         "writing_orchestrator",
         "citation_validator",
         "human_review_gate",
     }
-    for event in node_starts.values():
-        assert event.parent_id == root_id
+    # 2 章自环：writing_orchestrator 恰好进入两次。
+    assert len(node_start_ids["writing_orchestrator"]) == 2
     for event in events:
+        if event.type == "node_start":
+            assert event.parent_id == root_id
         if event.type in {"node_end", "state_snapshot", "llm_config_used", "progress"}:
             if event.parent_id is None:
                 continue  # 根 progress 事件本身。
-            assert event.parent_id == node_starts[event.unit].event_id
+            assert event.parent_id in node_start_ids[event.unit]
 
     branch = next(event for event in events if event.type == "branch_taken")
     assert branch.unit == "citation_validator"
@@ -433,22 +437,28 @@ def test_真图集成_子智能体事件成对且挂当前节点():
     events: list[EventEnvelope] = []
     _run_first_pass(events)
 
-    node_starts = {
-        event.unit: event for event in events if event.type == "node_start"
-    }
+    node_start_ids: dict[str, list[str]] = {}
+    for event in events:
+        if event.type == "node_start":
+            node_start_ids.setdefault(event.unit, []).append(event.event_id)
     starts = [event for event in events if event.type == "subagent_start"]
     ends = [event for event in events if event.type == "subagent_end"]
-    # 2 章：search_agent 每章一次、rewriter_loop 每章一次，成对出现。
+    # 2 章：search_agent 每章一次、rewriter_loop 每章（每超步）一次，成对出现。
     assert len(starts) == len(ends) == 4
     assert {event.unit for event in starts} == {"search_agent", "rewriter_loop"}
 
-    # subagent_start 挂当前主节点的 node_start。
-    expected_parent = {
-        "search_agent": node_starts["reference_orchestrator"].event_id,
-        "rewriter_loop": node_starts["writing_orchestrator"].event_id,
+    # subagent_start 挂当前主节点的某条 node_start；
+    # 写作自环下每章的 rewriter_loop 挂各自超步的 node_start。
+    expected_parents = {
+        "search_agent": set(node_start_ids["reference_orchestrator"]),
+        "rewriter_loop": set(node_start_ids["writing_orchestrator"]),
     }
     for event in starts:
-        assert event.parent_id == expected_parent[event.unit]
+        assert event.parent_id in expected_parents[event.unit]
+    rewriter_parents = [
+        event.parent_id for event in starts if event.unit == "rewriter_loop"
+    ]
+    assert rewriter_parents == node_start_ids["writing_orchestrator"]
 
     # subagent_end 挂对应的 subagent_start：按单元名配对顺序逐一对应。
     start_ids = {event.event_id for event in starts}

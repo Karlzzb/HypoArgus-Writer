@@ -3,6 +3,8 @@
 主流程：framework_orchestrator（论证框架生成）→ reference_orchestrator（检索调度）
 → writing_orchestrator（串行写作总控）→ citation_validator（引文终审门禁）
 → human_review_gate（人工中断点与迭代路由）。
+writing_orchestrator 是图内自环：每个超步只处理一章、章级产物落 checkpoint，
+条件边判定还有未完成章即回到自身写下一章，全部完成才前进终审。
 
 闭环路由：
 - citation_validator 终审失败且未超重试上限时，定向回退 writing_orchestrator
@@ -34,7 +36,10 @@ from nodes.citation_validator import ValidatorConfig, make_citation_validator_no
 from nodes.framework_orchestrator import make_framework_orchestrator_node
 from nodes.human_review_gate import make_human_review_gate_node
 from nodes.reference_orchestrator import make_reference_orchestrator_node
-from nodes.writing_orchestrator import make_writing_orchestrator_node
+from nodes.writing_orchestrator import (
+    make_writing_orchestrator_node,
+    next_writing_step,
+)
 
 PG_DSN_ENV = "HYPOARGUS_PG_DSN"
 
@@ -50,6 +55,17 @@ NODE_STATUS: dict[str, WorkflowStatus] = {
 }
 
 assert tuple(NODE_STATUS) == MAIN_NODES, "NODE_STATUS 必须与运行单元名册的主节点一致"
+
+
+def route_after_writing_orchestrator(state: WritingAgentState) -> str:
+    """写作自环路由：还有未完成章回到自身（下一超步写下一章），全部完成前进终审。
+
+    判定与节点单章选取共用 next_writing_step 单一事实源（纯数据推导，
+    不依赖 status），保证两处逻辑严格一致、不死循环不漏章。
+    """
+    if next_writing_step(state) is not None:
+        return "writing_orchestrator"
+    return "citation_validator"
 
 
 def route_after_citation_validator(state: WritingAgentState) -> str:
@@ -123,7 +139,11 @@ def build_graph(
     builder.add_edge(START, "framework_orchestrator")
     builder.add_edge("framework_orchestrator", "reference_orchestrator")
     builder.add_edge("reference_orchestrator", "writing_orchestrator")
-    builder.add_edge("writing_orchestrator", "citation_validator")
+    builder.add_conditional_edges(
+        "writing_orchestrator",
+        route_after_writing_orchestrator,
+        ["writing_orchestrator", "citation_validator"],
+    )
     builder.add_conditional_edges(
         "citation_validator",
         route_after_citation_validator,

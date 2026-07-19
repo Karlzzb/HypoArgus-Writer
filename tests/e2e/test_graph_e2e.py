@@ -132,9 +132,12 @@ def test_假LLM端到端_状态机按序流转至人工中断点():
                 _assert_framework_state(node_update)
 
     # 终审通过即进入等待人工状态，图停在中断点。
+    # writing_orchestrator 图内自环：每超步只写一章，2 章即逐章进入两次，
+    # 章级产物按超步落 checkpoint 正是本切片的验收点。
     assert observed == [
         ("framework_orchestrator", WorkflowStatus.FRAMEWORK_BUILDING),
         ("reference_orchestrator", WorkflowStatus.REFERENCE_FETCHING),
+        ("writing_orchestrator", WorkflowStatus.ARTICLE_WRITING),
         ("writing_orchestrator", WorkflowStatus.ARTICLE_WRITING),
         ("citation_validator", WorkflowStatus.AWAIT_USER_REVIEW),
     ]
@@ -270,6 +273,104 @@ def test_多轮迭代human_review_gate不失忆_第2轮解析prompt含第1轮意
     assert round1_feedback in parse_users[1]
 
     graph.invoke(Command(resume=FINALIZE), config)
+
+
+def test_写作自环中断恢复_已完成章节零重复调用且产物与不中断路径等价():
+    """章级 checkpoint 验收（ADR-0001 约束 1 与 4，打桩驱动的中断恢复骨架）。
+
+    故障注入：首章写完、其 checkpoint 落盘后停止驱动，模拟进程死于两章之间；
+    同 thread_id 二次驱动恢复。断言：已完成章节零重复调用（恢复进程的
+    rewriter 只收到未完成章的任务包）、子智能体事件成对且带业务上下文、
+    最终产物与不中断路径完全等价。
+    """
+    from agents.contracts import SubagentAdapter
+    from agents.rewriter_loop import stub_rewriter_loop_run
+    from domain.events import SUBAGENT_END, SUBAGENT_START
+
+    def _recording_rewriter(
+        tasks: list[dict], events: list[tuple[str, dict]]
+    ) -> SubagentAdapter:
+        async def _run(task: dict) -> dict:
+            tasks.append(task)
+            return await stub_rewriter_loop_run(task)
+
+        def _hook(event_type: str, payload: dict) -> None:
+            events.append((event_type, payload))
+
+        return SubagentAdapter("rewriter_loop", _run, event_hook=_hook)
+
+    saver = InMemorySaver()
+    thread_id = f"e2e-crash-{uuid.uuid4()}"
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+
+    # 第一个「进程」：驱动到首章草稿的 checkpoint 落盘后立即停止迭代。
+    tasks_before: list[dict] = []
+    events_before: list[tuple[str, dict]] = []
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
+    graph = build_graph(
+        llm_factory=lambda unit: fake,
+        checkpointer=saver,
+        rewriter_loop=_recording_rewriter(tasks_before, events_before),
+    )
+    for mode, chunk in graph.stream(
+        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-crash"),
+        config,
+        stream_mode=["updates", "debug"],
+    ):
+        if (
+            mode == "debug"
+            and isinstance(chunk, dict)
+            and chunk.get("type") == "checkpoint"
+            and len(chunk["payload"]["values"].get("chapter_drafts", [])) == 1
+        ):
+            break
+    # 死亡现场：首章已入档，待执行节点仍是 writing_orchestrator（写第二章）。
+    assert [task["chapter_spec"]["id"] for task in tasks_before] == ["ch1"]
+    snapshot = graph.get_state(config)
+    assert snapshot.next == ("writing_orchestrator",)
+    assert [d.chapter_id for d in snapshot.values["chapter_drafts"]] == ["ch1"]
+
+    # 第二个「进程」：同 thread_id 恢复，只需剩余阶段应答（2 章语义核查）。
+    tasks_after: list[dict] = []
+    events_after: list[tuple[str, dict]] = []
+    fake2 = FakeLLM([SEMANTIC_PASS, SEMANTIC_PASS])
+    graph2 = build_graph(
+        llm_factory=lambda unit: fake2,
+        checkpointer=saver,
+        rewriter_loop=_recording_rewriter(tasks_after, events_after),
+    )
+    resumed = graph2.invoke(None, config)
+
+    # 已完成章节零重复调用：恢复进程的 rewriter 只写了第二章。
+    assert [task["chapter_spec"]["id"] for task in tasks_after] == ["ch2"]
+    # 事件成对且带业务上下文：两个进程各自 start/end 配对、章节 id 与模式正确
+    # （ADR-0001 约束 4 的事件断言；父子链挂接在发射器测试中覆盖）。
+    assert [
+        (etype, payload["chapter_id"], payload["mode"])
+        for etype, payload in events_before
+    ] == [(SUBAGENT_START, "ch1", "draft"), (SUBAGENT_END, "ch1", "draft")]
+    assert [
+        (etype, payload["chapter_id"], payload["mode"])
+        for etype, payload in events_after
+    ] == [(SUBAGENT_START, "ch2", "draft"), (SUBAGENT_END, "ch2", "draft")]
+    assert resumed["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+    _assert_full_draft(resumed)
+
+    # 与不中断路径的产物完全等价（打桩确定性保证可逐字段比对）。
+    baseline_graph, _, baseline_config = _build(FIRST_PASS_RESPONSES)
+    baseline = baseline_graph.invoke(
+        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-crash-base"),
+        baseline_config,
+    )
+    assert resumed["chapter_drafts"] == baseline["chapter_drafts"]
+    assert resumed["citation_library"] == baseline["citation_library"]
+    assert resumed["citation_report"] == baseline["citation_report"]
+
+    # 恢复后仍可定稿收束。
+    result = graph2.invoke(Command(resume=FINALIZE), config)
+    assert result["status"] == WorkflowStatus.FINISHED
 
 
 def test_rewriter任务包prev_chapter_summary含多个前章摘要链():
