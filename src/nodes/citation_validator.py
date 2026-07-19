@@ -6,13 +6,16 @@
 3. LLM 语义核查：逐章核对角标位置与素材观点是否对应。
 
 核查范围：revised_chapter_ids 非空时增量核查（只重审这些章节），为空时全量核查。
+LLM 语义核查各章互不依赖，并发执行（并发度由配置控制），问题清单按章节顺序合并。
 终审失败递增 citation_retry_count；超过上限不再回退，携带未决引文警告
 交人工裁决（回退路由在 graph.py，不在本节点）。
 """
 
+import contextvars
 import json
 import os
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -34,6 +37,10 @@ from domain.state import (
 _MAX_RETRIES_ENV = "CITATION_MAX_RETRIES"
 _MAX_RETRIES_DEFAULT = 2
 
+# 语义核查章节并发度环境变量名与缺省值。
+_MAX_CONCURRENT_ENV = "CITATION_MAX_CONCURRENT_CHAPTERS"
+_MAX_CONCURRENT_DEFAULT = 4
+
 
 @dataclass(frozen=True)
 class ValidatorConfig:
@@ -41,6 +48,9 @@ class ValidatorConfig:
 
     max_retries: int
     """终审失败重试上限：超限不再回退，携未决警告交人工。"""
+
+    max_concurrent_chapters: int = _MAX_CONCURRENT_DEFAULT
+    """语义核查的章节并发度：各章核查互不依赖，并发发起 LLM 调用。"""
 
 
 class CitationValidatorNode(Protocol):
@@ -54,7 +64,10 @@ def load_validator_config(env: Mapping[str, str] | None = None) -> ValidatorConf
     if env is None:
         env = os.environ
     return ValidatorConfig(
-        max_retries=read_positive_int(env, _MAX_RETRIES_ENV, _MAX_RETRIES_DEFAULT)
+        max_retries=read_positive_int(env, _MAX_RETRIES_ENV, _MAX_RETRIES_DEFAULT),
+        max_concurrent_chapters=read_positive_int(
+            env, _MAX_CONCURRENT_ENV, _MAX_CONCURRENT_DEFAULT
+        ),
     )
 
 
@@ -162,8 +175,10 @@ def make_citation_validator_node(
         # 步骤 2：单章自检合并。
         issues += _self_check_issues(scoped_drafts)
         # 步骤 3：逐章 LLM 语义核查；正文与被引素材经装配段取得，
-        # 该章没有任何角标素材时跳过调用。
-        for draft in scoped_drafts:
+        # 该章没有任何角标素材时跳过调用。各章核查互不依赖，并发执行，
+        # 问题清单按 scoped_drafts 顺序合并保持确定性。
+        def check_chapter(draft: ChapterDraft) -> list[CitationIssue]:
+            """单章语义核查（供并发执行）。"""
             context = assemble(
                 state,
                 "citation_validator",
@@ -174,10 +189,26 @@ def make_citation_validator_node(
                 context.text("cited_materials", "[]")
             )
             if not cited:
-                continue
-            issues += _semantic_check_chapter(
+                return []
+            return _semantic_check_chapter(
                 llm, draft.chapter_id, context.text("chapter_text"), cited
             )
+
+        if scoped_drafts:
+            max_workers = min(
+                len(scoped_drafts), effective_config.max_concurrent_chapters
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 每个章节任务复制当前 contextvars 上下文执行，
+                # 保证 Langfuse span 父子关系跨工作线程成立。
+                futures = [
+                    executor.submit(
+                        contextvars.copy_context().run, check_chapter, draft
+                    )
+                    for draft in scoped_drafts
+                ]
+                for future in futures:
+                    issues += future.result()
 
         llm_config = {"unit": "citation_validator", **llm.metadata}
         if not issues:
