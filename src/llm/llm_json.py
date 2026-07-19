@@ -25,11 +25,15 @@ def timing_enabled() -> bool:
 
 
 def parse_json(raw: str, step: str) -> Any:
-    """剥掉围栏等噪音，从首个 JSON 起始符解析；失败抛含步骤名的 ValueError。"""
+    """剥掉围栏等噪音，从首个 JSON 起始符解析；失败抛含步骤名的 ValueError。
+
+    LLM 常在长文本字段里输出未转义的换行、制表等控制字符，
+    严格模式会整体拒收，故用 strict=False 容忍字符串值内的控制字符。
+    """
     for index, char in enumerate(raw):
         if char in "[{":
             try:
-                value, _ = json.JSONDecoder().raw_decode(raw[index:])
+                value, _ = json.JSONDecoder(strict=False).raw_decode(raw[index:])
             except json.JSONDecodeError as exc:
                 raise ValueError(
                     f"步骤「{step}」的 LLM 应答不是合法 JSON：{exc}"
