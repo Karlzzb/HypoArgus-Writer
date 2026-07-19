@@ -437,11 +437,11 @@ class ArchiveRecorder:
         for fmt, title in (("gbt7714", "统一重编号书目（gbt7714）"),
                            ("markdown", "书目（markdown）")):
             lines += [f"### {title}", ""]
-            rendered = self.bibliographies.get(fmt)
-            if rendered is None:
+            fmt_rendered = self.bibliographies.get(fmt)
+            if fmt_rendered is None:
                 lines.append("（未捕获该格式的渲染结果。）")
                 continue
-            for entry in rendered["bibliography"]:
+            for entry in fmt_rendered["bibliography"]:
                 lines.append(f"- {entry['text']}")
             lines.append("")
         return "\n".join(lines)
@@ -472,12 +472,13 @@ def _build_app(real: bool):
     from service.app import create_app
 
     if real:
-        # 引文终审重试对确定性演示意义有限，直接零重试：
-        # 失败即携未决警告交人工，省去无效重试轮次。
-        return create_app(citation_max_retries=0)
+        # rewriter_loop 已是真实现，终审失败的定向回退重写有实际效果，
+        # 重试次数走缺省配置（环境变量 CITATION_MAX_RETRIES，缺省 2）。
+        return create_app()
 
     from langgraph.checkpoint.memory import InMemorySaver
 
+    from graph import checkpoint_serializer
     from llm.llm_client import FakeLLM
     from tests.llm_response_plans import (
         FRAMEWORK_KEYED_RESPONSES,
@@ -492,7 +493,8 @@ def _build_app(real: bool):
         keyed_responses={**FRAMEWORK_KEYED_RESPONSES, **WRITER_KEYED_RESPONSES},
     )
     return create_app(
-        llm_factory=lambda unit: fake, checkpointer=InMemorySaver()
+        llm_factory=lambda unit: fake,
+        checkpointer=InMemorySaver(serde=checkpoint_serializer()),
     )
 
 

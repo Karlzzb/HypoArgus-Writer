@@ -18,7 +18,7 @@ LLM 应答解析失败直接抛 ValueError（错误处理与重试是后续 issu
 
 import contextvars
 import json
-import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,12 +94,41 @@ def _list_template_files(templates_dir: Path) -> list[str]:
     )
 
 
+# 归一化时统一为半角的括号映射（全角括号是模板文件名失配的高频原因）。
+_BRACKET_TABLE = str.maketrans({"（": "(", "）": ")", "【": "[", "】": "]"})
+
+
+def _normalize_template_name(name: str) -> str:
+    """模板文件名归一化：去 .md 扩展名、全角括号转半角、剔除所有空白。
+
+    用于容错 LLM 应答与真实文件名之间的这三类高频形态差异；
+    不做更激进的模糊匹配，语义差异仍视为失配。
+    """
+    text = name.strip().removesuffix(".md")
+    text = text.translate(_BRACKET_TABLE)
+    return re.sub(r"\s+", "", text)
+
+
+def _resolve_template_file(
+    answered: str, template_files: list[str]
+) -> str | None:
+    """把 LLM 应答的文件名解析到候选清单：先精确匹配，再归一化匹配。"""
+    if answered in template_files:
+        return answered
+    normalized_answer = _normalize_template_name(answered)
+    for candidate in template_files:
+        if _normalize_template_name(candidate) == normalized_answer:
+            return candidate
+    return None
+
+
 def _identify_genre(
     llm: LLM, templates_dir: Path, user_intent: str, user_identity: str
 ) -> tuple[str, str | None]:
     """步骤 1 品类识别：返回（品类, 模板文件名或 None）。
 
-    LLM 给出的文件名不在模板目录中时按 None（自由结构）处理，不报错。
+    LLM 给出的文件名经归一化匹配仍不在模板目录中时按 None（自由结构）
+    处理，不报错。
     """
     index_path = templates_dir / "index.md"
     index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
@@ -108,8 +137,10 @@ def _identify_genre(
         "你是文章品类识别器。根据模板索引、模板文件名列表与用户写作需求，"
         "判断文章品类并匹配最合适的模板。"
         '输出 JSON 对象：{"genre": "品类名", "template_file": "模板文件名或 null"}。'
-        "仅当需求与某模板的适用场景明确匹配时才返回该文件名；"
-        "把握不大时 template_file 返回 null 转自由结构模式，不要勉强匹配。"
+        "template_file 必须从模板文件名列表中选取，尽量按列表原文返回"
+        "（扩展名、括号全半角、空白的细微差异可被容忍）；"
+        "需求与某模板的适用场景相符即返回该文件名，"
+        "仅当确实没有合适模板时才返回 null 转自由结构模式。"
         + JSON_ONLY_RULE
     )
     user = (
@@ -121,17 +152,18 @@ def _identify_genre(
 
     genre_raw = payload.get("genre")
     genre = genre_raw.strip() if isinstance(genre_raw, str) else ""
-    template_file = payload.get("template_file")
-    if not isinstance(template_file, str) or template_file not in template_files:
-        if template_file is not None:
-            # 失配时记录 LLM 原始返回，便于定位是差 .md 还是括号/用字差异。
-            print(
-                f"[framework] 品类识别失配：LLM 返回 template_file={template_file!r}，"
-                f"候选={template_files}",
-                flush=True,
-            )
+    answered = payload.get("template_file")
+    if not isinstance(answered, str):
         return genre, None
-    return genre, template_file
+    resolved = _resolve_template_file(answered, template_files)
+    if resolved is None:
+        # 归一化后仍失配：记录 LLM 原始返回，便于定位语义层面的差异。
+        print(
+            f"[framework] 品类识别失配：LLM 返回 template_file={answered!r}，"
+            f"归一化匹配无命中，候选={template_files}",
+            flush=True,
+        )
+    return genre, resolved
 
 
 def _instantiate_template_outline(
@@ -409,24 +441,6 @@ def make_framework_orchestrator_node(
         genre, template_file = _identify_genre(
             llm, resolved_templates_dir, user_intent, user_identity
         )
-        if template_file is None and os.environ.get("DEMO_REQUIRE_TEMPLATE") == "1":
-            # 演示护栏（DEMO_REQUIRE_TEMPLATE=1 时生效）：LLM 未命中模板时，
-            # 用文件名（去扩展名）与用户意图做确定性子串匹配兜底，
-            # 避免整轮白跑；兜底也失败才报错。
-            for candidate in _list_template_files(resolved_templates_dir):
-                if candidate.removesuffix(".md") in user_intent:
-                    template_file = candidate
-                    print(
-                        f"[framework] 品类识别未命中模板（genre={genre!r}），"
-                        f"确定性兜底命中：{candidate}",
-                        flush=True,
-                    )
-                    break
-            else:
-                raise ValueError(
-                    f"品类识别未命中模板（genre={genre!r}），"
-                    "且文件名兜底匹配也失败，本次演示要求模板路径，快速失败。"
-                )
         if template_file is not None:
             skeleton = parse_template_skeleton(
                 (resolved_templates_dir / template_file).read_text(encoding="utf-8")

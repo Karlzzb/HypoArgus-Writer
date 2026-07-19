@@ -9,6 +9,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -61,7 +62,7 @@ def main() -> None:
     print(f"model={config.model} base_url={config.base_url}")
     client = OpenAI(base_url=config.base_url, api_key=config.api_key)
 
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if args.no_thinking:
         kwargs["extra_body"] = {"enable_thinking": False}
 

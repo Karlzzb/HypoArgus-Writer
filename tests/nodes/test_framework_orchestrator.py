@@ -37,8 +37,8 @@ def _hyp(text: str = "假说", angle: str = "预言", retrievable: bool = True) 
     }
 
 
-def _points_all(*points_per_chapter: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """构造全文论点单次调用的应答：按位置生成 chapter_index。"""
+def _points_all(*points_per_chapter: list[Any]) -> list[dict[str, Any]]:
+    """构造全文论点单次调用的应答：按位置生成 chapter_index（项允许混入非法形态）。"""
     return [
         {"chapter_index": index, "points": points}
         for index, points in enumerate(points_per_chapter, start=1)
@@ -364,3 +364,55 @@ def test_证据不可检索与非法角度的假说被过滤(templates_dir: Path
 def test_应答不是合法JSON时抛ValueError并指明步骤(templates_dir: Path) -> None:
     with pytest.raises(ValueError, match="品类识别"):
         _run_node(["这不是 JSON"], templates_dir)
+
+
+def test_缺省模板目录指向仓库根docs_templates且含模板文件() -> None:
+    """回归覆盖：缺省路径曾少一级 parent 指向 src/docs_templates（提交 eacb335）。
+
+    现有测试都显式传 templates_dir，缺省解析错误不会暴露，故直接断言
+    缺省目录存在、位于仓库根、且含索引文件与至少一个模板文件。
+    """
+    from nodes.framework_orchestrator import (
+        _default_templates_dir,
+        _list_template_files,
+    )
+
+    default_dir = _default_templates_dir()
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    assert default_dir == repo_root / "docs_templates"
+    assert default_dir.is_dir()
+    assert (default_dir / "index.md").is_file()
+    assert _list_template_files(default_dir), "缺省模板目录应含至少一个模板文件"
+
+
+def test_识别应答文件名差扩展名或括号空白时归一化命中(templates_dir: Path) -> None:
+    """正式健壮化（issue #14）：不再要求 LLM 逐字符答对模板文件名。"""
+    (templates_dir / "培养方案（专科）模版.md").write_text(
+        "# 标题\n\n## 一、章\n", encoding="utf-8"
+    )
+    for answered in (
+        "培养方案（专科）模版",          # 差 .md 扩展名
+        "培养方案(专科)模版.md",         # 全角括号答成半角
+        " 培养方案（专科） 模版.md ",    # 混入空白
+    ):
+        result, _ = _run_node(
+            [
+                {"genre": "培养方案", "template_file": answered},
+                [{"index": 1, "applicable": True, "title": "章", "subsections": []}],
+                _points_all([]),
+            ],
+            templates_dir,
+        )
+        assert result["template_id"] == "培养方案（专科）模版.md", answered
+
+
+def test_识别应答文件名归一化后仍无匹配时回落自由结构(templates_dir: Path) -> None:
+    result, _ = _run_node(
+        [
+            {"genre": "方案", "template_file": "完全不存在的模版.md"},
+            [{"title": "章", "subsections": []}],
+            _points_all([]),
+        ],
+        templates_dir,
+    )
+    assert result["template_id"] is None
