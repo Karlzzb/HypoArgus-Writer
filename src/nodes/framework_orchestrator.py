@@ -18,6 +18,7 @@ LLM 应答解析失败直接抛 ValueError（错误处理与重试是后续 issu
 
 import contextvars
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +123,13 @@ def _identify_genre(
     genre = genre_raw.strip() if isinstance(genre_raw, str) else ""
     template_file = payload.get("template_file")
     if not isinstance(template_file, str) or template_file not in template_files:
+        if template_file is not None:
+            # 失配时记录 LLM 原始返回，便于定位是差 .md 还是括号/用字差异。
+            print(
+                f"[framework] 品类识别失配：LLM 返回 template_file={template_file!r}，"
+                f"候选={template_files}",
+                flush=True,
+            )
         return genre, None
     return genre, template_file
 
@@ -401,6 +409,24 @@ def make_framework_orchestrator_node(
         genre, template_file = _identify_genre(
             llm, resolved_templates_dir, user_intent, user_identity
         )
+        if template_file is None and os.environ.get("DEMO_REQUIRE_TEMPLATE") == "1":
+            # 演示护栏（DEMO_REQUIRE_TEMPLATE=1 时生效）：LLM 未命中模板时，
+            # 用文件名（去扩展名）与用户意图做确定性子串匹配兜底，
+            # 避免整轮白跑；兜底也失败才报错。
+            for candidate in _list_template_files(resolved_templates_dir):
+                if candidate.removesuffix(".md") in user_intent:
+                    template_file = candidate
+                    print(
+                        f"[framework] 品类识别未命中模板（genre={genre!r}），"
+                        f"确定性兜底命中：{candidate}",
+                        flush=True,
+                    )
+                    break
+            else:
+                raise ValueError(
+                    f"品类识别未命中模板（genre={genre!r}），"
+                    "且文件名兜底匹配也失败，本次演示要求模板路径，快速失败。"
+                )
         if template_file is not None:
             skeleton = parse_template_skeleton(
                 (resolved_templates_dir / template_file).read_text(encoding="utf-8")

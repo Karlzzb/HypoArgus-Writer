@@ -51,6 +51,10 @@ python scripts/demo.py
 
 # 真实链路：真 LLM + Postgres + Langfuse
 python scripts/demo.py --real
+
+# 性能调测：LLM_DEBUG_TIMING=1 打印逐次 LLM 调用计时；
+# DEMO_REQUIRE_TEMPLATE=1 要求命中模板路径（未命中走文件名兜底，兜底失败即报错）
+LLM_DEBUG_TIMING=1 DEMO_REQUIRE_TEMPLATE=1 uv run python scripts/demo.py --real
 ```
 
 ## 5. 测试与质量

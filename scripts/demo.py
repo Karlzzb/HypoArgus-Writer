@@ -20,6 +20,7 @@ import asyncio
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,9 +31,16 @@ import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 
 # 整体超时：生产同构模式下 framework 阶段本身就要跑数分钟，给足余量。
-TIMEOUT = 1800.0
+TIMEOUT = 7200.0
 
 MIXED_FEEDBACK = "引言口吻克制些；第二章补充行业数据佐证"
+
+
+def _timing_suffix() -> str:
+    """LLM 计时日志开启时给事件行附加时间戳，方便与调用计时对齐。"""
+    from llm.llm_json import timing_enabled
+
+    return f" t={time.time():.1f}" if timing_enabled() else ""
 
 
 def _build_app(real: bool):
@@ -40,7 +48,9 @@ def _build_app(real: bool):
     from service.app import create_app
 
     if real:
-        return create_app()
+        # 子智能体（改写循环）本期仍是打桩，引文终审重试不会改变结果，
+        # 演示直接零重试：失败即携未决警告交人工，省去无效重试轮次。
+        return create_app(citation_max_retries=0)
 
     from langgraph.checkpoint.memory import InMemorySaver
 
@@ -64,7 +74,10 @@ async def _watch_graph_events(client: httpx.AsyncClient, thread_id: str) -> None
             if not line.startswith("data: "):
                 continue
             envelope = json.loads(line[len("data: ") :])
-            print(f"  [graph_event] {envelope['type']:<16} unit={envelope['unit']}")
+            print(
+                f"  [graph_event] {envelope['type']:<16} unit={envelope['unit']}"
+                f"{_timing_suffix()}"
+            )
 
 
 async def _consume_business(
@@ -85,6 +98,7 @@ async def _consume_business(
                     print(
                         f"[业务] 状态 {data['status']}"
                         f"（节点 {data['node']}，第 {data['iteration_round']} 轮）"
+                        f"{_timing_suffix()}"
                     )
                 elif event["type"] == "review_required":
                     print(f"[业务] 到达人工中断点：章节 {data['chapter_ids']}")
@@ -104,8 +118,11 @@ async def _drive(client: httpx.AsyncClient) -> None:
     response = await client.post(
         "/tasks",
         json={
-            "user_intent": "写一篇论证「结构化写作智能体的工程价值」的行业评论",
-            "user_identity": "专业撰稿人",
+            "user_intent": (
+                "按「人才培养方案总结（汇报）模版」，为智能网联汽车技术专业"
+                "（460704）2025 级高职专科人才培养方案撰写一份评审汇报用的总结"
+            ),
+            "user_identity": "高职院校教务处教师",
             "session_id": "demo-session",
         },
     )

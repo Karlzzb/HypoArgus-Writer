@@ -2,14 +2,26 @@
 
 多个主节点的 LLM 调用都要求「只输出 JSON」，解析与顶层类型校验收敛到本模块，
 应答不合法时抛含步骤名的 ValueError。
+环境变量 LLM_DEBUG_TIMING=1 开启逐次调用的计时日志（步骤名、耗时、出入字符数），
+供性能调测定位慢调用。
 """
 
 import json
+import os
+import time
 from typing import Any
 
 from llm.llm_client import LLM
 
 JSON_ONLY_RULE = "只输出 JSON，不要输出任何多余文字、解释或代码围栏。"
+
+# 计时日志开关环境变量名：取值 1 开启，其余关闭。
+_DEBUG_TIMING_ENV = "LLM_DEBUG_TIMING"
+
+
+def timing_enabled() -> bool:
+    """LLM 计时日志是否开启（每次调用现读环境变量，便于运行中切换）。"""
+    return os.environ.get(_DEBUG_TIMING_ENV) == "1"
 
 
 def parse_json(raw: str, step: str) -> Any:
@@ -30,12 +42,25 @@ def invoke_json(
     llm: LLM, step: str, system: str, user: str, expect: type | tuple[type, ...]
 ) -> Any:
     """执行一次 LLM 调用并解析 JSON，同时校验顶层类型。"""
+    debug = timing_enabled()
+    if debug:
+        t0 = time.perf_counter()
+        print(
+            f"[llm-timing] step={step} start in_chars={len(system) + len(user)}",
+            flush=True,
+        )
     raw = llm.invoke(
         [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
     )
+    if debug:
+        print(
+            f"[llm-timing] step={step} end"
+            f" dur={time.perf_counter() - t0:.1f}s out_chars={len(raw)}",
+            flush=True,
+        )
     payload = parse_json(raw, step)
     if not isinstance(payload, expect):
         expected = "对象" if expect is dict else "数组"
