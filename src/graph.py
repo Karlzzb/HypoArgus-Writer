@@ -49,7 +49,7 @@ from nodes.writing_orchestrator import (
 
 PG_DSN_ENV = "HYPOARGUS_PG_DSN"
 
-# 存档序列化的类型允许清单：domain.state 内定义的全部状态模型与枚举。
+# 检查点序列化的类型允许清单：domain.state 内定义的全部状态模型与枚举。
 # 从模块自动收集而非手工罗列，新增状态模型时自动纳入，避免清单漂移。
 CHECKPOINT_MSGPACK_TYPES: tuple[type, ...] = tuple(
     obj
@@ -61,7 +61,7 @@ CHECKPOINT_MSGPACK_TYPES: tuple[type, ...] = tuple(
 
 
 def checkpoint_serializer() -> JsonPlusSerializer:
-    """存档序列化器：把 domain.state 各类型显式注册进 msgpack 允许清单。
+    """检查点序列化器：把 domain.state 各类型显式注册进 msgpack 允许清单。
 
     LangGraph 对未注册类型的反序列化会告警并将在未来版本阻断；
     显式注册后严格模式（LANGGRAPH_STRICT_MSGPACK=true）下往返依然成立。
@@ -187,10 +187,11 @@ def build_graph(
 
 @contextmanager
 def postgres_checkpointer(dsn: str | None = None) -> Iterator[PostgresSaver]:
-    """按环境变量连接串创建 Postgres 存档器，并确保建表完成。
+    """按环境变量连接串创建 Postgres 检查点保存器，并确保建表完成。
 
     不走 from_conn_string 而手工建连接：该便捷入口不接受序列化器参数，
-    这里必须注入注册了 domain.state 类型的 checkpoint_serializer。
+    这里必须注入注册了 domain.state 类型的 checkpoint_serializer；
+    连接参数与 PostgresSaver.from_conn_string 内部保持一致。
     """
     dsn = dsn or os.environ.get(PG_DSN_ENV, "")
     if not dsn:

@@ -7,12 +7,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+
 from langgraph.types import Command
 
 from llm import observability
 from agents.rewriter_loop import make_stub_rewriter_loop
 from domain.units import MAIN_NODES
-from graph import build_graph
+from graph import build_graph, checkpoint_serializer
 from llm.llm_client import FakeLLM, OpenAICompatibleLLM
 from llm.llm_config import LLMConfig
 from domain.state import initial_state
@@ -178,7 +179,7 @@ def captured_spans():
         )
         graph = build_graph(
             llm_factory=lambda unit: fake,
-            checkpointer=InMemorySaver(),
+            checkpointer=InMemorySaver(serde=checkpoint_serializer()),
             # 本测试验收 span 覆盖而非写作真实现：显式注入打桩改写器。
             rewriter_loop=make_stub_rewriter_loop(),
         )

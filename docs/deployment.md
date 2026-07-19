@@ -53,7 +53,7 @@ uv sync          # 按 uv.lock 精确安装，可重复执行
 ### 2.4 PostgreSQL
 
 有现成实例直接用即可，无版本外的特殊要求。
-自建时推荐发行版软件源（`apt install postgresql`）或公司内部镜像仓库的官方镜像；
+自建时推荐发行版软件源（`apt install postgresql`）或公司内部镜像仓库的官方镜像。
 直连 Docker Hub 在国内不稳定，请先给 Docker 配置可用的镜像加速器再拉取。
 
 ## 3. 配置

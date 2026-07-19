@@ -21,12 +21,13 @@ from urllib.parse import urlparse
 import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+
 from langgraph.types import Command
 
 from agents.rewriter_loop import make_stub_rewriter_loop
 from domain.citation_reconciler import MARKER_PATTERN
 from domain.units import MAIN_NODES
-from graph import build_graph, postgres_checkpointer
+from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
 from llm.llm_config import RUNTIME_UNITS
 from domain.state import WorkflowStatus, initial_state
@@ -60,7 +61,7 @@ def _build(responses: list[str], **kwargs):
     fake = FakeLLM(list(responses), keyed_responses=FRAMEWORK_KEYED_RESPONSES)
     kwargs.setdefault("rewriter_loop", make_stub_rewriter_loop())
     graph = build_graph(
-        llm_factory=lambda unit: fake, checkpointer=InMemorySaver(), **kwargs
+        llm_factory=lambda unit: fake, checkpointer=InMemorySaver(serde=checkpoint_serializer()), **kwargs
     )
     config: RunnableConfig = {"configurable": {"thread_id": f"e2e-{uuid.uuid4()}"}}
     return graph, fake, config
@@ -372,7 +373,7 @@ def test_写作自环中断恢复_已完成章节零重复调用且产物与不�
             with postgres_checkpointer(TEST_PG_DSN) as saver:
                 yield saver
         else:
-            yield InMemorySaver()
+            yield InMemorySaver(serde=checkpoint_serializer())
 
     def _recorder(events: list[tuple[str, dict]]):
         def _hook(event_type: str, payload: dict) -> None:
@@ -511,7 +512,7 @@ def test_写作自环中断恢复_已完成章节零重复调用且产物与不�
             },
         )
         baseline_graph = build_graph(
-            llm_factory=lambda unit: baseline_fake, checkpointer=InMemorySaver()
+            llm_factory=lambda unit: baseline_fake, checkpointer=InMemorySaver(serde=checkpoint_serializer())
         )
         baseline_config: RunnableConfig = {
             "configurable": {"thread_id": f"e2e-crash-base-{uuid.uuid4()}"}
@@ -615,7 +616,7 @@ def test_LLM调用次数与单元归属():
 
     graph = build_graph(
         llm_factory=factory,
-        checkpointer=InMemorySaver(),
+        checkpointer=InMemorySaver(serde=checkpoint_serializer()),
         rewriter_loop=make_stub_rewriter_loop(),
     )
     config: RunnableConfig = {"configurable": {"thread_id": "e2e-llm-count"}}

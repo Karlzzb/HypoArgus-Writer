@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+
+from graph import checkpoint_serializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
@@ -39,7 +41,7 @@ def _build_graph(fake: FakeLLM, assembler_config: AssemblerConfig | None = None)
     builder.add_node("human_review_gate", node)
     builder.add_edge(START, "human_review_gate")
     builder.add_edge("human_review_gate", END)
-    return builder.compile(checkpointer=InMemorySaver())
+    return builder.compile(checkpointer=InMemorySaver(serde=checkpoint_serializer()))
 
 
 def _state(**overrides: Any) -> WritingAgentState:

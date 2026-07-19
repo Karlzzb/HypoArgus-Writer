@@ -1,9 +1,9 @@
-"""存档序列化器测试：domain.state 类型显式注册进 msgpack 允许清单。
+"""检查点序列化器测试：domain.state 类型显式注册进 msgpack 允许清单。
 
 背景（issue #14）：LangGraph 对未注册类型的反序列化会告警并将在未来版本
 阻断。graph.checkpoint_serializer 必须把 domain.state 全部状态模型注册进
 allowed_msgpack_modules，保证严格模式（LANGGRAPH_STRICT_MSGPACK=true）下
-存档往返依然成立。
+检查点往返依然成立。
 """
 
 import os
@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _sample_objects() -> list[object]:
-    """覆盖 domain.state 全部会进入存档的模型实例。"""
+    """覆盖 domain.state 全部会进入检查点的模型实例。"""
     hypothesis = Hypothesis(
         id="ch1-p1-h1", text="假说", refute_condition="证伪条件", angle="预言"
     )
@@ -96,10 +96,15 @@ def test_注册清单覆盖domain_state全部模型类型() -> None:
         CitationReport,
         WorkflowStatus,
     ):
-        assert expected in registered, f"{expected.__name__} 未注册进存档允许清单"
+        assert expected in registered, f"{expected.__name__} 未注册进检查点允许清单"
 
 
 def test_注册后的往返不再触发未注册类型告警(caplog) -> None:
+    from langgraph.checkpoint.serde import jsonplus
+
+    # 该告警按进程去重：先清空去重集合，避免其他用例已触发过
+    # 同类型告警导致本断言空洞通过。
+    jsonplus._warned_unregistered_types.clear()
     serde = checkpoint_serializer()
     with caplog.at_level("WARNING", logger="langgraph.checkpoint.serde.jsonplus"):
         for obj in _sample_objects():

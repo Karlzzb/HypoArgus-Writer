@@ -10,10 +10,11 @@ import uuid
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+
 from langgraph.types import Command
 
 from service.event_envelope import EventEnvelope
-from graph import build_graph
+from graph import build_graph, checkpoint_serializer
 from service.graph_event_stream import GraphRunEmitter
 from llm.llm_client import FakeLLM
 from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
@@ -348,7 +349,7 @@ def _run_first_pass(events: list[EventEnvelope]):
     )
     graph = build_graph(
         llm_factory=lambda unit: fake,
-        checkpointer=InMemorySaver(),
+        checkpointer=InMemorySaver(serde=checkpoint_serializer()),
         search_agent=make_stub_search_agent(emitter.make_subagent_hook()),
         rewriter_loop=make_stub_rewriter_loop(emitter.make_subagent_hook()),
     )
