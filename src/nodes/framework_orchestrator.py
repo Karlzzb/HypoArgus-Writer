@@ -79,7 +79,7 @@ class _OutlineChapter:
 
 def _default_templates_dir() -> Path:
     """以本文件位置定位仓库根下的模板目录，不依赖进程工作目录。"""
-    return Path(__file__).resolve().parent.parent / "docs_templates"
+    return Path(__file__).resolve().parent.parent.parent / "docs_templates"
 
 
 def _fill_placeholders(text: str) -> str:
