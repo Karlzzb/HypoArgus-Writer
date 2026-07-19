@@ -20,7 +20,7 @@ from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
 from domain.state import WorkflowStatus, initial_state
 from agents.rewriter_loop import make_stub_rewriter_loop
 from agents.search_agent import make_stub_search_agent
-from tests.llm_response_plans import FIRST_PASS_RESPONSES
+from tests.llm_response_plans import FIRST_PASS_RESPONSES, FRAMEWORK_KEYED_RESPONSES
 
 
 def _make_emitter(
@@ -337,7 +337,9 @@ def test_合成流块_子智能体progress无前置start时挂根事件():
 
 def _run_first_pass(events: list[EventEnvelope]):
     """真图首跑到人工中断点：返回（graph, config, emitter）。"""
-    fake = FakeLLM(list(FIRST_PASS_RESPONSES))
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
     emitter = GraphRunEmitter(
         publish=events.append,
         trace_id="trace-int",

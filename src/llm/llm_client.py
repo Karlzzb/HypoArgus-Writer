@@ -5,6 +5,7 @@
 Langfuse 启用时客户端换成官方插桩版，每次调用自动上报 generation。
 """
 
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
@@ -34,6 +35,8 @@ class OpenAICompatibleLLM:
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
         self._client: OpenAI | None = None
+        # 节点内并发调用同一实例时，锁保证惰性客户端只创建一次。
+        self._client_lock = threading.Lock()
 
     @property
     def metadata(self) -> dict[str, str]:
@@ -41,14 +44,15 @@ class OpenAICompatibleLLM:
         return {"model": self._config.model, "base_url": self._config.base_url}
 
     def invoke(self, messages: list[Message]) -> str:
-        if self._client is None:
-            # 惰性创建，避免仅构造对象（如配置校验场景）就建立网络客户端；
-            # 客户端类按 Langfuse 启用与否选择（插桩版是原版的子类，接口一致）。
-            client_class = observability.openai_client_class()
+        with self._client_lock:
+            if self._client is None:
+                # 惰性创建，避免仅构造对象（如配置校验场景）就建立网络客户端；
+                # 客户端类按 Langfuse 启用与否选择（插桩版是原版的子类，接口一致）。
+                client_class = observability.openai_client_class()
 
-            self._client = client_class(
-                base_url=self._config.base_url, api_key=self._config.api_key
-            )
+                self._client = client_class(
+                    base_url=self._config.base_url, api_key=self._config.api_key
+                )
         response = self._client.chat.completions.create(
             model=self._config.model,
             messages=messages,  # type: ignore[arg-type]
@@ -58,10 +62,25 @@ class OpenAICompatibleLLM:
 
 
 class FakeLLM:
-    """确定性测试替身：依次返回预置应答，耗尽后返回带调用序号的固定文本。"""
+    """确定性测试替身：线程安全，支持顺序应答与按提示词内容键控的应答。
 
-    def __init__(self, responses: list[str] | None = None) -> None:
+    应答分派规则（每次调用依次尝试）：
+    1. 键控应答：keyed_responses 里首个「键出现在消息文本中且尚有剩余应答」的键，
+       弹出该键的下一条应答——用于并发调用场景，应答与提示词内容绑定而非依赖调用顺序；
+    2. 顺序应答：从预置列表头部弹出；
+    3. 全部耗尽后返回带调用序号的固定文本。
+    """
+
+    def __init__(
+        self,
+        responses: list[str] | None = None,
+        keyed_responses: dict[str, list[str]] | None = None,
+    ) -> None:
         self._responses = list(responses or [])
+        self._keyed_responses = {
+            key: list(values) for key, values in (keyed_responses or {}).items()
+        }
+        self._lock = threading.Lock()
         self.calls: list[list[Message]] = []
 
     @property
@@ -70,10 +89,15 @@ class FakeLLM:
         return {"model": "fake-llm", "base_url": "fake://"}
 
     def invoke(self, messages: list[Message]) -> str:
-        self.calls.append(messages)
-        if self._responses:
-            return self._responses.pop(0)
-        return f"假LLM应答#{len(self.calls)}"
+        with self._lock:
+            self.calls.append(messages)
+            text = "\n".join(message.get("content", "") for message in messages)
+            for key, values in self._keyed_responses.items():
+                if values and key in text:
+                    return values.pop(0)
+            if self._responses:
+                return self._responses.pop(0)
+            return f"假LLM应答#{len(self.calls)}"
 
 
 LLMFactory = Callable[[str], LLM]

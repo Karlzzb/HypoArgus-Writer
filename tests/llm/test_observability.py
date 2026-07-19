@@ -15,7 +15,7 @@ from graph import build_graph
 from llm.llm_client import FakeLLM, OpenAICompatibleLLM
 from llm.llm_config import LLMConfig
 from domain.state import initial_state
-from tests.llm_response_plans import FIRST_PASS_RESPONSES
+from tests.llm_response_plans import FIRST_PASS_RESPONSES, FRAMEWORK_KEYED_RESPONSES
 
 STUB_MODEL = "stub-observability-model"
 STUB_COMPLETION = "插桩应答"
@@ -172,7 +172,9 @@ def captured_spans():
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        fake = FakeLLM(list(FIRST_PASS_RESPONSES))
+        fake = FakeLLM(
+            list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+        )
         graph = build_graph(
             llm_factory=lambda unit: fake, checkpointer=InMemorySaver()
         )

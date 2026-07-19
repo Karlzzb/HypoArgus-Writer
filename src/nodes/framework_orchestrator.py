@@ -3,15 +3,22 @@
 LLM 调用序列（每步只输出 JSON）：
 1. 品类识别与模板匹配（置信度低转自由结构，不报错）；
 2. 大纲生成：模板路径只做标题实例化与不适用章节裁剪，自由结构路径直接生成；
-3. 逐章论点生成（每章一次调用）；
-4. 逐论点假说生成（每论点一次调用；六角度发散、可证伪、按证据可检索性筛选）。
+3. 全文论点生成（所有章节合并为一次调用）；
+4. 逐论点假说生成（每论点一次调用；六角度发散、可证伪、按证据可检索性筛选），
+   各章节并发执行（并发度由配置控制），章内论点保持顺序。
+
+全文假说总数配额在发起假说调用前按论点顺序预先分配（每论点
+cap = min(单论点上限, 剩余配额)），分配为零的论点不发起 LLM 调用；
+与旧串行语义的差异：某论点实际产出少于配额时，差额不再回补给后续论点。
 
 章节 / 论点 / 假说的 ID 与各层数量上限全部由程序保证，不依赖 LLM 自觉；
 标题中残留的 {变量} 一律由程序替换为 【待补充：变量名】 占位标记。
 LLM 应答解析失败直接抛 ValueError（错误处理与重试是后续 issue）。
 """
 
+import contextvars
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -224,41 +231,62 @@ def _generate_free_outline(
     return chapters
 
 
-def _generate_points(
+def _generate_points_all(
     llm: LLM,
     user_intent: str,
     user_identity: str,
     genre: str,
-    chapter: _OutlineChapter,
-    prev_title: str,
-    next_title: str,
+    chapters: list[_OutlineChapter],
     max_points: int,
-) -> list[str]:
-    """步骤 3 逐章论点：每章一次调用，程序截断至上限。"""
+) -> list[list[str]]:
+    """步骤 3 全文论点：所有章节合并为一次调用，返回与章节等长的论点文本列表。
+
+    程序侧按章节序号对齐：缺失或非法的章节项按空论点处理，逐章截断至上限。
+    """
+    chapters_payload = [
+        {
+            "chapter_index": index,
+            "title": chapter.title,
+            "subsections": list(chapter.subsections),
+        }
+        for index, chapter in enumerate(chapters, start=1)
+    ]
     system = (
-        "你是章节论点生成器。为指定章节生成中心论点，"
-        "每条论点是该章存在的理由之一，是后续假说与检索的锚点。"
-        f"数量不超过 {max_points} 条。"
-        '输出 JSON 数组，逐条一项：{"text": "论点表述"}。' + JSON_ONLY_RULE
+        "你是章节论点生成器。给定全文大纲，一次性为每一章生成中心论点，"
+        "每条论点是该章存在的理由之一，是后续假说与检索的锚点；"
+        "全文视角下各章论点互不重复、彼此衔接。"
+        f"每章数量不超过 {max_points} 条。"
+        "输出 JSON 数组，逐章一项："
+        '{"chapter_index": 章节序号, "points": [{"text": "论点表述"}, ...]}。'
+        + JSON_ONLY_RULE
     )
     user = (
         f"用户身份：{user_identity}\n用户写作需求：{user_intent}\n"
         f"文章品类：{genre or '（未识别）'}\n\n"
-        f"本章标题：{chapter.title}\n"
-        f"本章子标题：{list(chapter.subsections)}\n"
-        f"上一章标题：{prev_title or '（无，本章是首章）'}\n"
-        f"下一章标题：{next_title or '（无，本章是末章）'}"
+        f"全文大纲：\n{json.dumps(chapters_payload, ensure_ascii=False, indent=2)}"
     )
-    payload = invoke_json(llm, "章节论点生成", system, user, list)
+    payload = invoke_json(llm, "全文论点生成", system, user, list)
 
-    texts = [
-        item["text"].strip()
-        for item in payload
-        if isinstance(item, dict)
-        and isinstance(item.get("text"), str)
-        and item["text"].strip()
-    ]
-    return texts[:max_points]
+    by_index: dict[int, list[Any]] = {}
+    for item in payload:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("chapter_index"), int)
+            and isinstance(item.get("points"), list)
+        ):
+            by_index.setdefault(item["chapter_index"], item["points"])
+
+    points_per_chapter: list[list[str]] = []
+    for index in range(1, len(chapters) + 1):
+        texts = [
+            point["text"].strip()
+            for point in by_index.get(index, [])
+            if isinstance(point, dict)
+            and isinstance(point.get("text"), str)
+            and point["text"].strip()
+        ]
+        points_per_chapter.append(texts[:max_points])
+    return points_per_chapter
 
 
 def _generate_hypotheses(
@@ -313,6 +341,26 @@ def _generate_hypotheses(
     return hypotheses[:max_count]
 
 
+def _allocate_hypothesis_caps(
+    point_counts: list[int], limits: FrameworkLimits
+) -> list[list[int]]:
+    """按论点顺序预分配全文假说总数配额，返回与各章论点等长的配额列表。
+
+    每论点 cap = min(单论点上限, 剩余配额)，剩余配额按分配额（而非实际产出）扣减，
+    使配额在并发发起假说调用前即完全确定。
+    """
+    remaining_total = limits.max_hypotheses_total
+    caps: list[list[int]] = []
+    for count in point_counts:
+        chapter_caps: list[int] = []
+        for _ in range(count):
+            cap = min(limits.max_hypotheses_per_point, remaining_total)
+            remaining_total -= cap
+            chapter_caps.append(cap)
+        caps.append(chapter_caps)
+    return caps
+
+
 def make_framework_orchestrator_node(
     llm_factory: LLMFactory,
     templates_dir: Path | None = None,
@@ -350,37 +398,31 @@ def make_framework_orchestrator_node(
         else:
             outline_chapters = _generate_free_outline(llm, user_intent, user_identity)
 
-        remaining_total = effective_limits.max_hypotheses_total
-        outline: list[ChapterSpec] = []
-        for chapter_index, chapter in enumerate(outline_chapters):
+        point_texts_per_chapter = _generate_points_all(
+            llm,
+            user_intent,
+            user_identity,
+            genre,
+            outline_chapters,
+            effective_limits.max_points_per_chapter,
+        )
+        caps_per_chapter = _allocate_hypothesis_caps(
+            [len(texts) for texts in point_texts_per_chapter], effective_limits
+        )
+
+        def build_chapter(chapter_index: int) -> ChapterSpec:
+            """生成单章的论点与假说结构（供并发执行，章内论点保持顺序）。"""
+            chapter = outline_chapters[chapter_index]
             chapter_id = f"ch{chapter_index + 1}"
-            prev_title = (
-                outline_chapters[chapter_index - 1].title if chapter_index > 0 else ""
-            )
-            next_title = (
-                outline_chapters[chapter_index + 1].title
-                if chapter_index + 1 < len(outline_chapters)
-                else ""
-            )
-            point_texts = _generate_points(
-                llm,
-                user_intent,
-                user_identity,
-                genre,
-                chapter,
-                prev_title,
-                next_title,
-                effective_limits.max_points_per_chapter,
-            )
             points: list[ArgumentPoint] = []
-            for point_index, point_text in enumerate(point_texts):
+            for point_index, point_text in enumerate(
+                point_texts_per_chapter[chapter_index]
+            ):
                 point_id = f"{chapter_id}-p{point_index + 1}"
+                cap = caps_per_chapter[chapter_index][point_index]
                 hypotheses: list[Hypothesis] = []
-                # 全文假说总数配额耗尽后跳过剩余论点的 LLM 调用。
-                if remaining_total > 0:
-                    cap = min(
-                        effective_limits.max_hypotheses_per_point, remaining_total
-                    )
+                # 预分配配额为零的论点不发起 LLM 调用。
+                if cap > 0:
                     raw_hypotheses = _generate_hypotheses(
                         llm, user_intent, genre, chapter, point_text, cap
                     )
@@ -395,18 +437,31 @@ def make_framework_orchestrator_node(
                             raw_hypotheses
                         )
                     ]
-                    remaining_total -= len(hypotheses)
                 points.append(
                     ArgumentPoint(id=point_id, text=point_text, hypotheses=hypotheses)
                 )
-            outline.append(
-                ChapterSpec(
-                    id=chapter_id,
-                    title=chapter.title,
-                    subsections=list(chapter.subsections),
-                    points=points,
-                )
+            return ChapterSpec(
+                id=chapter_id,
+                title=chapter.title,
+                subsections=list(chapter.subsections),
+                points=points,
             )
+
+        outline: list[ChapterSpec] = []
+        if outline_chapters:
+            max_workers = min(
+                len(outline_chapters), effective_limits.max_concurrent_chapters
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 每个章节任务复制当前 contextvars 上下文执行，
+                # 保证 Langfuse span 父子关系跨工作线程成立。
+                futures = [
+                    executor.submit(
+                        contextvars.copy_context().run, build_chapter, chapter_index
+                    )
+                    for chapter_index in range(len(outline_chapters))
+                ]
+                outline = [future.result() for future in futures]
 
         return WritingAgentState(
             genre=genre,

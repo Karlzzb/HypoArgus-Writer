@@ -31,6 +31,7 @@ from llm.llm_client import FakeLLM
 from domain.state import initial_state
 from tests.llm_response_plans import (
     FIRST_PASS_RESPONSES,
+    FRAMEWORK_KEYED_RESPONSES,
     REVISE_ROUND_RESPONSES,
     SEMANTIC_PASS,
     TRUNK_RESPONSES,
@@ -40,9 +41,16 @@ from tests.e2e.test_graph_e2e import TEST_PG_DSN, _pg_reachable
 TIMEOUT = 30.0
 
 
-def _make_app(responses: list[str], checkpointer: Any = None) -> FastAPI:
+def _make_app(
+    responses: list[str],
+    checkpointer: Any = None,
+    keyed: dict[str, list[str]] | None = None,
+) -> FastAPI:
     """带 FakeLLM 与 InMemorySaver 构建应用。"""
-    fake = FakeLLM(list(responses))
+    fake = FakeLLM(
+        list(responses),
+        keyed_responses=keyed if keyed is not None else FRAMEWORK_KEYED_RESPONSES,
+    )
     return create_app(
         llm_factory=lambda unit: fake,
         checkpointer=checkpointer if checkpointer is not None else InMemorySaver(),
@@ -302,8 +310,14 @@ def test_事件信封完备_字段齐全父子链路可拼接且快照无正文(
 
 def test_过滤参数_按类型与session隔离且非法类型400():
     async def main() -> None:
-        # 两个任务先后跑（共享 FakeLLM 应答须串行消费保证确定性）。
-        app = _make_app([*FIRST_PASS_RESPONSES, *FIRST_PASS_RESPONSES])
+        # 两个任务先后跑（共享 FakeLLM 应答须串行消费保证确定性），
+        # 键控假说应答按任务数翻倍。
+        app = _make_app(
+            [*FIRST_PASS_RESPONSES, *FIRST_PASS_RESPONSES],
+            keyed={
+                key: values * 2 for key, values in FRAMEWORK_KEYED_RESPONSES.items()
+            },
+        )
         async with _client(app) as client:
             thread_a, _ = await _create_task(client, "sess-A")
             await _read_sse(
@@ -523,7 +537,9 @@ def test_断点续跑_图运行中途死亡后resume续跑至中断点():
     # 手工驱动同款图（相同响应计划 + 共享存档器）：framework 完成的
     # 检查点落库后立即停止迭代，模拟图运行中途进程死亡。
     # 节点内部用 asyncio.run 调子智能体，手工驱动必须在事件循环之外。
-    fake = FakeLLM(list(FIRST_PASS_RESPONSES))
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
     graph = build_graph(llm_factory=lambda unit: fake, checkpointer=saver)
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     for mode, chunk in graph.stream(
@@ -569,7 +585,9 @@ def test_崩溃后免resume_直接查状态检查点并回滚到中断点():
     saver = InMemorySaver()
     thread_id = "crash-then-rollback"
     # 手工驱动同款图到人工中断点后丢弃，模拟进程死亡（须在事件循环之外）。
-    fake = FakeLLM(list(FIRST_PASS_RESPONSES))
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
     graph = build_graph(llm_factory=lambda unit: fake, checkpointer=saver)
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     graph.invoke(

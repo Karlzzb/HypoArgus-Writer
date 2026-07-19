@@ -29,7 +29,10 @@ from llm.llm_client import FakeLLM
 from llm.llm_config import RUNTIME_UNITS
 from domain.state import WorkflowStatus, initial_state
 from tests.llm_response_plans import (
+    FIRST_PASS_LLM_CALLS,
     FIRST_PASS_RESPONSES,
+    FRAMEWORK_KEYED_RESPONSES,
+    FRAMEWORK_LLM_CALLS,
     FRAMEWORK_RESPONSES,
     SEMANTIC_PASS,
 )
@@ -39,14 +42,12 @@ TEST_PG_DSN = os.environ.get(
     "postgresql://postgres:postgres@127.0.0.1:15432/postgres",
 )
 
-FRAMEWORK_LLM_CALLS = len(FRAMEWORK_RESPONSES)
-
 FINALIZE = {"action": "finalize"}
 
 
 def _build(responses: list[str], **kwargs):
     """带 InMemorySaver 与共享假 LLM 构图，返回（graph, fake, config）。"""
-    fake = FakeLLM(list(responses))
+    fake = FakeLLM(list(responses), keyed_responses=FRAMEWORK_KEYED_RESPONSES)
     graph = build_graph(
         llm_factory=lambda unit: fake, checkpointer=InMemorySaver(), **kwargs
     )
@@ -346,7 +347,9 @@ def test_终审失败只重写不合格章节_超限携警告进入中断点():
 
 
 def test_LLM调用次数与单元归属():
-    fake = FakeLLM(list(FIRST_PASS_RESPONSES))
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
     units_seen: list[str] = []
 
     def factory(unit: str) -> FakeLLM:
@@ -360,7 +363,7 @@ def test_LLM调用次数与单元归属():
 
     # 检索与写作由打桩子智能体承担；定稿分支不调 LLM。
     assert units_seen == ["framework_orchestrator", "citation_validator"]
-    assert len(fake.calls) == len(FIRST_PASS_RESPONSES)
+    assert len(fake.calls) == FIRST_PASS_LLM_CALLS
     # 终态记录的是最后一个节点（human_review_gate）的配置元数据，且不含密钥。
     assert result["current_node_llm_config"]["unit"] == "human_review_gate"
     assert "api_key" not in result["current_node_llm_config"]
@@ -376,7 +379,9 @@ def test_状态经Postgres存档器持久化():
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
     with postgres_checkpointer(TEST_PG_DSN) as saver:
-        fake = FakeLLM(list(FIRST_PASS_RESPONSES))
+        fake = FakeLLM(
+            list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+        )
         graph = build_graph(llm_factory=lambda unit: fake, checkpointer=saver)
         result = graph.invoke(
             initial_state("持久化测试", "专业撰稿人", "trace-pg"), config

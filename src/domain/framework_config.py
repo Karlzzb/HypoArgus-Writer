@@ -1,6 +1,6 @@
-"""论证体系数量上限配置读取。
+"""论证体系数量上限与并发度配置读取。
 
-三个上限各自支持在环境变量中独立配置；未设置（或为空字符串）时回落缺省值。
+各配置项支持在环境变量中独立配置；未设置（或为空字符串）时回落缺省值。
 """
 
 import os
@@ -17,11 +17,12 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class FrameworkLimits:
-    """论证体系最终生效的数量上限。"""
+    """论证体系最终生效的数量上限与假说生成并发度。"""
 
     max_points_per_chapter: int
     max_hypotheses_per_point: int
     max_hypotheses_total: int
+    max_concurrent_chapters: int = 4
 
 
 # 各环境变量名与缺省值。
@@ -29,6 +30,7 @@ _LIMIT_DEFAULTS: tuple[tuple[str, int], ...] = (
     ("FRAMEWORK_MAX_POINTS_PER_CHAPTER", 4),
     ("FRAMEWORK_MAX_HYPOTHESES_PER_POINT", 3),
     ("FRAMEWORK_MAX_HYPOTHESES_TOTAL", 60),
+    ("FRAMEWORK_MAX_CONCURRENT_CHAPTERS", 4),
 )
 
 
@@ -47,4 +49,5 @@ def load_framework_limits(env: Mapping[str, str] | None = None) -> FrameworkLimi
         max_points_per_chapter=values["FRAMEWORK_MAX_POINTS_PER_CHAPTER"],
         max_hypotheses_per_point=values["FRAMEWORK_MAX_HYPOTHESES_PER_POINT"],
         max_hypotheses_total=values["FRAMEWORK_MAX_HYPOTHESES_TOTAL"],
+        max_concurrent_chapters=values["FRAMEWORK_MAX_CONCURRENT_CHAPTERS"],
     )

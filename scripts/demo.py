@@ -29,7 +29,8 @@ sys.path.insert(0, str(REPO_ROOT))
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 
-TIMEOUT = 300.0
+# 整体超时：生产同构模式下 framework 阶段本身就要跑数分钟，给足余量。
+TIMEOUT = 1800.0
 
 MIXED_FEEDBACK = "引言口吻克制些；第二章补充行业数据佐证"
 
@@ -44,9 +45,11 @@ def _build_app(real: bool):
     from langgraph.checkpoint.memory import InMemorySaver
 
     from llm.llm_client import FakeLLM
-    from tests.llm_response_plans import TRUNK_RESPONSES
+    from tests.llm_response_plans import FRAMEWORK_KEYED_RESPONSES, TRUNK_RESPONSES
 
-    fake = FakeLLM(list(TRUNK_RESPONSES))
+    fake = FakeLLM(
+        list(TRUNK_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
     return create_app(
         llm_factory=lambda unit: fake, checkpointer=InMemorySaver()
     )
@@ -167,7 +170,9 @@ async def _main(real: bool) -> None:
         print(f"服务已就绪：http://127.0.0.1:{port}（{'生产同构' if real else '空转'}模式）")
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}",
-            timeout=httpx.Timeout(10.0, read=TIMEOUT),
+            # SSE 长连接不设 read timeout：业务阶段可能长时间无事件，
+            # 靠 _consume_business 的整体超时兜底。
+            timeout=httpx.Timeout(10.0, read=None),
         ) as client:
             await _drive(client)
     finally:
