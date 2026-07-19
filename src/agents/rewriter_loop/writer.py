@@ -66,8 +66,12 @@ def load_writer_settings(env: Mapping[str, str] | None = None) -> tuple[str, str
     return tier, doc_type
 
 
-def _audit_issues_to_violations(issues: Sequence[AuditIssue]) -> list[Violation]:
-    """把自审条目折成 lint 同形的 ``Violation``，并入统一违规清单。"""
+def audit_issues_to_violations(issues: Sequence[AuditIssue]) -> list[Violation]:
+    """把自审条目折成 lint 同形的 ``Violation``，并入统一违规清单。
+
+    公开导出：调测脚本（scripts/rewriter_debug.py）复用同一折叠逻辑，
+    保证 --step 模式的违规口径与真编排零漂移。
+    """
     out: list[Violation] = []
     for issue in issues:
         snippet = (issue.excerpt or "")[:80]
@@ -158,7 +162,7 @@ def make_writer_run(
             progress(
                 "llm_call_end", call="audit", attempts=audit.attempts, degraded=audit.degraded
             )
-            violations.extend(_audit_issues_to_violations(audit.issues))
+            violations.extend(audit_issues_to_violations(audit.issues))
             progress("audit_done", issues=len(audit.issues), degraded=audit.degraded)
         else:
             progress("audit_done", issues=0, degraded=False)

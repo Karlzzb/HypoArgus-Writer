@@ -1,7 +1,8 @@
 """FakeLLM 响应编排计划：端到端测试共用的确定性应答序列。
 
-test_graph_e2e / test_graph_event_stream / test_api_e2e 三处共用，
-避免同一份编排在多个测试文件里漂移。
+test_graph_e2e / test_graph_event_stream / test_api_e2e 与
+tests/agents/rewriter_loop/test_real_contract 共用，
+避免同一份编排与信封拼装在多个测试文件里漂移。
 
 framework 的假说生成按章节并发，调用顺序不确定，
 假说应答放在 FRAMEWORK_KEYED_RESPONSES 里按论点提示词片段键控分派；
@@ -83,3 +84,59 @@ TRUNK_RESPONSES = [
     SEMANTIC_PASS,
     SEMANTIC_PASS,
 ]
+
+
+def writer_envelope(chapter_text: str, chapter_summary: str) -> str:
+    """拼 rewriter_loop 真实现所需的写作信封 JSON-in-text 应答。
+
+    公开导出：真实现契约测试与图级 E2E 共用同一信封拼装，避免各测试文件
+    重复实现导致口径漂移。
+    """
+    return json.dumps(
+        {"chapter_text": chapter_text, "chapter_summary": chapter_summary},
+        ensure_ascii=False,
+    )
+
+
+def joined_prompt(messages: list[dict[str, str]]) -> str:
+    """把一次 LLM 调用的全部消息文本拼接，供提示词内容断言。"""
+    return "\n".join(message.get("content", "") for message in messages)
+
+
+# 自审空裁决：真实现每次写作后自审一次，空转编排一律判无违规。
+AUDIT_EMPTY_RESPONSE = '{"issues": []}'
+
+# rewriter_loop 真实现的键控应答（demo 空转与端到端主干等真链路场景与
+# TRUNK_RESPONSES 合用）：写作调用按上下文块的「- 标题：<章名>」行键控
+# （同章 draft 在前、revise 在后，按调用时间顺序弹出）；自审调用按
+# 【引用自审】标签键控。正文刻意规避全部 lint 规则（角标在素材池内、
+# 无口语化/编号/意识形态违规、无 ## 标题不落章型），保证每章恰好一次
+# 写作调用、不触发修订，应答计划保持确定性。revise 产物落实
+# MIXED_DIRECTIVE_RESPONSE 的两条指令（正文含指令原文，供落实断言）。
+WRITER_KEYED_RESPONSES = {
+    "【引用自审】": [AUDIT_EMPTY_RESPONSE] * 4,
+    "- 标题：第一章": [
+        writer_envelope(
+            "本专业面向智能制造领域培养高素质人才，课程体系对接行业标准。[m-ch1-p1-h1]",
+            "第一章完成培养定位与背景铺陈。",
+        ),
+        writer_envelope(
+            "本专业以克制口吻阐明培养定位，课程体系对接行业标准。"
+            "（修订落实：引言口吻更克制）[m-ch1-p1-h1]",
+            "第一章按修订意见收束引言口吻。",
+        ),
+    ],
+    "- 标题：第二章": [
+        writer_envelope(
+            # 正文承接前章摘要原文（供摘要链断言 drafts[0].summary in drafts[1].text）。
+            "承接前章——第一章完成培养定位与背景铺陈。"
+            "在培养定位基础上，本专业构建产教融合的课程实施路径。[m-ch2-p1-h1]",
+            "第二章完成课程实施路径论述。",
+        ),
+        writer_envelope(
+            "在培养定位基础上，本专业以行业数据论证课程实施路径成效。"
+            "（修订落实：补充行业数据佐证）[m-ch2-p1-h1]",
+            "第二章按修订意见补充行业数据佐证。",
+        ),
+    ],
+}

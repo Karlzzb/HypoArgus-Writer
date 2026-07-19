@@ -6,7 +6,7 @@
 ## 1. 项目定位
 
 纯 LangGraph（1.x）单一技术栈的结构化写作后端服务，只提供后端能力。
-核心链路：章节 → 论点 → 假说三层论证体系，5 个主节点刚性流水线 + 2 个子智能体（本期打桩），人工审阅无限迭代闭环。
+核心链路：章节 → 论点 → 假说三层论证体系，5 个主节点刚性流水线 + 2 个子智能体（rewriter_loop 为真实现，search_agent 仍为打桩），人工审阅无限迭代闭环。
 LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server。
 
 ## 2. 代码布局
@@ -16,13 +16,14 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 | `src/domain/` | 领域模型：图状态与状态机（`state.py`）、书目渲染、角标对账、运行单元名册、事件钩子契约 |
 | `src/llm/` | 统一 LLM 封装：按运行单元前缀配置 + 全局回落（`llm_config.py`）、OpenAI 兼容客户端与 FakeLLM、Langfuse 可观测 |
 | `src/assembly/` | 上下文装配：`assemble(state, unit)` 统一入口与压缩阈值配置 |
-| `src/agents/` | 子智能体：任务包契约（`contracts.py`）、检索与改写打桩实现 |
+| `src/agents/` | 子智能体：任务包契约（`contracts.py`）、`rewriter_loop/` 真实现子包（编排、写作 LLM 缝、真实适配器、风格校验器、随包风格指南；打桩同包共存、可显式注入）、search_agent 打桩实现 |
 | `src/nodes/` | 5 个主节点：framework_orchestrator → reference_orchestrator → writing_orchestrator → citation_validator → human_review_gate |
 | `src/graph.py` | 图接线、条件路由、Postgres checkpointer |
 | `src/service/` | 对外服务：FastAPI 应用（`app.py`）、任务生命周期（`task_service.py`）、事件枢纽与事件信封 |
 | `docs_templates/` | 本地模板库（品类识别与大纲骨架来源） |
-| `scripts/demo.py` | 全流程演示脚本（空转 / `--real` 两模式） |
-| `tests/` | 按 src 分包镜像 + `tests/e2e/`（最高接缝为 `test_api_e2e.py`） |
+| `scripts/demo.py` | 全流程演示脚本（空转 / `--real` 两模式），每次运行落盘构建过程档案 |
+| `scripts/rewriter_debug.py` | rewriter_loop 独立调测脚本（绕开主图，供 prompt 与风格规则调优） |
+| `tests/` | 按 src 分包镜像 + `tests/e2e/`（最高接缝为 `test_api_e2e.py`）+ `tests/scripts/`（`scripts/` 调测脚本的冒烟测试） |
 
 ## 3. 环境准备
 
@@ -38,6 +39,7 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 | 持久化 | `HYPOARGUS_PG_DSN` | 生产 Postgres DSN，checkpointer 自动建表 |
 | 可观测（可选） | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` / `LANGFUSE_TIMEOUT` | 公私钥齐备即启用 |
 | 业务调节 | `FRAMEWORK_MAX_POINTS_PER_CHAPTER`(4)、`FRAMEWORK_MAX_HYPOTHESES_PER_POINT`(3)、`FRAMEWORK_MAX_HYPOTHESES_TOTAL`(60)、`CITATION_MAX_RETRIES`(2)、`ASSEMBLER_*` 四项 | 括号内为缺省值 |
+| 写作场景 | `REWRITER_LOOP_TIER`(本科)、`REWRITER_LOOP_DOC_TYPE`(人才培养方案) | tier 只接受 `本科`/`高职`，doc_type 为自由文本；工厂构造时读取一次 |
 | 测试 | `HYPOARGUS_TEST_PG_DSN` | 缺省 `postgresql://postgres:postgres@127.0.0.1:15432/postgres`（本地 docker 容器 `hypoargus-test-pg`） |
 
 ## 4. 启动与演示
@@ -46,15 +48,29 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 # 启动服务（生产路径：Postgres checkpointer）
 uvicorn --app-dir src --factory service.app:create_app --host 0.0.0.0 --port 8000
 
-# 全流程演示：假 LLM + InMemorySaver 空转
+# 全流程演示：假 LLM + InMemorySaver 空转（写作走 rewriter_loop 真实现链路，仅最底层模型是假的）
 python scripts/demo.py
 
 # 真实链路：真 LLM + Postgres + Langfuse
 python scripts/demo.py --real
 
+# 每次运行落盘一份构建过程档案（事件流、逐章产物、state 演进、最终全文与书目）
+# 缺省写入 var/demo_archive/<thread_id>.md，可用 --archive PATH 覆盖
+python scripts/demo.py --archive out.md
+
 # 性能调测：LLM_DEBUG_TIMING=1 打印逐次 LLM 调用计时；
 # DEMO_REQUIRE_TEMPLATE=1 要求命中模板路径（未命中走文件名兜底，兜底失败即报错）
 LLM_DEBUG_TIMING=1 DEMO_REQUIRE_TEMPLATE=1 uv run python scripts/demo.py --real
+```
+
+rewriter_loop 独立调测（绕开主图直接驱动真实现，供 prompt 与风格规则调优）：
+
+```bash
+python scripts/rewriter_debug.py                        # 空转全流程（进度事件打印到终端）
+python scripts/rewriter_debug.py --mode revise          # 定向改写模式（覆盖任务包内 mode）
+python scripts/rewriter_debug.py --step lint            # 跑到指定环节停：write/lint/audit/revise-fix
+python scripts/rewriter_debug.py --task scripts/rewriter_task.sample.json   # 从文件读任务包
+python scripts/rewriter_debug.py --real                 # 真实模型（REWRITER_LOOP_* 配置，有花费）
 ```
 
 ## 5. 测试与质量
@@ -65,12 +81,13 @@ python -m mypy src
 ```
 
 - `tests/e2e/test_api_e2e.py` 是最高接缝：httpx ASGI 全闭环（创建 → 双 SSE → 审阅 → 定稿 → 断点续跑 → 回滚）。
-- `tests/e2e/test_graph_e2e.py` 依赖 Postgres（`HYPOARGUS_TEST_PG_DSN`），不可达时自动 skip。
+- `tests/e2e/test_graph_e2e.py` 依赖 Postgres（`HYPOARGUS_TEST_PG_DSN`），不可达时自动 skip；其中断恢复用例走 rewriter_loop 真实现完整链路（仅最底层 FakeLLM）。
 - 离线确定性：FakeLLM + 预置应答计划（`tests/llm_response_plans.py`）；`tests/conftest.py` 会话级剥离 `LANGFUSE_*`。
 
 ## 6. 关键设计约束
 
 - **改 `agents/` 前必读** `docs/adr/0001-subagent-real-impl-constraints.md`，遵守四条硬约束：章级落 checkpoint、事件带上下文与进度、保持非子图边界、中断场景测试。
+- rewriter_loop 真实现迁移的架构决策（契约零扩展、LLM 栈归一、修一次链路等）见 `docs/adr/0002-rewriter-loop-migration.md`。
 - 节点内用 `asyncio.run` 调子智能体，因此图运行必须经 `asyncio.to_thread` 在独占工作线程同步驱动，绝不能跑在服务事件循环上（见 `src/service/task_service.py` 模块注释）。
 - 双 SSE 通道严格隔离：业务通道每任务一个枢纽、终态后关闭；graph_event 可视化通道全局一个枢纽、永不主动关闭。
 - 事件信封与 `state_snapshot` 只携带元数据，正文全文绝不入信封。

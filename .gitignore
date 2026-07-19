@@ -53,6 +53,7 @@ pnpm-debug.log*
 
 # ---- Generated output (writer / rubric runs) ----
 out/
+var/
 
 # ---- IDE / editors ----
 .vscode/

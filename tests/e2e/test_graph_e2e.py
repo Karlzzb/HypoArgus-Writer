@@ -1,8 +1,9 @@
 """端到端闭环测试：注入假 LLM 跑整张图，验证状态机流转、人工中断点与迭代闭环。
 
 framework_orchestrator 预置最小 JSON 应答序列（自由结构、2 章、每章 1 论点
-1 假说）；reference_orchestrator 与 writing_orchestrator 走打桩子智能体、
-不调 LLM；citation_validator 每个受审章节消费一条语义核查 JSON 应答；
+1 假说）；reference_orchestrator 与 writing_orchestrator 缺省走打桩子智能体、
+不调 LLM（中断恢复用例例外：走 rewriter_loop 真实现链路，写作与自审经
+键控应答分派）；citation_validator 每个受审章节消费一条语义核查 JSON 应答；
 human_review_gate 经 LangGraph interrupt 真实中断，仅在 revise 恢复时消费
 一条意见解析 JSON 应答。
 
@@ -22,6 +23,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+from agents.rewriter_loop import make_stub_rewriter_loop
 from domain.citation_reconciler import MARKER_PATTERN
 from domain.units import MAIN_NODES
 from graph import build_graph, postgres_checkpointer
@@ -29,12 +31,15 @@ from llm.llm_client import FakeLLM
 from llm.llm_config import RUNTIME_UNITS
 from domain.state import WorkflowStatus, initial_state
 from tests.llm_response_plans import (
+    AUDIT_EMPTY_RESPONSE,
     FIRST_PASS_LLM_CALLS,
     FIRST_PASS_RESPONSES,
     FRAMEWORK_KEYED_RESPONSES,
     FRAMEWORK_LLM_CALLS,
     FRAMEWORK_RESPONSES,
     SEMANTIC_PASS,
+    WRITER_KEYED_RESPONSES,
+    joined_prompt,
 )
 
 TEST_PG_DSN = os.environ.get(
@@ -46,8 +51,14 @@ FINALIZE = {"action": "finalize"}
 
 
 def _build(responses: list[str], **kwargs):
-    """带 InMemorySaver 与共享假 LLM 构图，返回（graph, fake, config）。"""
+    """带 InMemorySaver 与共享假 LLM 构图，返回（graph, fake, config）。
+
+    本文件验收的是图编排（状态机、路由、中断闭环），写作单元默认注入
+    打桩改写器（真实现契约在 tests/agents/rewriter_loop/ 单独覆盖）；
+    需要记录器等定制时经 kwargs 显式覆盖。
+    """
     fake = FakeLLM(list(responses), keyed_responses=FRAMEWORK_KEYED_RESPONSES)
+    kwargs.setdefault("rewriter_loop", make_stub_rewriter_loop())
     graph = build_graph(
         llm_factory=lambda unit: fake, checkpointer=InMemorySaver(), **kwargs
     )
@@ -275,102 +286,247 @@ def test_多轮迭代human_review_gate不失忆_第2轮解析prompt含第1轮意
     graph.invoke(Command(resume=FINALIZE), config)
 
 
-def test_写作自环中断恢复_已完成章节零重复调用且产物与不中断路径等价():
-    """章级 checkpoint 验收（ADR-0001 约束 1 与 4，打桩驱动的中断恢复骨架）。
+def _writer_keyed(chapter_titles: list[str]) -> dict[str, list[str]]:
+    """按剩余章节切片真实现写作/自审的键控应答（每章一次首写 + 一次自审）。
 
-    故障注入：首章写完、其 checkpoint 落盘后停止驱动，模拟进程死于两章之间；
-    同 thread_id 二次驱动恢复。断言：已完成章节零重复调用（恢复进程的
-    rewriter 只收到未完成章的任务包）、子智能体事件成对且带业务上下文、
-    最终产物与不中断路径完全等价。
+    自审键置于首位：自审提示词内嵌全文正文，须先于「- 标题：」键匹配，
+    与 WRITER_KEYED_RESPONSES 的键序约定一致。
     """
-    from agents.contracts import SubagentAdapter
-    from agents.rewriter_loop import stub_rewriter_loop_run
-    from domain.events import SUBAGENT_END, SUBAGENT_START
+    keyed: dict[str, list[str]] = {
+        "【引用自审】": [AUDIT_EMPTY_RESPONSE] * len(chapter_titles)
+    }
+    for title in chapter_titles:
+        key = f"- 标题：{title}"
+        keyed[key] = WRITER_KEYED_RESPONSES[key][:1]
+    return keyed
 
-    def _recording_rewriter(
-        tasks: list[dict], events: list[tuple[str, dict]]
-    ) -> SubagentAdapter:
-        async def _run(task: dict) -> dict:
-            tasks.append(task)
-            return await stub_rewriter_loop_run(task)
 
+def _writer_call_counts(fake: FakeLLM) -> dict[str, int]:
+    """按章节标题统计写作模型调用次数（不含自审），供零重复断言。"""
+    counts = {"第一章": 0, "第二章": 0}
+    for messages in fake.calls:
+        text = joined_prompt(messages)
+        if "【引用自审】" in text:
+            continue
+        for title in counts:
+            if f"- 标题：{title}" in text:
+                counts[title] += 1
+    return counts
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "memory",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(
+                not _pg_reachable(TEST_PG_DSN), reason="测试 Postgres 不可达"
+            ),
+        ),
+    ],
+)
+def test_写作自环中断恢复_已完成章节零重复调用且产物与不中断路径等价(backend: str):
+    """章级 checkpoint 验收（ADR-0001 约束 1 与 4，真实现链路版）。
+
+    链路口径：真编排（make_rewriter_loop → make_writer_run）+ 真 style linter +
+    真 JSON 解析路径（LlmWriterClient），仅最底层模型调用用 FakeLLM 替身——
+    仅在桩上通过的验收不算通过（约束 4）。
+    故障注入（issue #8 Testing Decisions）：包一层在第二章首写调用上抛致命
+    异常的 LLM，图调用在写第二章的超步内崩溃并向外抛出，模拟进程死于该章
+    执行中途；首章超步的 checkpoint 已落盘，同 thread_id 二次驱动恢复。
+    断言：已完成章节零重复模型调用（逐章统计写作与自审调用）、
+    subagent_start/end 成对带 chapter_id 与 mode 且 progress 事件全部落在
+    成对区间内并携同一业务上下文、最终产物与不中断路径完全等价。
+    """
+    from contextlib import contextmanager
+
+    from agents.rewriter_loop import make_rewriter_loop
+    from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
+
+    class _CrashOnSecondChapterWrite:
+        """故障注入 LLM：第二章首写调用抛致命异常，其余调用透传底层 FakeLLM。
+
+        写作缝（LlmWriterClient）的退化重试会把每轮异常都打到这里，
+        从未拿到信封则重抛最后一个异常——``crash_calls`` 记录实际重试轮次。
+        """
+
+        def __init__(self, inner: FakeLLM) -> None:
+            self._inner = inner
+            self.crash_calls = 0
+
+        @property
+        def metadata(self) -> dict[str, str]:
+            return self._inner.metadata
+
+        def invoke(self, messages: list[dict[str, str]]) -> str:
+            text = joined_prompt(messages)
+            if "- 标题：第二章" in text and "【引用自审】" not in text:
+                self.crash_calls += 1
+                raise RuntimeError("故障注入：进程死于第二章首写")
+            return self._inner.invoke(messages)
+
+    @contextmanager
+    def _checkpoint_backend(kind: str):
+        if kind == "postgres":
+            with postgres_checkpointer(TEST_PG_DSN) as saver:
+                yield saver
+        else:
+            yield InMemorySaver()
+
+    def _recorder(events: list[tuple[str, dict]]):
         def _hook(event_type: str, payload: dict) -> None:
             events.append((event_type, payload))
 
-        return SubagentAdapter("rewriter_loop", _run, event_hook=_hook)
+        return _hook
 
-    saver = InMemorySaver()
-    thread_id = f"e2e-crash-{uuid.uuid4()}"
-    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    def _assert_chapter_events(
+        events: list[tuple[str, dict]], chapter_id: str
+    ) -> None:
+        """单章事件链：start/end 成对带业务上下文，progress 夹在区间内且上下文一致。
 
-    # 第一个「进程」：驱动到首章草稿的 checkpoint 落盘后立即停止迭代。
-    tasks_before: list[dict] = []
-    events_before: list[tuple[str, dict]] = []
-    fake = FakeLLM(
-        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
-    )
-    graph = build_graph(
-        llm_factory=lambda unit: fake,
-        checkpointer=saver,
-        rewriter_loop=_recording_rewriter(tasks_before, events_before),
-    )
-    for mode, chunk in graph.stream(
-        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-crash"),
-        config,
-        stream_mode=["updates", "debug"],
-    ):
-        if (
-            mode == "debug"
-            and isinstance(chunk, dict)
-            and chunk.get("type") == "checkpoint"
-            and len(chunk["payload"]["values"].get("chapter_drafts", [])) == 1
-        ):
-            break
-    # 死亡现场：首章已入档，待执行节点仍是 writing_orchestrator（写第二章）。
-    assert [task["chapter_spec"]["id"] for task in tasks_before] == ["ch1"]
-    snapshot = graph.get_state(config)
-    assert snapshot.next == ("writing_orchestrator",)
-    assert [d.chapter_id for d in snapshot.values["chapter_drafts"]] == ["ch1"]
+        钩子层的「父子链」即此序：progress 全部发生在本章 start 之后、end 之前，
+        并携同一 unit/chapter_id/mode（信封侧 parent_id 挂接在发射器测试中覆盖）。
+        """
+        assert events, f"章节 {chapter_id} 未记录到任何子智能体事件"
+        types = [etype for etype, _ in events]
+        assert types[0] == SUBAGENT_START and types[-1] == SUBAGENT_END
+        assert all(etype == SUBAGENT_PROGRESS for etype in types[1:-1])
+        for _, payload in events:
+            assert payload["unit"] == "rewriter_loop"
+            assert payload["chapter_id"] == chapter_id
+            assert payload["mode"] == "draft"
+        # 真实现首写链路的关键步骤序：写作调用对 → lint → 自审调用对 → 自审收束。
+        assert [payload["step"] for etype, payload in events[1:-1]] == [
+            "llm_call_start",
+            "llm_call_end",
+            "lint_done",
+            "llm_call_start",
+            "llm_call_end",
+            "audit_done",
+        ]
 
-    # 第二个「进程」：同 thread_id 恢复，只需剩余阶段应答（2 章语义核查）。
-    tasks_after: list[dict] = []
-    events_after: list[tuple[str, dict]] = []
-    fake2 = FakeLLM([SEMANTIC_PASS, SEMANTIC_PASS])
-    graph2 = build_graph(
-        llm_factory=lambda unit: fake2,
-        checkpointer=saver,
-        rewriter_loop=_recording_rewriter(tasks_after, events_after),
-    )
-    resumed = graph2.invoke(None, config)
+    with _checkpoint_backend(backend) as saver:
+        thread_id = f"e2e-crash-{uuid.uuid4()}"
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
-    # 已完成章节零重复调用：恢复进程的 rewriter 只写了第二章。
-    assert [task["chapter_spec"]["id"] for task in tasks_after] == ["ch2"]
-    # 事件成对且带业务上下文：两个进程各自 start/end 配对、章节 id 与模式正确
-    # （ADR-0001 约束 4 的事件断言；父子链挂接在发射器测试中覆盖）。
-    assert [
-        (etype, payload["chapter_id"], payload["mode"])
-        for etype, payload in events_before
-    ] == [(SUBAGENT_START, "ch1", "draft"), (SUBAGENT_END, "ch1", "draft")]
-    assert [
-        (etype, payload["chapter_id"], payload["mode"])
-        for etype, payload in events_after
-    ] == [(SUBAGENT_START, "ch2", "draft"), (SUBAGENT_END, "ch2", "draft")]
-    assert resumed["status"] == WorkflowStatus.AWAIT_USER_REVIEW
-    _assert_full_draft(resumed)
+        # 第一个「进程」：故障注入——第二章首写调用抛致命异常，图调用在写
+        # 第二章的超步内崩溃并向外抛出；首章超步的 checkpoint 已落盘，等价于
+        # 「某章完成、下一章未完成」时进程被 kill。只备首章的写作/自审键控应答：
+        # 第二章的调用在进入底层 FakeLLM 前即被注入异常拦截。
+        events_before: list[tuple[str, dict]] = []
+        fake = FakeLLM(
+            list(FIRST_PASS_RESPONSES),
+            keyed_responses={
+                **FRAMEWORK_KEYED_RESPONSES,
+                **_writer_keyed(["第一章"]),
+            },
+        )
+        crashing = _CrashOnSecondChapterWrite(fake)
+        graph = build_graph(
+            llm_factory=lambda unit: fake,
+            checkpointer=saver,
+            rewriter_loop=make_rewriter_loop(
+                lambda unit: crashing, _recorder(events_before)
+            ),
+        )
+        with pytest.raises(RuntimeError, match="故障注入：进程死于第二章首写"):
+            graph.invoke(
+                initial_state("写一篇人才培养方案", "专业撰稿人", "trace-crash"),
+                config,
+            )
+        # 写作缝退化重试 3 轮全部命中注入异常、从未拿到信封后重抛。
+        assert crashing.crash_calls == 3
+        # 死亡现场：首章已入档，待执行节点仍是 writing_orchestrator（写第二章）；
+        # 第二章超步崩溃，其写入被整体丢弃，不留半成品。
+        snapshot = graph.get_state(config)
+        assert snapshot.next == ("writing_orchestrator",)
+        assert [d.chapter_id for d in snapshot.values["chapter_drafts"]] == ["ch1"]
+        # 底层 FakeLLM 只见过首章的一次写作与一次自审（框架阶段调用另计）：
+        # 第二章的三轮重试均在进入底层模型前被拦截、未产生任何应答，
+        # 故调用计数与「进程死于两章之间」完全等价。
+        assert _writer_call_counts(fake) == {"第一章": 1, "第二章": 0}
+        assert len(fake.calls) == FRAMEWORK_LLM_CALLS + 2
 
-    # 与不中断路径的产物完全等价（打桩确定性保证可逐字段比对）。
-    baseline_graph, _, baseline_config = _build(FIRST_PASS_RESPONSES)
-    baseline = baseline_graph.invoke(
-        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-crash-base"),
-        baseline_config,
-    )
-    assert resumed["chapter_drafts"] == baseline["chapter_drafts"]
-    assert resumed["citation_library"] == baseline["citation_library"]
-    assert resumed["citation_report"] == baseline["citation_report"]
+        # 第二个「进程」：同 thread_id 恢复，只备剩余章节的写作/自审应答
+        # （键控切片到未完成章）与 2 章语义核查的顺序应答。
+        events_after: list[tuple[str, dict]] = []
+        fake2 = FakeLLM(
+            [SEMANTIC_PASS, SEMANTIC_PASS],
+            keyed_responses=_writer_keyed(["第二章"]),
+        )
+        graph2 = build_graph(
+            llm_factory=lambda unit: fake2,
+            checkpointer=saver,
+            rewriter_loop=make_rewriter_loop(
+                lambda unit: fake2, _recorder(events_after)
+            ),
+        )
+        resumed = graph2.invoke(None, config)
 
-    # 恢复后仍可定稿收束。
-    result = graph2.invoke(Command(resume=FINALIZE), config)
-    assert result["status"] == WorkflowStatus.FINISHED
+        # 已完成章节零重复模型调用：恢复进程只写了第二章，且总调用数恰为
+        # 第二章写作 1 + 自审 1 + 语义核查 2——首章的写作与自审花费为零。
+        assert _writer_call_counts(fake2) == {"第一章": 0, "第二章": 1}
+        assert len(fake2.calls) == 4
+        # 恢复进程的自审只审第二章素材池，未触碰首章素材。
+        audit_prompts = [
+            joined_prompt(messages)
+            for messages in fake2.calls
+            if "【引用自审】" in joined_prompt(messages)
+        ]
+        assert len(audit_prompts) == 1
+        assert "m-ch2-p1-h1" in audit_prompts[0]
+        assert "m-ch1-p1-h1" not in audit_prompts[0]
+        # 摘要链跨崩溃存续：恢复进程写第二章的提示词携带 checkpoint 里
+        # 首章的摘要（而非重写首章得来）。
+        (ch2_write_prompt,) = [
+            joined_prompt(messages)
+            for messages in fake2.calls
+            if "- 标题：第二章" in joined_prompt(messages)
+            and "【引用自审】" not in joined_prompt(messages)
+        ]
+        assert "第一章完成培养定位与背景铺陈。" in ch2_write_prompt
+
+        # 事件成对且带业务上下文、progress 父子链正确（ADR-0001 约束 2 与 4）。
+        # 崩溃进程的事件流按章拆分断言：首章链完整成对；被杀的第二章尝试
+        # 留下「有 start 无 end」的残链——SubagentAdapter 在 run 之前发
+        # subagent_start、编排在写作调用前发 llm_call_start，异常沿缝上抛后
+        # llm_call_end 与 subagent_end 均不再发出，事件流如实反映死亡现场。
+        ch1_before = [(t, p) for t, p in events_before if p["chapter_id"] == "ch1"]
+        ch2_before = [(t, p) for t, p in events_before if p["chapter_id"] == "ch2"]
+        _assert_chapter_events(ch1_before, "ch1")
+        assert [t for t, _ in ch2_before] == [SUBAGENT_START, SUBAGENT_PROGRESS]
+        assert all(p["mode"] == "draft" for _, p in ch2_before)
+        assert ch2_before[1][1]["step"] == "llm_call_start"
+        _assert_chapter_events(events_after, "ch2")
+        assert resumed["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+        _assert_full_draft(resumed)
+
+        # 与不中断路径的产物完全等价（同一键控应答计划保证真链路可逐字段比对）。
+        baseline_fake = FakeLLM(
+            list(FIRST_PASS_RESPONSES),
+            keyed_responses={
+                **FRAMEWORK_KEYED_RESPONSES,
+                **_writer_keyed(["第一章", "第二章"]),
+            },
+        )
+        baseline_graph = build_graph(
+            llm_factory=lambda unit: baseline_fake, checkpointer=InMemorySaver()
+        )
+        baseline_config: RunnableConfig = {
+            "configurable": {"thread_id": f"e2e-crash-base-{uuid.uuid4()}"}
+        }
+        baseline = baseline_graph.invoke(
+            initial_state("写一篇人才培养方案", "专业撰稿人", "trace-crash-base"),
+            baseline_config,
+        )
+        assert resumed["chapter_drafts"] == baseline["chapter_drafts"]
+        assert resumed["citation_library"] == baseline["citation_library"]
+        assert resumed["citation_report"] == baseline["citation_report"]
+
+        # 恢复后仍可定稿收束。
+        result = graph2.invoke(Command(resume=FINALIZE), config)
+        assert result["status"] == WorkflowStatus.FINISHED
 
 
 def test_rewriter任务包prev_chapter_summary含多个前章摘要链():
@@ -457,7 +613,11 @@ def test_LLM调用次数与单元归属():
         units_seen.append(unit)
         return fake
 
-    graph = build_graph(llm_factory=factory, checkpointer=InMemorySaver())
+    graph = build_graph(
+        llm_factory=factory,
+        checkpointer=InMemorySaver(),
+        rewriter_loop=make_stub_rewriter_loop(),
+    )
     config: RunnableConfig = {"configurable": {"thread_id": "e2e-llm-count"}}
     graph.invoke(initial_state("意图", "身份", "trace-llm"), config)
     result = graph.invoke(Command(resume=FINALIZE), config)
@@ -483,7 +643,11 @@ def test_状态经Postgres存档器持久化():
         fake = FakeLLM(
             list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
         )
-        graph = build_graph(llm_factory=lambda unit: fake, checkpointer=saver)
+        graph = build_graph(
+            llm_factory=lambda unit: fake,
+            checkpointer=saver,
+            rewriter_loop=make_stub_rewriter_loop(),
+        )
         result = graph.invoke(
             initial_state("持久化测试", "专业撰稿人", "trace-pg"), config
         )

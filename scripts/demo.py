@@ -5,14 +5,21 @@
 分支（纯改写 + 补充佐证）的修订意见 → 引文门禁 → 定稿 → 按两种书目
 格式渲染最终交付。
 
-缺省为空转模式：确定性假 LLM + 内存存档器 + 打桩子智能体，
+缺省为空转模式：确定性假 LLM + 内存存档器 + 打桩检索子智能体
+（写作走 rewriter_loop 真实现链路，仅最底层模型调用是假的），
 不依赖任何外部设施，可离线复现。
 加 --real 切换生产同构模式：真实 LLM 配置（.env 各单元变量）+
 Postgres 存档器（HYPOARGUS_PG_DSN）+ Langfuse 上报（LANGFUSE_* 已配置时）。
 
+每次运行额外产出一份构建过程档案（Markdown）落盘，供人工审核：
+完整事件流、每章中间产物、逐章 state 演进快照、修订与终审往返、
+最终整篇文章与统一重编号书目。缺省写入 var/demo_archive/<thread_id>.md，
+可用 --archive PATH 覆盖。
+
 用法：
-    python scripts/demo.py           # 空转演示
-    python scripts/demo.py --real    # 生产同构演示（需 .env 就绪）
+    python scripts/demo.py                    # 空转演示
+    python scripts/demo.py --real             # 生产同构演示（需 .env 就绪）
+    python scripts/demo.py --archive out.md   # 指定档案落盘路径
 """
 
 import argparse
@@ -22,6 +29,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -35,6 +43,12 @@ TIMEOUT = 7200.0
 
 MIXED_FEEDBACK = "引言口吻克制些；第二章补充行业数据佐证"
 
+# 档案缺省落盘目录（相对仓库根，已在 .gitignore 中忽略）。
+ARCHIVE_DIR = REPO_ROOT / "var" / "demo_archive"
+
+# 防御性脱敏：模型配置摘要中含这些子串的键一律不写入档案。
+_SENSITIVE_KEY_MARKERS = ("key", "secret", "token", "password")
+
 
 def _timing_suffix() -> str:
     """LLM 计时日志开启时给事件行附加时间戳，方便与调用计时对齐。"""
@@ -43,29 +57,420 @@ def _timing_suffix() -> str:
     return f" t={time.time():.1f}" if timing_enabled() else ""
 
 
+def _fmt_ts(epoch: float) -> str:
+    """本地时间的可读格式，档案元信息与业务事件行共用。"""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
+def _short(event_id: str | None) -> str:
+    """事件 id 截短为 8 位展示；空值渲染为占位符。"""
+    return event_id[:8] if event_id else "-"
+
+
+class ArchiveRecorder:
+    """构建过程档案收集器：贯穿一次演示运行，结束时整体渲染为 Markdown 落盘。
+
+    只做旁路记录，不改变任何驱动逻辑；正文全文一律来自 REST 读
+    （finalized 载荷与书目渲染接口），事件信封本身不含正文。
+    """
+
+    def __init__(self, real: bool, path_override: str | None) -> None:
+        self.real = real
+        self.path_override = path_override
+        self.thread_id: str | None = None
+        self.started_at = time.time()
+        self.finished_at: float | None = None
+        self.graph_events: list[dict[str, Any]] = []
+        self.business_events: list[dict[str, Any]] = []
+        self.review_actions: list[dict[str, Any]] = []
+        # 每次人工中断点时经书目接口抓取的整篇渲染快照（统一重编号后文本）。
+        self.round_snapshots: list[dict[str, Any]] = []
+        self.finalized: dict[str, Any] | None = None
+        self.bibliographies: dict[str, dict[str, Any]] = {}
+
+    # ---- 采集入口 ----
+
+    def record_graph_event(self, envelope: dict[str, Any]) -> None:
+        self.graph_events.append(envelope)
+
+    def record_business_event(self, event: dict[str, Any]) -> None:
+        self.business_events.append({"at": time.time(), **event})
+
+    def record_review_action(self, action: dict[str, Any]) -> None:
+        self.review_actions.append({"at": time.time(), **action})
+
+    def record_round_snapshot(
+        self, round_no: int, rendered: dict[str, Any]
+    ) -> None:
+        self.round_snapshots.append(
+            {"round": round_no, "at": time.time(), "rendered": rendered}
+        )
+
+    # ---- 落盘 ----
+
+    def resolve_path(self) -> Path:
+        if self.path_override:
+            return Path(self.path_override)
+        name = self.thread_id or time.strftime("%Y%m%d-%H%M%S")
+        return ARCHIVE_DIR / f"{name}.md"
+
+    def write(self) -> Path:
+        path = self.resolve_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self._render(), encoding="utf-8")
+        return path
+
+    # ---- 渲染 ----
+
+    def _render(self) -> str:
+        parts = [
+            self._render_meta(),
+            self._render_event_stream(),
+            self._render_chapter_artifacts(),
+            self._render_state_evolution(),
+            self._render_review_round(),
+            self._render_final_deliverables(),
+        ]
+        return "\n\n".join(parts) + "\n"
+
+    def _render_meta(self) -> str:
+        mode = "真实模型（--real）" if self.real else "空转（确定性假 LLM）"
+        finished = _fmt_ts(self.finished_at) if self.finished_at else "（未正常结束）"
+        lines = [
+            "# 构建过程档案",
+            "",
+            "## 运行元信息",
+            "",
+            f"- 运行模式：{mode}",
+            f"- thread_id：`{self.thread_id or '（任务未创建）'}`",
+            f"- 开始时间：{_fmt_ts(self.started_at)}",
+            f"- 结束时间：{finished}",
+            "- 模型单元配置摘要（来自 llm_config_used 事件，已脱敏，不含任何密钥）：",
+        ]
+        configs = self._unit_configs()
+        if configs:
+            for unit, payload in sorted(configs.items()):
+                lines.append(f"  - `{unit}`：`{_compact(payload)}`")
+        else:
+            lines.append("  - （运行期间未观察到 llm_config_used 事件）")
+        return "\n".join(lines)
+
+    def _unit_configs(self) -> dict[str, dict[str, Any]]:
+        """按单元汇总 llm_config_used 载荷；含敏感字样的键防御性剔除。"""
+        configs: dict[str, dict[str, Any]] = {}
+        for envelope in self.graph_events:
+            if envelope["type"] != "llm_config_used":
+                continue
+            payload = {
+                key: value
+                for key, value in envelope["payload"].items()
+                if not any(marker in key.lower() for marker in _SENSITIVE_KEY_MARKERS)
+            }
+            configs[envelope["unit"]] = payload
+        return configs
+
+    def _render_event_stream(self) -> str:
+        lines = [
+            "## 完整事件流",
+            "",
+            "### graph_event 可视化通道",
+            "",
+            "逐条按到达顺序记录：事件类型、单元、关键载荷字段与父子链",
+            "（id/parent 为 event_id 前 8 位，parent 指向父事件，可据此审计执行拓扑）。",
+            "",
+        ]
+        if not self.graph_events:
+            lines.append("（未收到任何 graph_event。）")
+        for index, envelope in enumerate(self.graph_events, start=1):
+            lines.append(
+                f"{index:>3}. `{envelope['ts']}` **{envelope['type']}** "
+                f"unit=`{envelope['unit']}` "
+                f"payload=`{_compact(envelope['payload'])}` "
+                f"id=`{_short(envelope['event_id'])}` "
+                f"parent=`{_short(envelope.get('parent_id'))}`"
+            )
+        lines += ["", "### 业务 SSE 通道", ""]
+        if not self.business_events:
+            lines.append("（未收到任何业务事件。）")
+        for index, event in enumerate(self.business_events, start=1):
+            lines.append(
+                f"{index:>3}. `{_fmt_ts(event['at'])}` **{event['type']}** "
+                f"data=`{_business_data_digest(event)}`"
+            )
+        return "\n".join(lines)
+
+    def _rewriter_calls(self) -> list[dict[str, Any]]:
+        """从事件流重建每次 rewriter_loop 调用：启动信封 + 其下进度步骤。"""
+        calls: list[dict[str, Any]] = []
+        for envelope in self.graph_events:
+            if (
+                envelope["type"] == "subagent_start"
+                and envelope["unit"] == "rewriter_loop"
+            ):
+                calls.append({"start": envelope, "steps": []})
+            elif envelope["type"] == "progress" and envelope["unit"] == "rewriter_loop":
+                for call in calls:
+                    if envelope.get("parent_id") == call["start"]["event_id"]:
+                        call["steps"].append(envelope)
+                        break
+        return calls
+
+    def _round_texts(self, round_index: int) -> dict[str, str]:
+        """第 N 次人工中断点快照的章节文本（统一重编号后），无快照则为空。"""
+        if round_index >= len(self.round_snapshots):
+            return {}
+        rendered = self.round_snapshots[round_index]["rendered"]
+        return {
+            chapter["chapter_id"]: chapter["text"]
+            for chapter in rendered.get("chapters", [])
+        }
+
+    def _render_chapter_artifacts(self) -> str:
+        lines = [
+            "## 每章中间产物",
+            "",
+            "说明：事件信封按设计绝不携带正文全文，且服务未暴露逐章 state 的",
+            "REST 读接口，故本节由「事件流推导 + 人工中断点时的整篇渲染快照 +",
+            "定稿载荷」三路拼合——草稿正文取自首次人工中断点的书目接口渲染",
+            "（已统一重编号），self_check 的 citations_ok 与 issues 按各写作调用的",
+            "lint_done / audit_done / revise_triggered 进度事件推导（明细文本未经",
+            "REST 暴露时以计数呈现），是否触发修订以 revise_triggered 事件为准。",
+            "",
+        ]
+        chapters = (self.finalized or {}).get("chapters", [])
+        calls = self._rewriter_calls()
+        first_round_texts = self._round_texts(0)
+        if not chapters:
+            lines.append("（运行未到定稿，无法枚举章节。）")
+            return "\n".join(lines)
+        for chapter in chapters:
+            chapter_id = chapter["chapter_id"]
+            lines += [f"### 章节 {chapter_id}", ""]
+            chapter_calls = [
+                call
+                for call in calls
+                if call["start"]["payload"].get("chapter_id") == chapter_id
+            ]
+            for number, call in enumerate(chapter_calls, start=1):
+                mode = call["start"]["payload"].get("mode")
+                digest = self._call_digest(call)
+                revised = "是" if digest["revise_triggered"] else "否"
+                lines += [
+                    f"- 写作调用 {number}（mode=`{mode}`）：",
+                    f"  - 步骤流：{digest['flow'] or '（无进度事件）'}",
+                    f"  - lint 违规数：{digest['lint_violations']}，"
+                    f"自审 issue 数：{digest['audit_issues']}，"
+                    f"退化：{digest['degraded']}",
+                    f"  - 是否触发修订（恰好一次修订机制）：{revised}",
+                    f"  - self_check 推导结论：citations_ok≈"
+                    f"{digest['citations_ok']}，issues 计数={digest['issue_total']}",
+                ]
+            if not chapter_calls:
+                lines.append("- （事件流中未观察到该章的 rewriter_loop 调用。）")
+            draft_text = first_round_texts.get(chapter_id)
+            lines += [
+                "- 草稿正文全文（首次人工中断点渲染快照，已统一重编号）：",
+                "",
+                "```",
+                draft_text if draft_text is not None else "（未捕获到首轮渲染快照）",
+                "```",
+                "",
+                f"- 最终 chapter_summary：{chapter.get('summary', '（定稿载荷未含摘要）')}",
+                "",
+            ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _call_digest(call: dict[str, Any]) -> dict[str, Any]:
+        """单次 rewriter_loop 调用的进度事件摘要：步骤流与质检计数。"""
+        flow_parts: list[str] = []
+        lint_violations: int | str = "未知"
+        audit_issues: int | str = "未知"
+        degraded = False
+        revise_triggered = False
+        for step_envelope in call["steps"]:
+            payload = step_envelope["payload"]
+            step = payload.get("step", "?")
+            extras = {
+                key: payload[key]
+                for key in ("call", "attempts", "text_chars", "violations", "issues")
+                if key in payload
+            }
+            flow_parts.append(f"{step}{_compact(extras) if extras else ''}")
+            if step == "lint_done":
+                lint_violations = payload.get("violations", "未知")
+            elif step == "audit_done":
+                audit_issues = payload.get("issues", "未知")
+            if payload.get("degraded"):
+                degraded = True
+            if step == "revise_triggered":
+                revise_triggered = True
+        clean = lint_violations == 0 and audit_issues == 0 and not degraded
+        return {
+            "flow": " → ".join(flow_parts),
+            "lint_violations": lint_violations,
+            "audit_issues": audit_issues,
+            "degraded": degraded,
+            "revise_triggered": revise_triggered,
+            "citations_ok": clean and not revise_triggered,
+            "issue_total": (
+                (lint_violations if isinstance(lint_violations, int) else 0)
+                + (audit_issues if isinstance(audit_issues, int) else 0)
+            ),
+        }
+
+    def _render_state_evolution(self) -> str:
+        lines = [
+            "## 逐章 state 演进快照",
+            "",
+            "快照来源：graph_event 通道的 state_snapshot 事件（每个超步节点更新后",
+            "各发布一条，载荷为纯计数元数据）。「已完成章节」由 rewriter_loop 的",
+            "subagent_end 事件顺序累积推导。",
+            "",
+            "| # | 时间 | 单元 | 已完成章节 | 草稿数/总章数 | 引文库条数 | 迭代轮次 | 状态 |",
+            "|---|------|------|------------|---------------|------------|----------|------|",
+        ]
+        done_chapters: list[str] = []
+        rows = 0
+        for envelope in self.graph_events:
+            if (
+                envelope["type"] == "subagent_end"
+                and envelope["unit"] == "rewriter_loop"
+            ):
+                chapter_id = envelope["payload"].get("chapter_id")
+                if chapter_id and chapter_id not in done_chapters:
+                    done_chapters.append(chapter_id)
+            if envelope["type"] != "state_snapshot":
+                continue
+            payload = envelope["payload"]
+            rows += 1
+            lines.append(
+                f"| {rows} | {envelope['ts']} | {envelope['unit']} "
+                f"| {'、'.join(done_chapters) or '—'} "
+                f"| {payload.get('chapters_completed', '?')}/"
+                f"{payload.get('chapter_total', '?')} "
+                f"| {payload.get('material_count', '?')} "
+                f"| {payload.get('iteration_round', '?')} "
+                f"| {payload.get('status', '?')} |"
+            )
+        if rows == 0:
+            lines.append("| — | — | — | — | — | — | — | 未观察到 state_snapshot 事件 |")
+        return "\n".join(lines)
+
+    def _render_review_round(self) -> str:
+        lines = ["## 修订与终审", ""]
+        review_events = [
+            event
+            for event in self.business_events
+            if event["type"] == "review_required"
+        ]
+        for index, event in enumerate(review_events, start=1):
+            data = event["data"]
+            lines += [
+                f"- 第 {index} 次人工中断点（`{_fmt_ts(event['at'])}`）：",
+                f"  - 中断载荷：`{_compact(data)}`",
+            ]
+        for action in self.review_actions:
+            if action["action"] == "revise":
+                lines.append(
+                    f"- 提交混合修订意见（`{_fmt_ts(action['at'])}`）："
+                    f"「{action['feedback']}」"
+                )
+            else:
+                lines.append(f"- 提交定稿（`{_fmt_ts(action['at'])}`）")
+        warnings = (self.finalized or {}).get("citation_warnings", [])
+        outcome = (
+            f"携未决引文警告交付：{warnings}" if warnings else "无未决引文警告，正常交付"
+        )
+        lines.append(
+            f"- 终审结果：{'已定稿，' + outcome if self.finalized else '未到定稿'}"
+        )
+        return "\n".join(lines)
+
+    def _render_final_deliverables(self) -> str:
+        lines = ["## 最终产物", "", "### 整篇文章（统一重编号后）", ""]
+        # 正文优先取书目接口的渲染结果（引文标记已统一重编号为 [1][2]…），
+        # 未捕获时回退定稿载荷的原始文本（引文为素材 id 标记）。
+        rendered = self.bibliographies.get("gbt7714") or {}
+        chapters = rendered.get("chapters") or (self.finalized or {}).get(
+            "chapters", []
+        )
+        if not chapters:
+            lines.append("（运行未到定稿。）")
+        for chapter in chapters:
+            lines += [
+                f"#### 章节 {chapter['chapter_id']}",
+                "",
+                "```",
+                chapter["text"],
+                "```",
+                "",
+            ]
+        for fmt, title in (("gbt7714", "统一重编号书目（gbt7714）"),
+                           ("markdown", "书目（markdown）")):
+            lines += [f"### {title}", ""]
+            rendered = self.bibliographies.get(fmt)
+            if rendered is None:
+                lines.append("（未捕获该格式的渲染结果。）")
+                continue
+            for entry in rendered["bibliography"]:
+                lines.append(f"- {entry['text']}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+def _compact(data: dict[str, Any]) -> str:
+    """载荷紧凑单行 JSON：档案行内展示用，保留中文原样。"""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _business_data_digest(event: dict[str, Any]) -> str:
+    """业务事件数据的行内摘要：finalized 载荷含全文，只记章节与规模。"""
+    data = event["data"]
+    if event["type"] == "finalized":
+        digest = {
+            "chapters": [
+                {"chapter_id": c["chapter_id"], "text_chars": len(c["text"])}
+                for c in data.get("chapters", [])
+            ],
+            "citation_warnings": data.get("citation_warnings", []),
+        }
+        return _compact(digest)
+    return _compact(data)
+
+
 def _build_app(real: bool):
     """按模式构建应用：空转注入假 LLM 与内存存档器，--real 走生产路径。"""
     from service.app import create_app
 
     if real:
-        # 子智能体（改写循环）本期仍是打桩，引文终审重试不会改变结果，
-        # 演示直接零重试：失败即携未决警告交人工，省去无效重试轮次。
+        # 引文终审重试对确定性演示意义有限，直接零重试：
+        # 失败即携未决警告交人工，省去无效重试轮次。
         return create_app(citation_max_retries=0)
 
     from langgraph.checkpoint.memory import InMemorySaver
 
     from llm.llm_client import FakeLLM
-    from tests.llm_response_plans import FRAMEWORK_KEYED_RESPONSES, TRUNK_RESPONSES
+    from tests.llm_response_plans import (
+        FRAMEWORK_KEYED_RESPONSES,
+        TRUNK_RESPONSES,
+        WRITER_KEYED_RESPONSES,
+    )
 
+    # 空转也走 rewriter_loop 真实现链路（真编排 + 真校验器 + 真解析）：
+    # 写作与自审调用按 WRITER_KEYED_RESPONSES 键控分派，仅最底层模型调用是假的。
     fake = FakeLLM(
-        list(TRUNK_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+        list(TRUNK_RESPONSES),
+        keyed_responses={**FRAMEWORK_KEYED_RESPONSES, **WRITER_KEYED_RESPONSES},
     )
     return create_app(
         llm_factory=lambda unit: fake, checkpointer=InMemorySaver()
     )
 
 
-async def _watch_graph_events(client: httpx.AsyncClient, thread_id: str) -> None:
+async def _watch_graph_events(
+    client: httpx.AsyncClient, thread_id: str, recorder: ArchiveRecorder
+) -> None:
     """持续打印 graph_event 可视化通道的事件信封摘要（由主流程取消收尾）。"""
     async with client.stream(
         "GET", f"/graph_events?thread_id={thread_id}"
@@ -74,6 +479,7 @@ async def _watch_graph_events(client: httpx.AsyncClient, thread_id: str) -> None
             if not line.startswith("data: "):
                 continue
             envelope = json.loads(line[len("data: ") :])
+            recorder.record_graph_event(envelope)
             print(
                 f"  [graph_event] {envelope['type']:<16} unit={envelope['unit']}"
                 f"{_timing_suffix()}"
@@ -81,7 +487,11 @@ async def _watch_graph_events(client: httpx.AsyncClient, thread_id: str) -> None
 
 
 async def _consume_business(
-    client: httpx.AsyncClient, thread_id: str, on_review, timeout: float = TIMEOUT
+    client: httpx.AsyncClient,
+    thread_id: str,
+    recorder: ArchiveRecorder,
+    on_review,
+    timeout: float = TIMEOUT,
 ) -> dict | None:
     """消费业务流：打印事件，遇 review_required 交给回调，返回 finalized 载荷。"""
 
@@ -93,6 +503,7 @@ async def _consume_business(
                 if not line.startswith("data: "):
                     continue
                 event = json.loads(line[len("data: ") :])
+                recorder.record_business_event(event)
                 data = event["data"]
                 if event["type"] == "status":
                     print(
@@ -113,7 +524,28 @@ async def _consume_business(
     return await asyncio.wait_for(_consume(), timeout)
 
 
-async def _drive(client: httpx.AsyncClient) -> None:
+async def _snapshot_round(
+    client: httpx.AsyncClient,
+    thread_id: str,
+    recorder: ArchiveRecorder,
+    round_no: int,
+) -> None:
+    """人工中断点时经书目接口抓取整篇渲染快照，供档案记录该轮章节全文。
+
+    书目接口读的是当前 State 的章节草稿（统一重编号渲染），是唯一能在
+    中间轮次拿到章节全文的 REST 读路径；渲染失败不影响主流程。
+    """
+    try:
+        response = await client.get(
+            f"/tasks/{thread_id}/bibliography?format=markdown"
+        )
+        response.raise_for_status()
+        recorder.record_round_snapshot(round_no, response.json())
+    except httpx.HTTPError as exc:
+        print(f"  [档案] 第 {round_no} 轮渲染快照抓取失败（不影响主流程）：{exc}")
+
+
+async def _drive(client: httpx.AsyncClient, recorder: ArchiveRecorder) -> None:
     """驱动一遍完整闭环并渲染书目。"""
     response = await client.post(
         "/tasks",
@@ -128,34 +560,45 @@ async def _drive(client: httpx.AsyncClient) -> None:
     )
     response.raise_for_status()
     thread_id = response.json()["thread_id"]
+    recorder.thread_id = thread_id
     print(f"任务已创建：thread_id={thread_id}")
 
-    watcher = asyncio.create_task(_watch_graph_events(client, thread_id))
+    watcher = asyncio.create_task(_watch_graph_events(client, thread_id, recorder))
     reviewed = False
+    review_round = 0
 
     async def on_review(data: dict) -> None:
-        nonlocal reviewed
+        nonlocal reviewed, review_round
+        review_round += 1
         if data["citation_warnings"]:
             print(f"[业务] 未决引文警告：{data['citation_warnings']}")
+        await _snapshot_round(client, thread_id, recorder, review_round)
         if not reviewed:
             reviewed = True
             print(f"[演示] 提交混合修订意见：{MIXED_FEEDBACK}")
+            recorder.record_review_action(
+                {"action": "revise", "feedback": MIXED_FEEDBACK}
+            )
             await client.post(
                 f"/tasks/{thread_id}/review",
                 json={"action": "revise", "feedback": MIXED_FEEDBACK},
             )
         else:
             print("[演示] 提交定稿")
+            recorder.record_review_action({"action": "finalize"})
             await client.post(
                 f"/tasks/{thread_id}/review", json={"action": "finalize"}
             )
 
     try:
-        finalized = await _consume_business(client, thread_id, on_review)
+        finalized = await _consume_business(client, thread_id, recorder, on_review)
+        # 给可视化通道留一小段排空时间，让定稿前后的尾部事件进入档案。
+        await asyncio.sleep(0.5)
     finally:
         watcher.cancel()
 
     assert finalized is not None
+    recorder.finalized = finalized
     for chapter in finalized["chapters"]:
         print(f"\n===== 章节 {chapter['chapter_id']} =====\n{chapter['text']}")
 
@@ -165,12 +608,14 @@ async def _drive(client: httpx.AsyncClient) -> None:
         )
         response.raise_for_status()
         rendered = response.json()
+        recorder.bibliographies[fmt] = rendered
         print(f"\n===== 书目（{fmt}）=====")
         for entry in rendered["bibliography"]:
             print(entry["text"])
 
 
-async def _main(real: bool) -> None:
+async def _main(real: bool, archive_path: str | None) -> None:
+    recorder = ArchiveRecorder(real, archive_path)
     app = _build_app(real)
     config = uvicorn.Config(
         app, host="127.0.0.1", port=0, log_level="warning",
@@ -191,10 +636,14 @@ async def _main(real: bool) -> None:
             # 靠 _consume_business 的整体超时兜底。
             timeout=httpx.Timeout(10.0, read=None),
         ) as client:
-            await _drive(client)
+            await _drive(client, recorder)
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+        # 无论成败都落盘：异常中止时档案保留已采集部分，便于事后排查。
+        recorder.finished_at = time.time()
+        archived = recorder.write()
+        print(f"\n构建过程档案已落盘：{archived}")
     print("\n演示完成。")
 
 
@@ -205,4 +654,11 @@ if __name__ == "__main__":
         action="store_true",
         help="生产同构模式：真实 LLM 配置 + Postgres 存档器 + Langfuse 上报",
     )
-    asyncio.run(_main(parser.parse_args().real))
+    parser.add_argument(
+        "--archive",
+        metavar="PATH",
+        default=None,
+        help="构建过程档案落盘路径（缺省 var/demo_archive/<thread_id>.md）",
+    )
+    args = parser.parse_args()
+    asyncio.run(_main(args.real, args.archive))

@@ -25,7 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from agents.contracts import Subagent
-from agents.rewriter_loop import make_stub_rewriter_loop
+from agents.rewriter_loop import make_rewriter_loop
 from agents.search_agent import make_stub_search_agent
 from assembly.assembler_config import AssemblerConfig
 from domain.state import WorkflowStatus, WritingAgentState
@@ -97,7 +97,9 @@ def build_graph(
     """构建并编译迭代闭环图。
 
     llm_factory 是注入确定性假 LLM 的测试接缝；
-    search_agent / rewriter_loop 未注入时使用本期打桩适配器；
+    search_agent 未注入时使用本期打桩适配器；rewriter_loop 未注入时使用
+    真实现工厂（make_rewriter_loop：构图时读取一次写作环境配置并按单元名
+    取 LLM），打桩仅在显式注入处使用；
     citation_max_retries 未注入时按环境变量 CITATION_MAX_RETRIES（缺省 2）；
     assembler_config 未注入时各节点执行期按环境变量读取装配配置。
     人工中断点依赖存档器恢复，生产运行必须传入 checkpointer。
@@ -107,7 +109,7 @@ def build_graph(
         search_agent or make_stub_search_agent()
     )
     effective_rewriter_loop = observability.wrap_subagent(
-        rewriter_loop or make_stub_rewriter_loop()
+        rewriter_loop or make_rewriter_loop(llm_factory)
     )
 
     node_functions = {

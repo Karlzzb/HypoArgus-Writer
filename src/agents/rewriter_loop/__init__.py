@@ -27,6 +27,7 @@ from agents.rewriter_loop.stub import (
     stub_rewriter_loop_run,
 )
 from agents.rewriter_loop.writer import (
+    audit_issues_to_violations,
     load_writer_settings,
     make_rewriter_loop,
     make_writer_run,
@@ -50,6 +51,7 @@ __all__ = [
     "Violation",
     "WriterEnvelope",
     "WriterLlmClient",
+    "audit_issues_to_violations",
     "detect_chapter_template",
     "extract_facts",
     "lint",

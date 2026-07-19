@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 
+from agents.rewriter_loop import make_stub_rewriter_loop
 from service.app import create_app
 from graph import build_graph, postgres_checkpointer
 from llm.llm_client import FakeLLM
@@ -35,6 +36,7 @@ from tests.llm_response_plans import (
     REVISE_ROUND_RESPONSES,
     SEMANTIC_PASS,
     TRUNK_RESPONSES,
+    WRITER_KEYED_RESPONSES,
 )
 from tests.e2e.test_graph_e2e import TEST_PG_DSN, _pg_reachable
 
@@ -45,15 +47,27 @@ def _make_app(
     responses: list[str],
     checkpointer: Any = None,
     keyed: dict[str, list[str]] | None = None,
+    *,
+    rewriter_stub: bool = True,
 ) -> FastAPI:
-    """带 FakeLLM 与 InMemorySaver 构建应用。"""
+    """带 FakeLLM 与 InMemorySaver 构建应用。
+
+    rewriter_stub=True（缺省）显式注入打桩改写器：本文件多数用例验收 HTTP 层
+    与事件通道，不依赖写作真实现（其契约在 tests/agents/rewriter_loop/ 覆盖）。
+    置 False 走 create_app 缺省的真实现链路（事件钩子接内部分发器），
+    调用方须在 keyed 里给足写作与自审应答。
+    """
     fake = FakeLLM(
         list(responses),
         keyed_responses=keyed if keyed is not None else FRAMEWORK_KEYED_RESPONSES,
     )
+    subagent_kwargs: dict[str, Any] = (
+        {"rewriter_loop": make_stub_rewriter_loop()} if rewriter_stub else {}
+    )
     return create_app(
         llm_factory=lambda unit: fake,
         checkpointer=checkpointer if checkpointer is not None else InMemorySaver(),
+        **subagent_kwargs,
     )
 
 
@@ -540,7 +554,11 @@ def test_断点续跑_图运行中途死亡后resume续跑至中断点():
     fake = FakeLLM(
         list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
     )
-    graph = build_graph(llm_factory=lambda unit: fake, checkpointer=saver)
+    graph = build_graph(
+        llm_factory=lambda unit: fake,
+        checkpointer=saver,
+        rewriter_loop=make_stub_rewriter_loop(),
+    )
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     for mode, chunk in graph.stream(
         initial_state("写一篇人才培养方案", "专业撰稿人", "trace-mid"),
@@ -588,7 +606,11 @@ def test_崩溃后免resume_直接查状态检查点并回滚到中断点():
     fake = FakeLLM(
         list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
     )
-    graph = build_graph(llm_factory=lambda unit: fake, checkpointer=saver)
+    graph = build_graph(
+        llm_factory=lambda unit: fake,
+        checkpointer=saver,
+        rewriter_loop=make_stub_rewriter_loop(),
+    )
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     graph.invoke(
         initial_state("写一篇人才培养方案", "专业撰稿人", "trace-roll"), config
@@ -692,7 +714,13 @@ def test_错误路径_未知任务404与非中断点提交409与非法入参422(
 )
 def test_端到端主干_混合修订两类分支经引文门禁定稿并渲染书目(backend: str):
     async def main(saver: Any) -> None:
-        app = _make_app(TRUNK_RESPONSES, checkpointer=saver)
+        # 端到端主干走 rewriter_loop 真实现链路：写作与自审经键控应答分派。
+        app = _make_app(
+            TRUNK_RESPONSES,
+            checkpointer=saver,
+            keyed={**FRAMEWORK_KEYED_RESPONSES, **WRITER_KEYED_RESPONSES},
+            rewriter_stub=False,
+        )
         async with _client(app) as client:
             thread_id, _ = await _create_task(client, f"sess-trunk-{backend}")
 

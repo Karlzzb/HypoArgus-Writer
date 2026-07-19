@@ -13,7 +13,7 @@ framework_orchestrator → reference_orchestrator → writing_orchestrator → c
 ```
 
 - 论证体系三层结构：章节 1—n 论点，论点 1—N 假说；假说可证伪、可检索验证，是检索任务的直接驱动源。
-- 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入，本期为打桩实现。
+- 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入；rewriter_loop 已为真实现（写作、风格校验、自审、修一次），search_agent 仍为打桩。
 - 引用采用「正文角标 + 结构化引文库」分离方案；最终交付可按任意书目格式渲染，格式与内容解耦。
 - human_review_gate 是全流程唯一安全汇点：任何机器环节失败若干次后都塌缩到这里，系统永不卡死。
 - 全流程状态经 LangGraph 官方 Postgres 存档器持久化，支持断点续跑与历史版本回滚。
@@ -126,7 +126,7 @@ python -m mypy src      # 类型检查
 ```
 
 - 只测外部行为，不测实现细节；最高测试接缝为 FastAPI HTTP 层的端到端主干测试。
-- 第二道接缝是统一 LLM 调用封装层，注入确定性假 LLM 使主节点行为可复现；打桩子智能体即现成测试替身。
+- 第二道接缝是统一 LLM 调用封装层，注入确定性假 LLM 使主节点与真实现写作链路行为可复现；打桩子智能体仍可显式注入作测试替身。
 - 依赖 Postgres 的测试按 `HYPOARGUS_TEST_PG_DSN`（缺省 `postgresql://postgres:postgres@127.0.0.1:15432/postgres`）连接，不可达时自动跳过。
 
 ## 文档

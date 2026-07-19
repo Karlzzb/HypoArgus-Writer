@@ -25,7 +25,7 @@ from service.event_envelope import GRAPH_EVENT_TYPES, EventEnvelope
 from graph import build_graph, postgres_checkpointer
 from llm.llm_client import LLMFactory, default_llm_factory
 from agents.contracts import Subagent
-from agents.rewriter_loop import make_stub_rewriter_loop
+from agents.rewriter_loop import make_rewriter_loop
 from agents.search_agent import make_stub_search_agent
 from service.task_service import (
     InvalidReview,
@@ -136,7 +136,8 @@ def create_app(
     """构建 FastAPI 应用：全部依赖在 lifespan 里装配。
 
     checkpointer 为 None 时走生产路径（Postgres 存档器，按环境变量连接）；
-    测试注入 InMemorySaver。子智能体未注入时使用打桩适配器，事件钩子
+    测试注入 InMemorySaver。search_agent 未注入时使用打桩适配器，
+    rewriter_loop 未注入时使用真实现工厂（make_rewriter_loop），事件钩子
     经线程本地分发器按运行动态路由。
     """
 
@@ -156,7 +157,7 @@ def create_app(
                 search_agent=search_agent
                 or make_stub_search_agent(hook_dispatcher),
                 rewriter_loop=rewriter_loop
-                or make_stub_rewriter_loop(hook_dispatcher),
+                or make_rewriter_loop(llm_factory, hook_dispatcher),
                 citation_max_retries=citation_max_retries,
                 assembler_config=assembler_config,
             )

@@ -13,15 +13,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(REPO_ROOT / ".env")
 
-from openai import OpenAI
+from openai import OpenAI  # noqa: E402
 
-from llm.llm_config import load_llm_config
-from llm.llm_json import JSON_ONLY_RULE
-from nodes.framework_orchestrator import _ANGLE_GUIDE
+from llm.llm_config import load_llm_config  # noqa: E402
+from llm.llm_json import JSON_ONLY_RULE  # noqa: E402
+from nodes.framework_orchestrator import _ANGLE_GUIDE  # noqa: E402
 
 SYSTEM = (
     "你是假说生成器。针对章节语境下的单个论点，从六角度发散生成可证伪的假说："

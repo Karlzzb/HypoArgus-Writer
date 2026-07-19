@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from llm import observability
+from agents.rewriter_loop import make_stub_rewriter_loop
 from domain.units import MAIN_NODES
 from graph import build_graph
 from llm.llm_client import FakeLLM, OpenAICompatibleLLM
@@ -176,7 +177,10 @@ def captured_spans():
             list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
         )
         graph = build_graph(
-            llm_factory=lambda unit: fake, checkpointer=InMemorySaver()
+            llm_factory=lambda unit: fake,
+            checkpointer=InMemorySaver(),
+            # 本测试验收 span 覆盖而非写作真实现：显式注入打桩改写器。
+            rewriter_loop=make_stub_rewriter_loop(),
         )
         config: RunnableConfig = {"configurable": {"thread_id": "obs-test"}}
         with observability.run_span(
