@@ -26,18 +26,21 @@ def parse_json(raw: str, step: str) -> Any:
     raise ValueError(f"步骤「{step}」的 LLM 应答中找不到 JSON：{raw[:200]!r}")
 
 
-def invoke_json(llm: LLM, step: str, system: str, user: str, expect: type) -> Any:
+def invoke_json(
+    llm: LLM, step: str, system: str, user: str, expect: type | tuple[type, ...]
+) -> Any:
     """执行一次 LLM 调用并解析 JSON，同时校验顶层类型。"""
-    payload = parse_json(
-        llm.invoke(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ]
-        ),
-        step,
+    raw = llm.invoke(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
     )
+    payload = parse_json(raw, step)
     if not isinstance(payload, expect):
         expected = "对象" if expect is dict else "数组"
-        raise ValueError(f"步骤「{step}」的 LLM 应答顶层必须是 JSON {expected}")
+        raise ValueError(
+            f"步骤「{step}」的 LLM 应答顶层必须是 JSON {expected}，"
+            f"实际应答：{raw[:200]!r}"
+        )
     return payload

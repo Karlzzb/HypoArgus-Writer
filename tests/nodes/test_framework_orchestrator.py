@@ -148,6 +148,26 @@ def test_模板路径_产出合规State且章节裁剪生效(templates_dir: Path
     assert len(fake.calls) == 5
 
 
+def test_论点应答为字符串数组时同样解析(templates_dir: Path) -> None:
+    """真实模型常把 points 直接给成字符串数组而非 {"text": ...} 对象，两种形态都要认。"""
+    result, _ = _run_node(
+        [
+            {"genre": "行业评论", "template_file": None},
+            [{"title": "引言", "subsections": ["背景"]}],
+            _points_all(["字符串论点", {"text": "对象论点"}, "  ", 42]),
+            [_hyp()],
+        ],
+        templates_dir,
+        keyed={
+            _hyp_key("字符串论点"): [[_hyp("假说甲")]],
+            _hyp_key("对象论点"): [[_hyp("假说乙")]],
+        },
+    )
+    points = result["outline"][0].points
+    # 空白串与非法类型项被丢弃，字符串与对象两种形态都被解析。
+    assert [point.text for point in points] == ["字符串论点", "对象论点"]
+
+
 def test_自由结构路径_识别应答无模板时正常产出(templates_dir: Path) -> None:
     result, _ = _run_node(
         [

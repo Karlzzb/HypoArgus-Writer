@@ -27,8 +27,7 @@ from assembly.assembler_config import AssemblerConfig
 from assembly.context_assembler import assemble
 from domain.framework_config import FrameworkLimits, load_framework_limits
 from llm.llm_client import LLM, LLMFactory
-from llm.llm_json import JSON_ONLY_RULE
-from llm.llm_json import invoke_json
+from llm.llm_json import JSON_ONLY_RULE, invoke_json
 from domain.state import (
     ArgumentPoint,
     ChapterSpec,
@@ -276,16 +275,30 @@ def _generate_points_all(
         ):
             by_index.setdefault(item["chapter_index"], item["points"])
 
+    def point_text(point: Any) -> str:
+        """取论点文本：兼容 {"text": ...} 对象与直接的字符串两种应答形态。"""
+        if isinstance(point, dict) and isinstance(point.get("text"), str):
+            return point["text"].strip()
+        if isinstance(point, str):
+            return point.strip()
+        return ""
+
     points_per_chapter: list[list[str]] = []
     for index in range(1, len(chapters) + 1):
         texts = [
-            point["text"].strip()
+            text
             for point in by_index.get(index, [])
-            if isinstance(point, dict)
-            and isinstance(point.get("text"), str)
-            and point["text"].strip()
+            if (text := point_text(point))
         ]
         points_per_chapter.append(texts[:max_points])
+    if not any(points_per_chapter):
+        # 应答非空但解析后全部章节论点为空：打印原始 payload 定位格式偏差
+        # （曾出现关思考后 points 直接给成字符串数组的形态漂移）。
+        print(
+            f"[framework] 全文论点解析为空，原始 payload："
+            f"{json.dumps(payload, ensure_ascii=False)[:1500]}",
+            flush=True,
+        )
     return points_per_chapter
 
 

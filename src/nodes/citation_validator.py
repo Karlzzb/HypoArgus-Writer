@@ -90,6 +90,30 @@ def _self_check_issues(drafts: list[ChapterDraft]) -> list[CitationIssue]:
     return issues
 
 
+def _normalize_semantic_payload(payload: Any) -> list[Any]:
+    """把语义核查应答归一化为核查项列表。
+
+    要求的形态是顶层数组；关思考后模型偶发把数组包进对象
+    （如 {"results": [...]}）或直接返回单个核查项对象，兼容这两种偏差：
+    - 顶层是数组：原样返回；
+    - 顶层是单个核查项对象（含 material_id）：包成单元素列表；
+    - 顶层对象恰含一个数组值：取该数组；
+    其余形态视为无法归一化，抛含步骤名的 ValueError。
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get("material_id"), str):
+            return [payload]
+        list_values = [value for value in payload.values() if isinstance(value, list)]
+        if len(list_values) == 1:
+            return list_values[0]
+    raise ValueError(
+        "步骤「引文语义核查」的 LLM 应答无法归一化为核查项数组："
+        f"{json.dumps(payload, ensure_ascii=False)[:200]}"
+    )
+
+
 def _semantic_check_chapter(
     llm: LLM,
     chapter_id: str,
@@ -111,11 +135,12 @@ def _semantic_check_chapter(
         f"章节 {chapter_id} 正文：\n{chapter_text}\n\n"
         f"该章被引素材：\n{json.dumps(cited, ensure_ascii=False, indent=2)}"
     )
-    payload = invoke_json(llm, "引文语义核查", system, user, list)
+    payload = invoke_json(llm, "引文语义核查", system, user, (list, dict))
+    items = _normalize_semantic_payload(payload)
 
     cited_ids = {material["id"] for material in cited}
     issues: list[CitationIssue] = []
-    for item in payload:
+    for item in items:
         if not isinstance(item, dict):
             continue
         material_id = item.get("material_id")

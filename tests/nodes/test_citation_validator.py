@@ -153,6 +153,33 @@ def test_语义核查应答中不在被引集合的素材项被丢弃() -> None:
     assert result["citation_report"].passed is True
 
 
+def test_语义核查应答被对象包裹时同样解析() -> None:
+    """关思考后模型偶发把核查项数组包进对象，应取出其中唯一的数组值。"""
+    state = _state([_draft("ch1", "引用[m1]。")], [_mat("m1", "ch1")])
+    result, _ = _run(
+        state,
+        [{"results": [_aligned("m1", aligned=False, reason="观点不符")]}],
+    )
+    report = result["citation_report"]
+    assert report.passed is False
+    assert [issue.kind for issue in report.issues] == ["semantic_mismatch"]
+
+
+def test_语义核查应答为单个核查项对象时同样解析() -> None:
+    """关思考后模型偶发直接返回单个核查项对象，应包成单元素数组。"""
+    state = _state([_draft("ch1", "引用[m1]。")], [_mat("m1", "ch1")])
+    result, _ = _run(state, [_aligned("m1", aligned=False, reason="观点不符")])
+    report = result["citation_report"]
+    assert report.passed is False
+    assert [issue.kind for issue in report.issues] == ["semantic_mismatch"]
+
+
+def test_语义核查应答无法归一化时抛ValueError() -> None:
+    state = _state([_draft("ch1", "引用[m1]。")], [_mat("m1", "ch1")])
+    with pytest.raises(ValueError, match="引文语义核查"):
+        _run(state, [{"a": [], "b": []}])
+
+
 def test_自检失败合并为self_check_failed() -> None:
     state = _state(
         [
