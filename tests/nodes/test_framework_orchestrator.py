@@ -416,3 +416,54 @@ def test_识别应答文件名归一化后仍无匹配时回落自由结构(temp
         templates_dir,
     )
     assert result["template_id"] is None
+
+
+def test_文种锚定_命中注册表模板_State写入文种与变体(tmp_path: Path) -> None:
+    """注册表映射进 State（ADR-0005）：模板命中经注册表锚定文种与变体。"""
+    (tmp_path / "index.md").write_text(
+        "模板\t典型调用场景\n高职专科人才培养方案模版.md\t高职人才培养方案撰写\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "高职专科人才培养方案模版.md").write_text(
+        "# {专业名称}人才培养方案\n\n## 一、培养目标\n", encoding="utf-8"
+    )
+    result, _ = _run_node(
+        [
+            {"genre": "人才培养方案", "template_file": "高职专科人才培养方案模版.md"},
+            [{"index": 1, "applicable": True, "title": "培养目标", "subsections": []}],
+            _points_all([]),
+        ],
+        tmp_path,
+    )
+    assert result["template_id"] == "高职专科人才培养方案模版.md"
+    assert result["doc_type"] == "人才培养方案"
+    assert result["doc_variant"] == "高职"
+
+
+def test_文种锚定_自由结构无模板_落通用公文兑底(templates_dir: Path) -> None:
+    result, _ = _run_node(
+        [
+            {"genre": "行业评论", "template_file": None},
+            [{"title": "引言", "subsections": []}],
+            _points_all([]),
+        ],
+        templates_dir,
+    )
+    assert result["template_id"] is None
+    assert result["doc_type"] == "通用公文"
+    assert result["doc_variant"] is None
+
+
+def test_文种锚定_命中未登记模板_同样落通用公文兑底(templates_dir: Path) -> None:
+    """临时/未登记模板不臆断文种：确定性落兑底，登记后才升为专属文种。"""
+    result, _ = _run_node(
+        [
+            {"genre": "人才培养方案", "template_file": "测试模版.md"},
+            [{"index": 1, "applicable": True, "title": "章", "subsections": []}],
+            _points_all([]),
+        ],
+        templates_dir,
+    )
+    assert result["template_id"] == "测试模版.md"
+    assert result["doc_type"] == "通用公文"
+    assert result["doc_variant"] is None

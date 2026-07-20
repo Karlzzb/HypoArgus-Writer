@@ -79,6 +79,10 @@ class RewriteTask(TypedDict):
     """rewriter_loop 任务包：统包首写（draft）与纯改写（revise）两种模式。"""
 
     mode: Literal["draft", "revise"]
+    doc_type: str
+    """文种：State 中经文种注册表锚定的确定性事实（ADR-0005），编排层原样携带。"""
+    doc_variant: str | None
+    """文种内变体（目前仅人才培养方案声明本科/高职）；无变体为 None。"""
     chapter_spec: ChapterSpecPayload
     materials: list[MaterialPayload]
     prev_chapter_summary: str
@@ -93,6 +97,10 @@ class RewriteResult(TypedDict):
     """章节正文，含原位角标（形如 [素材id]）。"""
     chapter_summary: str
     self_check: SelfCheckPayload
+    doc_type: str
+    """回带任务包携带的文种：产物按哪套文种规则产出，随结果自证、供排障回放。"""
+    doc_variant: str | None
+    """回带任务包携带的变体，语义同 doc_type。"""
 
 
 class Subagent(Protocol):

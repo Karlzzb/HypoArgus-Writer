@@ -1,5 +1,7 @@
 {
   "mode": "draft",
+  "doc_type": "人才培养方案",
+  "doc_variant": "本科",
   "chapter_spec": {
     "id": "ch-1",
     "title": "示例章节",

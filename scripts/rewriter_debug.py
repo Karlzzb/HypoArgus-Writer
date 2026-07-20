@@ -47,17 +47,19 @@ from agents.rewriter_loop import (  # noqa: E402
     audit_issues_to_violations,
     lint,
     load_prose,
-    load_writer_settings,
     make_rewriter_loop,
+    tier_from_variant,
 )
 from agents.rewriter_loop.writer_client import WriterEnvelope, pass_materials  # noqa: E402
+from domain.doc_types import carried_doc_facts  # noqa: E402
 from llm.llm_client import LLM, FakeLLM, default_llm_factory  # noqa: E402
 
 # 缺省样例任务包路径：按脚本自身位置解析，任意 cwd 下均可直接运行。
 # draft 上下文与 revise 字段（current_text / revision_directives）齐备，两种模式皆可空转。
 _DEFAULT_TASK_PATH = Path(__file__).resolve().parent / "rewriter_task.sample.json"
 
-# 任务包必备键（RewriteTask 契约的必填字段；mode 可被 --mode 覆盖故单独处理）。
+# 任务包必备键（编排链路真正依赖的字段；mode 可被 --mode 覆盖故单独处理，
+# 文种字段缺失时与真编排同口径落通用公文兑底，不在此强制）。
 _REQUIRED_TASK_KEYS = ("chapter_spec", "materials", "prev_chapter_summary")
 _REQUIRED_SPEC_KEYS = ("id", "title", "points", "hypotheses")
 
@@ -262,8 +264,13 @@ def main() -> None:
 
     task = load_task(args.task)
     task["mode"] = args.mode or task.get("mode") or "draft"
-    tier, doc_type = load_writer_settings()
-    print(f"[配置] mode={task['mode']} tier={tier} doc_type={doc_type} real={args.real}")
+    # 文种与变体来自任务包（ADR-0005）；兑底与层次推导与真编排同一口径。
+    doc_type, doc_variant = carried_doc_facts(task)
+    tier = tier_from_variant(doc_variant)
+    print(
+        f"[配置] mode={task['mode']} doc_type={doc_type}"
+        f" doc_variant={doc_variant} tier={tier} real={args.real}"
+    )
 
     if args.step is None:
         run_full(None if args.real else build_fake_llm(task), task)
@@ -271,7 +278,7 @@ def main() -> None:
 
     # --step：绕开编排逐环节直调，客户端构造口径与 make_rewriter_loop 工厂一致。
     llm: LLM = default_llm_factory(UNIT) if args.real else build_fake_llm(task)
-    client = LlmWriterClient(llm, tier=tier, doc_type=doc_type)
+    client = LlmWriterClient(llm)
     run_stepwise(client, task, tier, args.step)
 
 

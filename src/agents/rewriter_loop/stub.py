@@ -7,6 +7,7 @@
 from typing import Any
 
 from agents.contracts import SelfCheckPayload, SubagentAdapter
+from domain.doc_types import carried_doc_facts
 from domain.events import EventHook, noop_hook
 
 UNIT = "rewriter_loop"
@@ -48,10 +49,13 @@ async def stub_rewriter_loop_run(task: dict[str, Any]) -> dict[str, Any]:
 
     point_digest = "；".join(point["text"] for point in spec["points"])
     chapter_summary = f"《{spec['title']}》要点：{point_digest or '（无论点）'}（打桩摘要）"
+    doc_type, doc_variant = carried_doc_facts(task)
     return {
         "chapter_text": chapter_text,
         "chapter_summary": chapter_summary,
         "self_check": SelfCheckPayload(citations_ok=True, issues=[]),
+        "doc_type": doc_type,
+        "doc_variant": doc_variant,
     }
 
 

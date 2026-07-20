@@ -65,7 +65,13 @@ def test_改写打桩_draft模式_返回字段与原位角标合规() -> None:
     task = _make_draft_task()
     result = asyncio.run(adapter.run(task))
 
-    assert set(result.keys()) == {"chapter_text", "chapter_summary", "self_check"}
+    assert set(result.keys()) == {
+        "chapter_text",
+        "chapter_summary",
+        "self_check",
+        "doc_type",
+        "doc_variant",
+    }
     chapter_text = result["chapter_text"]
 
     # 每条 pass 素材的原位角标出现在正文中；fail 素材的角标不出现。

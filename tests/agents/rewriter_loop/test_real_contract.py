@@ -7,7 +7,7 @@ revise 保留原文并落实指令）在真实现链路上复验。
 链路口径：真编排（make_writer_run）+ 真校验器（style_linter）+ 真解析路径
 （LlmWriterClient JSON-in-text），仅最底层模型调用用 FakeLLM 替身；
 经 make_rewriter_loop(lambda unit: fake) 构造，一并覆盖工厂路径
-（单元名请求、环境配置缺省回落）。
+（单元名请求、文种与变体逐任务取自任务包）。
 """
 
 import asyncio
@@ -37,7 +37,13 @@ def test_改写真实现_draft模式_返回字段与原位角标合规(
     adapter = make_rewriter_loop(lambda unit: fake)
     result = asyncio.run(adapter.run(draft_task))
 
-    assert set(result.keys()) == {"chapter_text", "chapter_summary", "self_check"}
+    assert set(result.keys()) == {
+        "chapter_text",
+        "chapter_summary",
+        "self_check",
+        "doc_type",
+        "doc_variant",
+    }
     chapter_text = result["chapter_text"]
 
     # 每条 pass 素材的原位角标出现在正文中；fail 素材的角标不出现。
@@ -81,7 +87,13 @@ def test_改写真实现_revise模式_保留原文并落实每条指令(
     result = asyncio.run(adapter.run(draft_task))
 
     chapter_text = result["chapter_text"]
-    assert set(result.keys()) == {"chapter_text", "chapter_summary", "self_check"}
+    assert set(result.keys()) == {
+        "chapter_text",
+        "chapter_summary",
+        "self_check",
+        "doc_type",
+        "doc_variant",
+    }
     assert draft_task["current_text"] in chapter_text
     for directive in directives:
         assert directive["instruction"] in chapter_text
@@ -93,7 +105,7 @@ def test_改写真实现_revise模式_保留原文并落实每条指令(
         assert directive["instruction"] in revise_prompt
 
 
-def test_改写真实现_工厂路径_请求单元名并读缺省环境配置(
+def test_改写真实现_工厂路径_请求单元名且回带任务包文种(
     draft_task: dict[str, Any],
 ) -> None:
     seen_units: list[str] = []
@@ -106,7 +118,15 @@ def test_改写真实现_工厂路径_请求单元名并读缺省环境配置(
     adapter = make_rewriter_loop(factory)
     result = asyncio.run(adapter.run(draft_task))
 
-    # 工厂按单元名恰好取一次 LLM；缺省环境（本科/人才培养方案）下链路可用。
+    # 工厂按单元名恰好取一次 LLM；文种与变体经任务包进出、结果如实回带。
     assert seen_units == ["rewriter_loop"]
     assert adapter.unit == "rewriter_loop"
-    assert set(result.keys()) == {"chapter_text", "chapter_summary", "self_check"}
+    assert set(result.keys()) == {
+        "chapter_text",
+        "chapter_summary",
+        "self_check",
+        "doc_type",
+        "doc_variant",
+    }
+    assert result["doc_type"] == "人才培养方案"
+    assert result["doc_variant"] == "本科"

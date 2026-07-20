@@ -30,6 +30,7 @@ from typing import Literal, Protocol
 
 from assembly.assembler_config import AssemblerConfig, load_assembler_config
 from assembly.context_assembler import assemble, assemble_with
+from domain.doc_types import carried_doc_facts
 from domain.state import (
     ChapterDraft,
     ChapterSpec,
@@ -206,8 +207,11 @@ def make_writing_orchestrator_node(
             config=config,
             chapter_id=chapter.id,
         )
+        doc_type, doc_variant = carried_doc_facts(state)
         task = RewriteTask(
             mode="draft",
+            doc_type=doc_type,
+            doc_variant=doc_variant,
             chapter_spec=_chapter_spec_payload(chapter),
             materials=_materials_from_segment(context.text("chapter_materials")),
             prev_chapter_summary=context.text("summary_chain"),
@@ -301,8 +305,11 @@ def make_writing_orchestrator_node(
             config=config,
             chapter_id=chapter.id,
         )
+        doc_type, doc_variant = carried_doc_facts(state)
         task = RewriteTask(
             mode="revise",
+            doc_type=doc_type,
+            doc_variant=doc_variant,
             chapter_spec=_chapter_spec_payload(chapter),
             materials=_materials_from_segment(context.text("chapter_materials")),
             prev_chapter_summary=context.text("summary_chain"),

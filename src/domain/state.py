@@ -147,6 +147,11 @@ class WritingAgentState(TypedDict, total=False):
     genre: str
     template_id: str | None
     """匹配到的模板标识；自由结构模式为 None。"""
+    doc_type: str
+    """文种：品类识别选中模板后经文种注册表确定性锚定（ADR-0005），
+    无模板命中落「通用公文」兑底；由 framework_orchestrator 一次写入，全链路只读。"""
+    doc_variant: str | None
+    """文种内变体（目前仅人才培养方案声明本科/高职）；无变体为 None，与文种同刻写入、只读。"""
     outline: list[ChapterSpec]
     citation_library: list[Material]
     chapter_drafts: list[ChapterDraft]
@@ -177,6 +182,8 @@ def initial_state(
         user_identity=user_identity,
         genre="",
         template_id=None,
+        doc_type="",
+        doc_variant=None,
         outline=[],
         citation_library=[],
         chapter_drafts=[],

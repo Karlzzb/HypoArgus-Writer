@@ -24,6 +24,7 @@
 源项目的 tier（本科/高职）、doc_type、风格指南路径不进任务包：
 
 - tier 与 doc_type 用环境变量 `REWRITER_LOOP_TIER`（只接受本科|高职，缺省本科）与 `REWRITER_LOOP_DOC_TYPE`（自由文本，缺省人才培养方案）配置，工厂 `make_rewriter_loop` 内读取一次（`load_writer_settings`）。
+  （本条已被 ADR-0005 取代：两个环境变量废除，文种/变体经文种注册表锚定进 State 并随任务包契约携带，tier 由变体推导。）
 - 风格指南随包携带不可配（`agents/rewriter_loop/style_guide.md`，代码级单一事实源）；测试可显式传路径覆盖，运行时不可配。
 
 源项目的 reference_list、lint_report、revised 三个输出不进契约，各自去向：

@@ -10,6 +10,8 @@ def draft_task() -> dict[str, Any]:
     """draft 模式任务包：2 条 pass 素材 + 1 条 fail 素材（每个测试拿到全新副本）。"""
     return {
         "mode": "draft",
+        "doc_type": "人才培养方案",
+        "doc_variant": "本科",
         "chapter_spec": {
             "id": "ch-1",
             "title": "示例章节",

@@ -13,7 +13,7 @@ _STYLE_PROSE = "风格指南散文片段：公文范式与子风格约束。"
 
 
 def _make_client(llm: Any) -> LlmWriterClient:
-    return LlmWriterClient(llm, tier="本科", doc_type="人才培养方案")
+    return LlmWriterClient(llm)
 
 
 def _writer_json(text: str, summary: str = "一行摘要") -> str:
@@ -272,3 +272,37 @@ def test_真实适配器_系统提示词再平衡_论证指令上位(draft_task:
     # 空泛总结词禁令补充「显著提升」「有效解决」等定性断言词。
     assert "显著提升" in system or "有效解决" in system
 
+
+
+def test_真实适配器_文种与变体逐任务取自任务包(draft_task: dict[str, Any]) -> None:
+    """同一客户端连续服务不同文种的任务包：上下文块随任务切换，不固化构造期配置。
+
+    「层次」行取变体推导的 tier，与 lint 的推导同源：高职变体注入 层次：高职；
+    无变体文种回落缺省 层次：本科（lint 也按本科执行，两侧永远一致）。
+    """
+    llm = FakeLLM(responses=[_writer_json("正文一。"), _writer_json("正文二。")])
+    client = _make_client(llm)
+
+    draft_task["doc_variant"] = "高职"
+    client.draft(draft_task, _STYLE_PROSE)
+    draft_task["doc_type"] = "汇报材料"
+    draft_task["doc_variant"] = None
+    client.draft(draft_task, _STYLE_PROSE)
+
+    first_user = llm.calls[0][1]["content"]
+    second_user = llm.calls[1][1]["content"]
+    assert "文种：人才培养方案" in first_user
+    assert "层次：高职" in first_user
+    assert "文种：汇报材料" in second_user
+    assert "层次：本科" in second_user
+
+
+def test_真实适配器_任务包缺文种字段_回落通用公文与缺省层次(draft_task: dict[str, Any]) -> None:
+    del draft_task["doc_type"]
+    del draft_task["doc_variant"]
+    llm = FakeLLM(responses=[_writer_json("正文。")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    user = llm.calls[0][1]["content"]
+    assert "文种：通用公文" in user
+    assert "层次：本科" in user

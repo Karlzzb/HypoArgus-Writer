@@ -30,6 +30,7 @@ from agents.rewriter_loop.writer_client import (
     WriterEnvelope,
     pass_materials,
 )
+from domain.doc_types import carried_doc_facts, tier_from_variant
 from llm.llm_client import LLM
 from llm.llm_json import JSON_ONLY_RULE, parse_json
 
@@ -107,8 +108,15 @@ def _format_directives(task: dict[str, Any]) -> str:
     return "\n".join(f"- [{d['type']}] {d['instruction']}" for d in directives)
 
 
-def _build_context_block(task: dict[str, Any], *, tier: str, doc_type: str) -> str:
-    """draft / revise 共用的上下文块（章节骨架 / 字数目标 / 素材池 / 假说 / 衔接），不含尾部指令。"""
+def _build_context_block(task: dict[str, Any]) -> str:
+    """draft / revise 共用的上下文块（章节骨架 / 字数目标 / 素材池 / 假说 / 衔接），不含尾部指令。
+
+    文种与变体逐任务取自任务包（ADR-0005）；「层次」行取变体推导的 tier，
+    与编排层喂给 lint 的推导同源——模型被告知的层次与校验执行的层次永远一致
+    （无变体回落缺省「本科」，与废除前环境变量的缺省口径逐字相同）。
+    """
+    doc_type, doc_variant = carried_doc_facts(task)
+    tier = tier_from_variant(doc_variant)
     spec = task["chapter_spec"]
     points = "\n".join(f"- {p['text']}" for p in spec["points"]) or "（无）"
     word_count_block = word_count_prompt_block(spec["title"])
@@ -143,8 +151,6 @@ def _system_content(instructions: str, style_prose: str) -> str:
 def _build_draft_user(
     task: dict[str, Any],
     *,
-    tier: str,
-    doc_type: str,
     fix_violations: Sequence[Violation] | None,
 ) -> str:
     """draft 的 user 提示词；``fix_violations`` 置位时切到修正口径（含违规清单）。
@@ -152,7 +158,7 @@ def _build_draft_user(
     修一次口径不回灌上一稿正文——用「完整上下文 + 违规清单」让模型按风格指南
     重写并规避违规。违规 message 已含规则名与片段，足供模型定位规避点。
     """
-    base = _build_context_block(task, tier=tier, doc_type=doc_type)
+    base = _build_context_block(task)
     if fix_violations:
         return (
             f"{base}\n上一轮产出检出以下违规，请在重写本章正文与一行摘要时全部规避：\n"
@@ -164,8 +170,6 @@ def _build_draft_user(
 def _build_revise_user(
     task: dict[str, Any],
     *,
-    tier: str,
-    doc_type: str,
     fix_violations: Sequence[Violation] | None,
 ) -> str:
     """revise 的 user 提示词：同一上下文块 + 现有正文 + 定向修订指令。
@@ -174,7 +178,7 @@ def _build_revise_user(
     正文的既存违规清单（ADR-0004：revise 与 fix 合并——既存违规经预 lint 得到，
     与修订指令在同一次调用内一并解决，修复违规优先于「保持原样」）。
     """
-    base = _build_context_block(task, tier=tier, doc_type=doc_type)
+    base = _build_context_block(task)
     prompt = (
         f"{base}\n现有正文：\n{task.get('current_text', '')}\n"
         f"修订指令（仅按下列指令定向修改；未被指令覆盖的内容与 [素材id] 角标一律保持原样）：\n"
@@ -203,10 +207,8 @@ def _build_audit_user(chapter_text: str, task: dict[str, Any]) -> str:
 class LlmWriterClient:
     """写作 LLM 注入点的真实适配器：纯文本 JSON-in-text 调用注入的 LLM 协议。"""
 
-    def __init__(self, llm: LLM, *, tier: str, doc_type: str, max_attempts: int = 3) -> None:
+    def __init__(self, llm: LLM, *, max_attempts: int = 3) -> None:
         self._llm = llm
-        self._tier = tier
-        self._doc_type = doc_type
         self._max_attempts = max_attempts
 
     def draft(
@@ -216,9 +218,7 @@ class LlmWriterClient:
         *,
         fix_violations: Sequence[Violation] | None = None,
     ) -> WriterEnvelope:
-        user = _build_draft_user(
-            task, tier=self._tier, doc_type=self._doc_type, fix_violations=fix_violations
-        )
+        user = _build_draft_user(task, fix_violations=fix_violations)
         return self._write_with_retry("draft", style_prose, user)
 
     def revise(
@@ -228,9 +228,7 @@ class LlmWriterClient:
         *,
         fix_violations: Sequence[Violation] | None = None,
     ) -> WriterEnvelope:
-        user = _build_revise_user(
-            task, tier=self._tier, doc_type=self._doc_type, fix_violations=fix_violations
-        )
+        user = _build_revise_user(task, fix_violations=fix_violations)
         return self._write_with_retry("revise", style_prose, user)
 
     def _write_with_retry(self, step: str, style_prose: str, user: str) -> WriterEnvelope:

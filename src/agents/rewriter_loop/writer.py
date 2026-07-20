@@ -19,8 +19,7 @@
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Any
 
 from agents.contracts import SelfCheckPayload, SubagentAdapter
@@ -37,16 +36,9 @@ from agents.rewriter_loop.writer_client import (
     WriterLlmClient,
     pass_materials,
 )
+from domain.doc_types import carried_doc_facts, tier_from_variant
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook
 from llm.llm_client import LLMFactory
-
-_TIER_ENV = "REWRITER_LOOP_TIER"
-_DOC_TYPE_ENV = "REWRITER_LOOP_DOC_TYPE"
-
-_DEFAULT_TIER = "本科"
-_DEFAULT_DOC_TYPE = "人才培养方案"
-
-_VALID_TIERS = frozenset({"本科", "高职"})
 
 # 自审违规的规则名：与 lint 侧规则同族命名，供 self_check 折叠时归为引用类。
 _AUDIT_RULE = "self_audit_unmarked_derived_content"
@@ -55,23 +47,6 @@ _AUDIT_RULE = "self_audit_unmarked_derived_content"
 _CITATION_RULES = frozenset(
     {"unknown_material_marker", "unmarked_derived_content", _AUDIT_RULE}
 )
-
-
-def load_writer_settings(env: Mapping[str, str] | None = None) -> tuple[str, str]:
-    """读取写作层次与文种：空值回落缺省；tier 非法抛 ValueError 指明变量名。
-
-    doc_type 有意不校验：自由文本、只进提示词的上下文块，不参与任何规则分支，
-    错值最多影响措辞而不破坏行为，故开放任意非空值。
-    """
-    if env is None:
-        env = os.environ
-    tier = env.get(_TIER_ENV, "").strip() or _DEFAULT_TIER
-    doc_type = env.get(_DOC_TYPE_ENV, "").strip() or _DEFAULT_DOC_TYPE
-    if tier not in _VALID_TIERS:
-        raise ValueError(
-            f"环境变量 {_TIER_ENV} 只接受 {sorted(_VALID_TIERS)}，当前值：{tier!r}"
-        )
-    return tier, doc_type
 
 
 def audit_issues_to_violations(issues: Sequence[AuditIssue]) -> list[Violation]:
@@ -99,18 +74,20 @@ def audit_issues_to_violations(issues: Sequence[AuditIssue]) -> list[Violation]:
 def make_writer_run(
     client: WriterLlmClient,
     *,
-    tier: str,
     event_hook: EventHook = noop_hook,
 ) -> Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]:
     """构造写作编排的异步 run：黑盒 dict 进/出，供 ``SubagentAdapter`` 包装。
 
-    文种（doc_type）只属客户端的提示词上下文，编排层不需要，故不收该参数。
+    文种与变体逐任务取自任务包（ADR-0005：State 锚定后经契约携带），
+    校验层次（tier）由变体推导，构造期不再固化任何写作场景配置。
     """
 
     async def run(task: dict[str, Any]) -> dict[str, Any]:
         spec = task["chapter_spec"]
         chapter_id = spec["id"]
         mode = task["mode"]
+        doc_type, doc_variant = carried_doc_facts(task)
+        tier = tier_from_variant(doc_variant)
         materials = pass_materials(task)
         style_prose = load_prose()
 
@@ -188,6 +165,8 @@ def make_writer_run(
                     citations_ok=False,
                     issues=[f"写作模型退化：正文为空（已重试 {envelope.attempts} 轮）"],
                 ),
+                "doc_type": doc_type,
+                "doc_variant": doc_variant,
             }
 
         violations = quality_check(envelope.chapter_text)
@@ -215,6 +194,8 @@ def make_writer_run(
             "chapter_text": envelope.chapter_text,
             "chapter_summary": envelope.chapter_summary,
             "self_check": SelfCheckPayload(citations_ok=citations_ok, issues=issues),
+            "doc_type": doc_type,
+            "doc_variant": doc_variant,
         }
 
     return run
@@ -223,8 +204,7 @@ def make_writer_run(
 def make_rewriter_loop(
     llm_factory: LLMFactory, event_hook: EventHook = noop_hook
 ) -> SubagentAdapter:
-    """构造 rewriter_loop 真实现适配器：工厂内读取一次环境配置。"""
-    tier, doc_type = load_writer_settings()
-    client = LlmWriterClient(llm_factory(UNIT), tier=tier, doc_type=doc_type)
-    run = make_writer_run(client, tier=tier, event_hook=event_hook)
+    """构造 rewriter_loop 真实现适配器：文种与变体逐任务取自任务包，工厂无环境配置。"""
+    client = LlmWriterClient(llm_factory(UNIT))
+    run = make_writer_run(client, event_hook=event_hook)
     return SubagentAdapter(UNIT, run, event_hook)

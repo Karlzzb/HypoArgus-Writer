@@ -26,6 +26,7 @@ from typing import Any, Protocol
 
 from assembly.assembler_config import AssemblerConfig
 from assembly.context_assembler import assemble
+from domain.doc_types import resolve_doc_type
 from domain.framework_config import FrameworkLimits, load_framework_limits
 from llm.llm_client import LLM, LLMFactory
 from llm.llm_json import JSON_ONLY_RULE, invoke_json
@@ -516,9 +517,15 @@ def make_framework_orchestrator_node(
                 ]
                 outline = [future.result() for future in futures]
 
+        # 文种与变体经注册表由 template_file 确定性锚定（ADR-0005）：
+        # 无模板命中（自由结构）落「通用公文」兑底，此后全链路只读。
+        doc_type, doc_variant = resolve_doc_type(template_file)
+
         return WritingAgentState(
             genre=genre,
             template_id=template_file,
+            doc_type=doc_type,
+            doc_variant=doc_variant,
             outline=outline,
             status=WorkflowStatus.FRAMEWORK_BUILDING,
             current_node_llm_config={

@@ -594,3 +594,41 @@ def test_修订目标章无现存草稿抛ValueError():
     state["chapter_drafts"] = _existing_drafts()[:1]
     with pytest.raises(ValueError):
         node(state)
+
+
+def test_任务包携带State锚定的文种与变体_首写与修订两路径():
+    """State 的 doc_type/doc_variant 经任务包契约原样携带（ADR-0005），只读透传。"""
+    rewriter = 记录式假改写适配器()
+    node = make_writing_orchestrator_node(rewriter, 记录式假检索适配器())
+    state = _make_state()
+    state["doc_type"] = "人才培养方案"
+    state["doc_variant"] = "高职"
+    _drive_to_completion(node, state)
+    assert all(task["doc_type"] == "人才培养方案" for task in rewriter.tasks)
+    assert all(task["doc_variant"] == "高职" for task in rewriter.tasks)
+
+    # 修订路径（第二处任务包构造点）同样携带。
+    rewriter = 记录式假改写适配器()
+    node = make_writing_orchestrator_node(rewriter, 记录式假检索适配器())
+    state = _make_revision_state(
+        [
+            RevisionDirective(
+                target_chapter_id="ch1", type="rewrite_only", instruction="收紧语气"
+            )
+        ]
+    )
+    state["doc_type"] = "汇报材料"
+    state["doc_variant"] = None
+    _drive_to_completion(node, state)
+    assert [task["mode"] for task in rewriter.tasks] == ["revise"]
+    assert rewriter.tasks[0]["doc_type"] == "汇报材料"
+    assert rewriter.tasks[0]["doc_variant"] is None
+
+
+def test_State缺文种字段_任务包回落通用公文兑底():
+    """过渡兼容：旧存档 State 无 doc_type/doc_variant 时任务包按兑底文种携带。"""
+    rewriter = 记录式假改写适配器()
+    node = make_writing_orchestrator_node(rewriter, 记录式假检索适配器())
+    _drive_to_completion(node, _make_state())
+    assert all(task["doc_type"] == "通用公文" for task in rewriter.tasks)
+    assert all(task["doc_variant"] is None for task in rewriter.tasks)

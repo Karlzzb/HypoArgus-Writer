@@ -31,9 +31,9 @@ from agents.rewriter_loop.stub import (
 )
 from agents.rewriter_loop.writer import (
     audit_issues_to_violations,
-    load_writer_settings,
     make_rewriter_loop,
     make_writer_run,
+    tier_from_variant,
 )
 from agents.rewriter_loop.writer_client import (
     AuditEnvelope,
@@ -62,7 +62,6 @@ __all__ = [
     "lint",
     "load_config",
     "load_prose",
-    "load_writer_settings",
     "make_rewriter_loop",
     "make_stub_rewriter_loop",
     "make_writer_run",
@@ -70,5 +69,6 @@ __all__ = [
     "resolve_ideology_chapter",
     "resolve_template",
     "stub_rewriter_loop_run",
+    "tier_from_variant",
     "word_count_prompt_block",
 ]
