@@ -271,7 +271,9 @@ class ArchiveRecorder:
             "定稿载荷」三路拼合——草稿正文取自首次人工中断点的书目接口渲染",
             "（已统一重编号），self_check 的 citations_ok 与 issues 按各写作调用的",
             "lint_done / audit_done / revise_triggered 进度事件推导（明细文本未经",
-            "REST 暴露时以计数呈现），是否触发修订以 revise_triggered 事件为准。",
+            "REST 暴露时以计数呈现），是否触发修订以 revise_triggered 事件为准；",
+            "触发修订时末次 lint_done / audit_done 为修后复检计数（ADR-0004），",
+            "citations_ok 按末次（终态）计数推导。",
             "",
         ]
         chapters = (self.finalized or {}).get("chapters", [])
@@ -349,7 +351,9 @@ class ArchiveRecorder:
             "audit_issues": audit_issues,
             "degraded": degraded,
             "revise_triggered": revise_triggered,
-            "citations_ok": clean and not revise_triggered,
+            # 末次 lint/audit 计数即终态（触发修订时为修后复检计数，ADR-0004），
+            # 故触发过修订不再一票否决 citations_ok。
+            "citations_ok": clean,
             "issue_total": (
                 (lint_violations if isinstance(lint_violations, int) else 0)
                 + (audit_issues if isinstance(audit_issues, int) else 0)

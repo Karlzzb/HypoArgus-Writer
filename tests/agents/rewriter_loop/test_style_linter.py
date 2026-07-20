@@ -16,7 +16,6 @@ from agents.rewriter_loop import (
     load_config,
     load_prose,
     normalize_cjk_ws,
-    recheck_word_count,
     resolve_ideology_chapter,
     resolve_template,
     word_count_prompt_block,
@@ -857,17 +856,6 @@ def test_字数规则_无章标题_不校验() -> None:
     text = "正文无章标题，不校验字数。"
     violations = lint(text, "本科")
     assert "word_count" not in _rules(violations)
-
-
-def test_字数复检_与lint同口径() -> None:
-    # 构造一章不足下限（2000）。标题「一、总则」= 3 字计入，故正文 1996 字，合计 1999 < 2000。
-    text = "## 一、总则\n\n" + "字" * 1996
-    lint_violations = lint(text, "本科")
-    recheck_violations = recheck_word_count(text)
-    # 复检与 lint 产出同形 Violation、规则名相同。
-    assert "word_count" in _rules(lint_violations)
-    assert "word_count" in _rules(recheck_violations)
-    assert len([v for v in lint_violations if v.rule == "word_count"]) == len(recheck_violations)
 
 
 def test_字数目标块_叙述章型_取中上限提示() -> None:

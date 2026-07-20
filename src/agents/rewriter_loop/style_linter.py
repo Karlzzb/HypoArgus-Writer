@@ -968,7 +968,7 @@ def _shrunk_range(
 def check_word_count(text: str, cfg: dict[str, Any]) -> list[Violation]:
     """字数管控核心校验（纯函数）：三级区间 + 动态收缩 + 节级同级差异 + 表章豁免。
 
-    供 lint 注册规则与「修一次后复检」双消费，同一口径零漂移。
+    经 lint 注册规则消费（修一次后的复检直接复用全量 lint，同一口径零漂移）。
     ``cfg`` 无 ``word_count`` 节、或正文无 ``## `` 章标题（非标准章结构）时不校验。
     表章（``table_required`` 章型）豁免各级散文下限与节级同级差异比对，仅保各级上限。
     """
@@ -1106,15 +1106,6 @@ def _rule_word_count(ctx: _LintContext) -> list[Violation]:
     return check_word_count(ctx.text, ctx.cfg)
 
 
-def recheck_word_count(text: str, style_guide_path: str | Path | None = None) -> list[Violation]:
-    """「修一次」后的字数复检（纯函数、零 LLM 成本）：与 lint 规则同口径。
-
-    供写作编排在修订后重新统计字数，结论如实折入 self_check.issues。
-    """
-    cfg = load_config(style_guide_path)
-    return check_word_count(normalize_cjk_ws(text), cfg)
-
-
 def word_count_prompt_block(
     title: str, style_guide_path: str | Path | None = None
 ) -> str:
@@ -1146,6 +1137,10 @@ def word_count_prompt_block(
             "- 本章为叙述章型：正文体量宜取区间中上限，同章各节展开程度须均衡"
             "（最长节不超过最短节的 2 倍）。"
         )
+    lines.append(
+        "- 字数区间是机检硬标准：任何一级（章/节/小节）超出区间即判违规并触发整章返工，"
+        "成文前须逐级自查各章节字数落在区间内。"
+    )
     return "\n".join(lines)
 
 

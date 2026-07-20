@@ -123,7 +123,11 @@ def build_fake_llm(task: dict[str, Any]) -> FakeLLM:
         responses=[envelope_json(body, "一行公文摘要（空转样例）")],
         keyed_responses={
             # 自审提示词固定携带【引用自审】标签；修一次提示词固定携带违规清单导语。
-            "【引用自审】": [json.dumps({"issues": audit_issues}, ensure_ascii=False)],
+            # 第二条空裁决供修后复检的自审（ADR-0004）消费：复检出清、终态干净。
+            "【引用自审】": [
+                json.dumps({"issues": audit_issues}, ensure_ascii=False),
+                json.dumps({"issues": []}, ensure_ascii=False),
+            ],
             "检出以下违规": [
                 envelope_json(f"{body}（已按违规清单修订）", "修订后一行公文摘要（空转样例）")
             ],
@@ -153,7 +157,9 @@ def run_stepwise(client: LlmWriterClient, task: dict[str, Any], tier: str, step:
 
     环节顺序与真编排（writer.make_writer_run）一致：起草 → lint → 自审 → 修一次；
     自审折叠违规复用编排层同一折叠函数，保证违规口径零漂移。
-    与真编排的差异仅在于不产出 self_check 折叠结论——那是整跑（无 --step）的产物。
+    与真编排的差异：不产出 self_check 折叠结论（那是整跑的产物）；revise 起草
+    不做「现有正文预 lint 并入」（ADR-0004 的合并属整跑链路，--step 逐环节独立观察）；
+    修一次后不做修后复检（同理，复检结论看整跑的 self_check）。
     """
     mode = task["mode"]
     style_prose = load_prose()

@@ -1,13 +1,17 @@
 """writer：rewriter_loop 真实现的写作编排与工厂。
 
-黑盒 dict 进/出的异步编排（ADR-0001 约束 3：禁止子图化），draft 与 revise
-共享同一「校验-自审-修一次」链路：
-写作调用 → lint → 自审 → 任一违规则恰好一次修订 → 折叠 self_check。
+黑盒 dict 进/出的异步编排（ADR-0001 约束 3：禁止子图化），两模式链路
+（ADR-0004：修后复检 v2 + revise/fix 合并）：
 
-修后不复检（v1）：折叠进 ``self_check`` 的是**修前**质检结论——修订产物是否
-真正规避了违规，由全局终审（citation_validator 等下游环节）兜底；单章内不做
-二次校验，避免修订-复检循环失控。故 ``citations_ok=False`` 表示「本章修前检出过
-引用类违规、已修一次但未复核」，交由下游裁决。
+- draft：写作调用 → lint → 自审 → 任一违规则恰好一次修订 → **修后复检**
+  （全量 lint 纯函数 + 一次轻量自审）→ 以修后终态折叠 self_check。
+- revise：先对现有正文做预 lint（纯函数、零成本），把既存违规连同修订指令
+  并入**唯一一次** revise 调用；调用后 lint + 自审即为终态质检，不再触发
+  第二次写作调用（revise 即修，消除「revise 后必然再 fix」的固定开销）。
+
+``self_check`` 折叠的是**修后终态**：``citations_ok=False`` 表示终态正文仍存
+引用类违规（或产物退化为空），交由全局终审（citation_validator）裁决；
+已被修一次真正规避的违规不再残留，避免门禁把已修好的章反复打回重写。
 
 关键步骤经 ``SUBAGENT_PROGRESS`` 事件对外上报（ADR-0001 约束 2），载荷只放
 元数据（unit / chapter_id / mode / step 与环节要点），绝不放正文全文。
@@ -25,7 +29,6 @@ from agents.rewriter_loop.style_linter import (
     Violation,
     lint,
     load_prose,
-    recheck_word_count,
 )
 from agents.rewriter_loop.stub import UNIT
 from agents.rewriter_loop.writer_client import (
@@ -134,7 +137,44 @@ def make_writer_run(
             )
             return envelope
 
-        envelope = call_write(mode)
+        def quality_check(text: str) -> list[Violation]:
+            """终态质检：全量 lint（纯函数）+ 轻量自审，违规合并为统一清单。
+
+            自审跳过分支（对齐源仓库「无引用池跳过自审」设计）：素材池为空则无
+            「派生未标」可判，跳过模型调用省一次 LLM 花费；不发 llm_call 事件对
+            （没有真实调用），但仍发 audit_done（issues=0）保证步骤流完整可观测。
+            """
+            found = lint(text, tier, materials=materials, hypotheses=spec["hypotheses"])
+            progress("lint_done", violations=len(found))
+            if materials:
+                progress("llm_call_start", call="audit")
+                audit = client.audit(text, task)
+                progress(
+                    "llm_call_end",
+                    call="audit",
+                    attempts=audit.attempts,
+                    degraded=audit.degraded,
+                )
+                found.extend(audit_issues_to_violations(audit.issues))
+                progress("audit_done", issues=len(audit.issues), degraded=audit.degraded)
+            else:
+                progress("audit_done", issues=0, degraded=False)
+            return found
+
+        # revise 与 fix 合并（ADR-0004）：现有正文的既存违规经预 lint（纯函数、
+        # 零 LLM 成本）得到，连同修订指令并入唯一一次 revise 调用，一次调用同时
+        # 满足定向修订、引用规避与字数区间，消除「revise 后必然再 fix」的固定开销。
+        pre_fix: list[Violation] = []
+        if mode == "revise":
+            pre_fix = lint(
+                task.get("current_text", ""),
+                tier,
+                materials=materials,
+                hypotheses=spec["hypotheses"],
+            )
+            progress("pre_lint_done", violations=len(pre_fix))
+
+        envelope = call_write(mode, fix=pre_fix or None)
 
         # 退化诚实空稿短路：不做 lint / 自审 / 修订，如实上报退化，交由下游裁决。
         # 刻意设计：该路径只发首次写作的 llm_call_start / llm_call_end（含 degraded）
@@ -150,52 +190,22 @@ def make_writer_run(
                 ),
             }
 
-        violations = lint(
-            envelope.chapter_text,
-            tier,
-            materials=materials,
-            hypotheses=spec["hypotheses"],
-        )
-        progress("lint_done", violations=len(violations))
-
-        # 自审跳过分支（对齐源仓库「无引用池跳过自审」设计）：素材池为空则无
-        # 「派生未标」可判，跳过模型调用省一次 LLM 花费；不发 llm_call 事件对
-        # （没有真实调用），但仍发 audit_done（issues=0）保证步骤流完整可观测。
-        if materials:
-            progress("llm_call_start", call="audit")
-            audit = client.audit(envelope.chapter_text, task)
-            progress(
-                "llm_call_end", call="audit", attempts=audit.attempts, degraded=audit.degraded
-            )
-            violations.extend(audit_issues_to_violations(audit.issues))
-            progress("audit_done", issues=len(audit.issues), degraded=audit.degraded)
-        else:
-            progress("audit_done", issues=0, degraded=False)
+        violations = quality_check(envelope.chapter_text)
 
         fix_degraded_empty = False
-        word_count_recheck_issues: list[str] | None = None
-        if violations:
-            # 恰好一次修订，修后一般不复检（v1）：以修订产物为最终正文与摘要。
+        if violations and mode != "revise":
+            # draft 模式恰好一次修订；修后复检（quality_check）得到终态违规清单。
+            # revise 模式不再二次调用——预 lint 违规已并入唯一一次 revise 调用，
+            # 上面的 quality_check 即为终态质检。
             progress("revise_triggered", violations=len(violations))
             envelope = call_write("fix", fix=violations)
             fix_degraded_empty = not envelope.chapter_text.strip()
-            # 例外：修前检出过字数违规时，修后用纯函数复检字数（零 LLM 成本），
-            # 结论无论达标与否均如实折入 self_check.issues，供终审与人工可见。
-            if not fix_degraded_empty and any(v.rule == "word_count" for v in violations):
-                recheck = recheck_word_count(envelope.chapter_text)
-                progress("word_count_recheck", violations=len(recheck))
-                if recheck:
-                    word_count_recheck_issues = [
-                        f"[word_count_recheck] 修后复检未达标：{v.message}" for v in recheck
-                    ]
-                else:
-                    word_count_recheck_issues = ["[word_count_recheck] 修后复检：字数达标"]
+            if not fix_degraded_empty:
+                violations = quality_check(envelope.chapter_text)
 
-        # self_check 折叠的是修前质检结论（引用类修后不复检），全局终审兜底；
-        # 字数是唯一例外——修后复检结论一并折入（纯函数、不引入二次 LLM 修订）。
+        # self_check 折叠修后终态（ADR-0004）：issues 只留终态仍存的违规，
+        # 已被修一次真正规避的不再残留——门禁据此不把已修好的章打回重写。
         issues = [f"[{v.rule}] {v.message}" for v in violations]
-        if word_count_recheck_issues:
-            issues.extend(word_count_recheck_issues)
         citations_ok = not any(v.rule in _CITATION_RULES for v in violations)
         if fix_degraded_empty:
             # 修订产物退化为空：保留修前违规明细，追加退化说明并判引用不通过。
