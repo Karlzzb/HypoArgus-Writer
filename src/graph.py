@@ -121,7 +121,7 @@ def build_graph(
 ) -> CompiledStateGraph:
     """构建并编译迭代闭环图。
 
-    llm_factory 是注入确定性假 LLM 的测试接缝；
+    llm_factory 是确定性假 LLM 的测试注入点；
     search_agent 未注入时使用本期打桩适配器；rewriter_loop 未注入时使用
     真实现工厂（make_rewriter_loop：构图时读取一次写作环境配置并按单元名
     取 LLM），打桩仅在显式注入处使用；

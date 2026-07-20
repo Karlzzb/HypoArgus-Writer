@@ -1,6 +1,6 @@
 """统一 LLM 调用封装层。
 
-所有模型统一按 OpenAI 兼容接口封装；本层是测试注入确定性假 LLM 的接缝：
+所有模型统一按 OpenAI 兼容接口封装；本层是测试替换确定性假 LLM 的注入点：
 节点代码只依赖 LLM 协议与 LLMFactory，不直接触碰 openai SDK。
 Langfuse 启用时客户端换成官方插桩版，每次调用自动上报 generation。
 """

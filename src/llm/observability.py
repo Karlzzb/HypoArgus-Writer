@@ -48,7 +48,7 @@ def langfuse_enabled() -> bool:
 
 
 def use_client(client: "Langfuse | None") -> None:
-    """注入 Langfuse 客户端（测试接缝）；传 None 恢复按环境变量决定。"""
+    """注入 Langfuse 客户端（测试注入点）；传 None 恢复按环境变量决定。"""
     global _client_override
     _client_override = client
 

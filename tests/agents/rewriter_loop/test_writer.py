@@ -49,7 +49,7 @@ def test_写作编排_draft无违规_一次调用且自检通过(draft_task: dic
     run = make_writer_run(fake, tier="本科")
     result = asyncio.run(run(draft_task))
 
-    # 恰一次 draft、无 fix；素材与上一章摘要经任务包原样传达到缝。
+    # 恰一次 draft、无 fix；素材与上一章摘要经任务包原样传达到注入点。
     assert len(fake.draft_calls) == 1
     seen_task, fix = fake.draft_calls[0]
     assert fix is None

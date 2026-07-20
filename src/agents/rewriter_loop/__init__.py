@@ -1,6 +1,6 @@
-"""rewriter_loop 子智能体包：真实现（写作编排 + LLM 缝 + 真实适配器）、打桩与风格校验器。
+"""rewriter_loop 子智能体包：真实现（写作编排 + LLM 注入点 + 真实适配器）、打桩与风格校验器。
 
-真实现见 ``writer``（编排与工厂）、``writer_client``（LLM 缝协议与假客户端）、
+真实现见 ``writer``（编排与工厂）、``writer_client``（LLM 注入点协议与假客户端）、
 ``llm_adapter``（真实适配器）；打桩实现见 ``stub``（同包共存，供空转与测试）；
 风格校验器（纯函数，不依赖主图与 LLM）见 ``style_linter``，
 其单一事实源为随包携带的 ``style_guide.md``。

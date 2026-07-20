@@ -19,7 +19,7 @@
 
 整跑（无 --step）经 ``make_rewriter_loop`` 工厂走与主图完全一致的编排链路，
 进度事件（subagent_start/end 与各 step 的 SUBAGENT_PROGRESS）直接打印到终端；
---step 模式绕开编排、逐环节直调 LLM 缝客户端与校验器，便于观察单环节产物。
+--step 模式绕开编排、逐环节直调 LLM 注入点客户端与校验器，便于观察单环节产物。
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def _print_violations(violations: list[Violation]) -> None:
 
 
 def run_stepwise(client: LlmWriterClient, task: dict[str, Any], tier: str, step: str) -> None:
-    """逐环节直调 LLM 缝与校验器，跑到 ``step`` 指定环节停并打印中间产物。
+    """逐环节直调 LLM 注入点与校验器，跑到 ``step`` 指定环节停并打印中间产物。
 
     环节顺序与真编排（writer.make_writer_run）一致：起草 → lint → 自审 → 修一次；
     自审折叠违规复用编排层同一折叠函数，保证违规口径零漂移。

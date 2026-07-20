@@ -1,4 +1,4 @@
-"""llm_adapter：写作 LLM 缝的真实适配器（本项目 LLM 协议纯文本调用）。
+"""llm_adapter：写作 LLM 注入点的真实适配器（本项目 LLM 协议纯文本调用）。
 
 只依赖注入的 ``llm.invoke(messages) -> str``（``llm.llm_client.LLM`` 协议），
 不触碰任何 SDK、API key 或环境变量。结构化输出为 JSON-in-text：
@@ -201,7 +201,7 @@ def _build_audit_user(chapter_text: str, task: dict[str, Any]) -> str:
 
 
 class LlmWriterClient:
-    """写作 LLM 缝的真实适配器：纯文本 JSON-in-text 调用注入的 LLM 协议。"""
+    """写作 LLM 注入点的真实适配器：纯文本 JSON-in-text 调用注入的 LLM 协议。"""
 
     def __init__(self, llm: LLM, *, tier: str, doc_type: str, max_attempts: int = 3) -> None:
         self._llm = llm

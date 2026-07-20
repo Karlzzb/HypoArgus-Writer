@@ -16,14 +16,14 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 | `src/domain/` | 领域模型：图状态与状态机（`state.py`）、书目渲染、角标对账、运行单元名册、事件钩子契约 |
 | `src/llm/` | 统一 LLM 封装：按运行单元前缀配置 + 全局回落（`llm_config.py`）、OpenAI 兼容客户端与 FakeLLM、Langfuse 可观测 |
 | `src/assembly/` | 上下文装配：`assemble(state, unit)` 统一入口与压缩阈值配置 |
-| `src/agents/` | 子智能体：任务包契约（`contracts.py`）、`rewriter_loop/` 真实实现子包（编排、写作 LLM 缝、真实适配器、风格校验器、随包风格指南；打桩同包共存、可显式注入）、search_agent 打桩实现 |
+| `src/agents/` | 子智能体：任务包契约（`contracts.py`）、`rewriter_loop/` 真实实现子包（编排、写作 LLM 注入点、真实适配器、风格校验器、随包风格指南；打桩同包共存、可显式注入）、search_agent 打桩实现 |
 | `src/nodes/` | 5 个主节点：framework_orchestrator → reference_orchestrator → writing_orchestrator → citation_validator → human_review_gate |
 | `src/graph.py` | 图接线、条件路由、Postgres 检查点保存器（含 `checkpoint_serializer` 类型注册） |
 | `src/service/` | 对外服务：FastAPI 应用（`app.py`）、任务生命周期（`task_service.py`）、事件枢纽与事件信封 |
 | `docs_templates/` | 本地模板库（品类识别与大纲骨架来源） |
 | `scripts/demo.py` | 全流程演示脚本（离线 / `--real` 两模式），每次运行落盘构建过程档案 |
 | `scripts/rewriter_debug.py` | rewriter_loop 独立调测脚本（绕开主图，供 prompt 与风格规则调优） |
-| `tests/` | 按 src 分包镜像 + `tests/e2e/`（最高接缝为 `test_api_e2e.py`）+ `tests/scripts/`（`scripts/` 调测脚本的冒烟测试） |
+| `tests/` | 按 src 分包镜像 + `tests/e2e/`（最高注入点为 `test_api_e2e.py`）+ `tests/scripts/`（`scripts/` 调测脚本的冒烟测试） |
 
 ## 3. 环境准备
 
@@ -83,7 +83,7 @@ python -m pytest                 # pythonpath=src、testpaths=tests 已在 pypro
 python -m mypy src scripts tests
 ```
 
-- `tests/e2e/test_api_e2e.py` 是最高接缝：httpx ASGI 全闭环（创建 → 双 SSE → 审阅 → 定稿 → 断点续跑 → 回滚）。
+- `tests/e2e/test_api_e2e.py` 是最高注入点：httpx ASGI 全闭环（创建 → 双 SSE → 审阅 → 定稿 → 断点续跑 → 回滚）。
 - `tests/e2e/test_graph_e2e.py` 依赖 Postgres（`HYPOARGUS_TEST_PG_DSN`），不可达时自动 skip；其中断恢复用例走 rewriter_loop 真实实现完整链路（仅最底层 FakeLLM）。
 - 离线确定性：FakeLLM + 预置应答计划（`tests/llm_response_plans.py`）；`tests/conftest.py` 会话级剥离 `LANGFUSE_*`。
 

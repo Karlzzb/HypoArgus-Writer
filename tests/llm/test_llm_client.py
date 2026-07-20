@@ -1,4 +1,4 @@
-"""统一 LLM 调用封装层（测试接缝）的单元测试。"""
+"""统一 LLM 调用封装层（测试注入点）的单元测试。"""
 
 from llm.llm_client import FakeLLM
 

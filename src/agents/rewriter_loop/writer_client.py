@@ -1,4 +1,4 @@
-"""writer_client：rewriter_loop 包内 LLM 缝（协议、信封与确定性假客户端）。
+"""writer_client：rewriter_loop 包内 LLM 注入点（协议、信封与确定性假客户端）。
 
 编排层（``writer``）只依赖本模块的 ``WriterLlmClient`` 协议，不关心真实适配器
 （``llm_adapter.LlmWriterClient``）还是测试假客户端（``FakeWriterLlmClient``）。
@@ -19,7 +19,7 @@ from agents.rewriter_loop.style_linter import Violation
 def pass_materials(task: dict[str, Any]) -> list[MaterialPayload]:
     """从任务包取判定通过（verdict=="pass"）的素材：fail 素材不进提示词与校验。
 
-    过滤口径收敛于缝模块，供编排层与真实适配器共用，避免多处同形漂移。
+    过滤口径收敛于注入点模块，供编排层与真实适配器共用，避免多处同形漂移。
     """
     return [m for m in task["materials"] if m["verdict"] == "pass"]
 
@@ -57,7 +57,7 @@ class AuditEnvelope(BaseModel):
 
 
 class WriterLlmClient(Protocol):
-    """写作 LLM 缝：三条同步调用，task 为 RewriteTask 任务包 dict。
+    """写作 LLM 注入点：三条同步调用，task 为 RewriteTask 任务包 dict。
 
     ``fix_violations`` 置位 = 「修一次」的修正口径：draft 按同一上下文重写并规避
     违规清单；revise 基于同一 current_text 重新执行定向改写并规避违规清单。

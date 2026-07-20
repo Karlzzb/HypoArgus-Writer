@@ -125,8 +125,8 @@ python -m pytest        # 全量测试
 python -m mypy src      # 类型检查
 ```
 
-- 只测外部行为，不测实现细节；最高测试接缝为 FastAPI HTTP 层的端到端主干测试。
-- 第二道接缝是统一 LLM 调用封装层，注入确定性假 LLM 使主节点与真实写作链路行为可复现；打桩子智能体仍可显式注入作测试替身。
+- 只测外部行为，不测实现细节；最高测试注入点为 FastAPI HTTP 层的端到端主干测试。
+- 第二道注入点是统一 LLM 调用封装层，注入确定性假 LLM 使主节点与真实写作链路行为可复现；打桩子智能体仍可显式注入作测试替身。
 - 依赖 Postgres 的测试按 `HYPOARGUS_TEST_PG_DSN`（缺省 `postgresql://postgres:postgres@127.0.0.1:15432/postgres`）连接，不可达时自动跳过。
 
 ## 文档
