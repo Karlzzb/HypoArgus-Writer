@@ -139,6 +139,39 @@ class TestValidateChapterNumbering:
         )
         assert all(issue.chapter_id == "ch2" for issue in issues)
 
+    def test_draft_with_extra_h2_chapter(self):
+        """真实 E2E 复跑发现的根因场景：单章草稿内多出一个带编号二级标题，
+
+        相当于模型在一章里凭空多写了一章；只看首个 ## 会漏检，
+        必须按「单章草稿只允许一个二级标题」报问题并触发定向重写。
+        """
+        outline = [_spec("ch1", "一、标题一"), _spec("ch2", "二、标题二")]
+        drafts = [
+            _draft("ch1", "## 一、标题一\n内容\n## 二、多余的章\n更多内容"),
+            _draft("ch2", "## 二、标题二\n内容"),
+        ]
+        issues = validate_chapter_numbering(drafts, outline)
+        assert any(
+            issue.chapter_id == "ch1" and "多个二级标题" in issue.message
+            for issue in issues
+        )
+
+    def test_draft_with_extra_unnumbered_h2(self):
+        """草稿内多出的二级标题即使不带编号，拼接后同样破坏全篇结构，须报问题。"""
+        outline = [_spec("ch1", "一、标题一")]
+        drafts = [_draft("ch1", "## 一、标题一\n内容\n## 附带小结\n内容")]
+        issues = validate_chapter_numbering(drafts, outline)
+        assert any(
+            issue.chapter_id == "ch1" and "多个二级标题" in issue.message
+            for issue in issues
+        )
+
+    def test_fenced_h2_not_counted_as_extra(self):
+        """围栏代码块内的 ## 不算标题，不误报多标题。"""
+        outline = [_spec("ch1", "一、标题一")]
+        drafts = [_draft("ch1", "## 一、标题一\n```\n## 假标题\n```\n内容")]
+        assert validate_chapter_numbering(drafts, outline) == []
+
     def test_outline_numbered_body_missing(self):
         """大纲标题带编号而正文缺编号：模型自生成根因场景。"""
         outline = [_spec("ch1", "一、标题一"), _spec("ch2", "二、标题二")]

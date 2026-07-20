@@ -819,6 +819,39 @@ def test_字数规则_小节超动态收缩上限_命中() -> None:
     assert any("小节一" in v.message and "超出上限" in v.message for v in rules_wc)
 
 
+def test_字数规则_小节收缩以节区间为父级_区间不退化() -> None:
+    # 小节按父级「节配置区间」（600～1500）收缩，而非章区间（2000～5000）：
+    # 2 小节 → 上限 min(500, 1500÷2)=500、下限 max(140, 600÷2)=300 → (300, 500)。
+    # 若误用章区间会得到 (500, 500) 点区间，450 字小节被误判不足下限，
+    # 修一次循环永不收敛（issue #19 真实 E2E 复跑发现）。
+    text = (
+        "## 一、总则\n\n### （一）第一节\n\n" + "字" * 200
+        + "\n\n#### 1. 小节一\n\n" + "字" * 450
+        + "\n\n#### 2. 小节二\n\n" + "字" * 460
+        + "\n\n### （二）第二节\n\n" + "字" * 1100
+    )
+    violations = lint(text, "本科")
+    rules_wc = [v for v in violations if v.rule == "word_count"]
+    assert not any("小节" in v.message for v in rules_wc)
+
+
+def test_字数规则_小节按节级收缩区间上下限_均命中() -> None:
+    # 4 小节 → 下限 max(140, 600÷4=150)=150、上限 min(500, 1500÷4=375)=375；
+    # 100 字小节不足下限、500 字小节超出上限，均须命中。
+    text = (
+        "## 一、总则\n\n### （一）第一节\n\n"
+        + "#### 1. 小节一\n\n" + "字" * 100
+        + "\n\n#### 2. 小节二\n\n" + "字" * 500
+        + "\n\n#### 3. 小节三\n\n" + "字" * 300
+        + "\n\n#### 4. 小节四\n\n" + "字" * 300
+        + "\n\n### （二）第二节\n\n" + "字" * 1050
+    )
+    violations = lint(text, "本科")
+    rules_wc = [v for v in violations if v.rule == "word_count"]
+    assert any("小节一" in v.message and "不足下限" in v.message for v in rules_wc)
+    assert any("小节二" in v.message and "超出上限" in v.message for v in rules_wc)
+
+
 def test_字数规则_无章标题_不校验() -> None:
     # 正文无 ## 标题 → 不落入标准章结构 → 不校验字数。
     text = "正文无章标题，不校验字数。"

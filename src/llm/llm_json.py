@@ -11,9 +11,12 @@ import os
 import time
 from typing import Any
 
-from llm.llm_client import LLM
+from llm.llm_client import LLM, Message
 
 JSON_ONLY_RULE = "只输出 JSON，不要输出任何多余文字、解释或代码围栏。"
+
+# 应答不合法时的有界重试上限（含首次尝试的总次数）。
+_MAX_ATTEMPTS = 3
 
 # 计时日志开关环境变量名：取值 1 开启，其余关闭。
 _DEBUG_TIMING_ENV = "LLM_DEBUG_TIMING"
@@ -45,31 +48,53 @@ def parse_json(raw: str, step: str) -> Any:
 def invoke_json(
     llm: LLM, step: str, system: str, user: str, expect: type | tuple[type, ...]
 ) -> Any:
-    """执行一次 LLM 调用并解析 JSON，同时校验顶层类型。"""
+    """执行一次 LLM 调用并解析 JSON，同时校验顶层类型。
+
+    真实 LLM 偶发输出残缺或顶层类型不符的应答；应答不合法时把原始应答
+    与解析错误作为纠错反馈追加进对话并有界重试（共 ``_MAX_ATTEMPTS`` 次尝试），
+    仍失败才抛错——避免长链路运行因单次应答瑕疵整体失败。
+    """
     debug = timing_enabled()
-    if debug:
-        t0 = time.perf_counter()
-        print(
-            f"[llm-timing] step={step} start in_chars={len(system) + len(user)}",
-            flush=True,
-        )
-    raw = llm.invoke(
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-    )
-    if debug:
-        print(
-            f"[llm-timing] step={step} end"
-            f" dur={time.perf_counter() - t0:.1f}s out_chars={len(raw)}",
-            flush=True,
-        )
-    payload = parse_json(raw, step)
-    if not isinstance(payload, expect):
-        expected = "对象" if expect is dict else "数组"
-        raise ValueError(
-            f"步骤「{step}」的 LLM 应答顶层必须是 JSON {expected}，"
-            f"实际应答：{raw[:200]!r}"
-        )
-    return payload
+    messages: list[Message] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    last_error: ValueError | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        if debug:
+            t0 = time.perf_counter()
+            in_chars = sum(len(message["content"]) for message in messages)
+            print(
+                f"[llm-timing] step={step} start attempt={attempt} in_chars={in_chars}",
+                flush=True,
+            )
+        raw = llm.invoke(messages)
+        if debug:
+            print(
+                f"[llm-timing] step={step} end attempt={attempt}"
+                f" dur={time.perf_counter() - t0:.1f}s out_chars={len(raw)}",
+                flush=True,
+            )
+        try:
+            payload = parse_json(raw, step)
+            if not isinstance(payload, expect):
+                expected = "对象" if expect is dict else "数组"
+                raise ValueError(
+                    f"步骤「{step}」的 LLM 应答顶层必须是 JSON {expected}，"
+                    f"实际应答：{raw[:200]!r}"
+                )
+            return payload
+        except ValueError as exc:
+            last_error = exc
+            messages = messages[:2] + [
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": (
+                        f"你上一次的应答不合法：{exc}\n"
+                        f"请修正后重新输出完整应答。{JSON_ONLY_RULE}"
+                    ),
+                },
+            ]
+    assert last_error is not None
+    raise last_error

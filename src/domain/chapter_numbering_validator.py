@@ -41,12 +41,9 @@ class NumberingIssue:
     message: str
 
 
-def _extract_h2_numbering(chapter_text: str) -> str | None:
-    """从正文提取首个二级标题的中文数字编号原文；无编号时返回 None。
-
-    只取首个 ## 标题行（模型偶发在正文中误用 ## 时以首行为准）；
-    围栏代码块内的 ## 不算标题。
-    """
+def _h2_heading_lines(chapter_text: str) -> list[str]:
+    """返回正文中所有二级标题行（去首尾空白）；围栏代码块内的 ## 不算标题。"""
+    headings: list[str] = []
     in_fence = False
     for line in chapter_text.splitlines():
         stripped = line.strip()
@@ -56,9 +53,21 @@ def _extract_h2_numbering(chapter_text: str) -> str | None:
         if in_fence:
             continue
         if stripped.startswith("## ") and not stripped.startswith("### "):
-            match = _H2_CHINESE_NUMBERING.match(stripped)
-            return match.group(1) if match else None
-    return None
+            headings.append(stripped)
+    return headings
+
+
+def _extract_h2_numbering(chapter_text: str) -> str | None:
+    """从正文提取首个二级标题的中文数字编号原文；无编号时返回 None。
+
+    只取首个 ## 标题行（模型偶发在正文中误用 ## 时以首行为准）；
+    围栏代码块内的 ## 不算标题。
+    """
+    headings = _h2_heading_lines(chapter_text)
+    if not headings:
+        return None
+    match = _H2_CHINESE_NUMBERING.match(headings[0])
+    return match.group(1) if match else None
 
 
 def _expected_numbering(title: str) -> str | None:
@@ -111,11 +120,13 @@ def validate_chapter_numbering(
     """校验全文章节编号连续唯一性，返回问题列表（按章节顺序）。
 
     检查项：
-    1. 大纲标题带编号的章节，正文首个 ## 标题必须携带同一编号
+    1. 单章草稿只允许一个二级标题（模型把多章内容并入一章的根因场景，
+       真实 E2E 复跑 issue #19 发现）；
+    2. 大纲标题带编号的章节，正文首个 ## 标题必须携带同一编号
        （缺失或不一致均报问题——模型自生成编号的根因场景）；
-    2. 正文中带编号的章节按出现顺序构成的编号序列必须从「一」起连续递增、
+    3. 正文中带编号的章节按出现顺序构成的编号序列必须从「一」起连续递增、
        不重复（骨架层裁剪断号与模型重复编号的根因场景）；
-    3. 编号必须是一到二十的标准中文数字。
+    4. 编号必须是一到二十的标准中文数字。
 
     大纲与正文均不带编号的章节不参与校验（自由结构模式不误报）。
     无问题时返回空列表。
@@ -125,6 +136,21 @@ def validate_chapter_numbering(
     numbered: list[tuple[str, str]] = []  # 正文带编号的章：（chapter_id, 编号原文）。
 
     for draft in drafts:
+        headings = _h2_heading_lines(draft.text)
+        if len(headings) > 1:
+            # 单章草稿内多出二级标题＝模型在一章里凭空多写了一章，
+            # 拼接后破坏全篇章节结构与编号连续性；只看首个 ## 会漏检。
+            issues.append(
+                NumberingIssue(
+                    chapter_id=draft.chapter_id,
+                    actual_numbering=None,
+                    message=(
+                        f"章节 {draft.chapter_id} 正文含多个二级标题"
+                        f"（{len(headings)} 个，单章应只有一个），"
+                        "疑将多章内容并入一章，须拆分或删除多余标题。"
+                    ),
+                )
+            )
         actual = _extract_h2_numbering(draft.text)
         expected = _expected_numbering(titles.get(draft.chapter_id, ""))
         if expected is not None and actual is None:

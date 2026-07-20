@@ -949,13 +949,19 @@ def _split_level_blocks(text: str, heading_prefix: str, stop_prefix: str) -> lis
 
 
 def _shrunk_range(
-    cfg_min: float, cfg_max: float, ch_min: float, ch_max: float, siblings: int, ratio: float
+    cfg_min: float,
+    cfg_max: float,
+    parent_min: float,
+    parent_max: float,
+    siblings: int,
+    ratio: float,
 ) -> tuple[float, float]:
-    """节/小节区间按同级数量动态收缩：上限取「配置上限」与「章上限÷同级数量」较小值，
-    下限取「配置下限×折减系数」与「章下限÷同级数量」较大值；收缩后保证下限不高于上限。
+    """节/小节区间按同级数量动态收缩：上限取「配置上限」与「父级上限÷同级数量」较小值，
+    下限取「配置下限×折减系数」与「父级下限÷同级数量」较大值；收缩后保证下限不高于上限。
+    父级区间取直接上级（节←章、小节←节），否则区间会退化（见 ADR-0003）。
     """
-    upper = min(cfg_max, ch_max / siblings)
-    lower = max(cfg_min * ratio, ch_min / siblings)
+    upper = min(cfg_max, parent_max / siblings)
+    lower = max(cfg_min * ratio, parent_min / siblings)
     return min(lower, upper), upper
 
 
@@ -1052,13 +1058,18 @@ def check_word_count(text: str, cfg: dict[str, Any]) -> list[Violation]:
             )
 
     # 小节级：在各节内部按同级数量动态收缩后校验。
+    # 父级取节区间而非章区间：小节的体量约束来自其所在节；若误用章区间，
+    # 「章下限÷小节数」在常见小节数（2～4）下会把下限顶到配置上限，
+    # 区间退化为点区间，正常体量的小节被误判、修一次循环永不收敛
+    # （issue #19 真实 E2E 复跑发现）。
     for sec_title, sec_text in sections:
         subsections = _split_level_blocks(sec_text, "#### ", "### ")
         if not subsections:
             continue
         sub_lower, sub_upper = _shrunk_range(
             float(wc["subsection"]["min"]), float(wc["subsection"]["max"]),
-            ch_min, ch_max, len(subsections), ratio,
+            float(wc["section"]["min"]), float(wc["section"]["max"]),
+            len(subsections), ratio,
         )
         for sub_title, sub_text in subsections:
             sub_count = count_prose_words(sub_text)

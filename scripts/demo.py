@@ -48,6 +48,15 @@ MIXED_FEEDBACK = "引言口吻克制些；第二章补充行业数据佐证"
 # 档案缺省落盘目录（相对仓库根，已在 .gitignore 中忽略）。
 ARCHIVE_DIR = REPO_ROOT / "var" / "demo_archive"
 
+# 回归基准输入（issue #19 固化）：创建任务的唯一输入来源，保证复跑一致。
+BASELINE_TASK_PATH = REPO_ROOT / "scripts" / "demo_task.baseline.json"
+
+
+def load_baseline_task() -> dict[str, str]:
+    """读取回归基准输入的任务载荷（user_intent / user_identity / session_id）。"""
+    payload = json.loads(BASELINE_TASK_PATH.read_text(encoding="utf-8"))
+    return payload["task"]
+
 # 防御性脱敏：模型配置摘要中含这些子串的键一律不写入档案。
 _SENSITIVE_KEY_MARKERS = ("key", "secret", "token", "password")
 
@@ -577,17 +586,7 @@ async def _snapshot_round(
 
 async def _drive(client: httpx.AsyncClient, recorder: ArchiveRecorder) -> None:
     """驱动一遍完整闭环并渲染书目。"""
-    response = await client.post(
-        "/tasks",
-        json={
-            "user_intent": (
-                "按「人才培养方案总结（汇报）模版」，为智能网联汽车技术专业"
-                "（460704）2025 级高职专科人才培养方案撰写一份评审汇报用的总结"
-            ),
-            "user_identity": "高职院校教务处教师",
-            "session_id": "demo-session",
-        },
-    )
+    response = await client.post("/tasks", json=load_baseline_task())
     response.raise_for_status()
     thread_id = response.json()["thread_id"]
     recorder.thread_id = thread_id
