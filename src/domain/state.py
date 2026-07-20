@@ -119,10 +119,12 @@ class CitationIssue(BaseModel):
         "cross_chapter",
         "semantic_mismatch",
         "self_check_failed",
+        "numbering_broken",
     ]
     """orphan_marker 无来源的标注；unused_material 未被引用的素材；
     cross_chapter 跨章误引；semantic_mismatch 语义核查不通过；
-    self_check_failed 单章自检（双层校验第一层）不通过。"""
+    self_check_failed 单章自检（双层校验第一层）不通过；
+    numbering_broken 跨章编号重复、断号或与大纲不一致。"""
     chapter_id: str
     material_id: str
     detail: str

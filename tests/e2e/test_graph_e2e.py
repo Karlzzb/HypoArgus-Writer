@@ -604,6 +604,59 @@ def test_终审失败只重写不合格章节_超限携警告进入中断点():
     assert result["status"] == WorkflowStatus.FINISHED
 
 
+@pytest.mark.parametrize(
+    ("标题一", "标题二", "断言片段"),
+    [
+        ("一、第一章", "一、第二章", "重复"),
+        ("一、第一章", "三、第二章", "断号"),
+    ],
+)
+def test_章节编号重复与断号_图层检出并超限进入中断点(
+    标题一: str, 标题二: str, 断言片段: str
+):
+    """issue #18 图层验收：坏编号从大纲实例化贯穿到终审检出。
+
+    打桩改写器把 spec.title 原样写进正文 ## 标题，改写重试无法修复编号，
+    超限后 numbering_broken 警告进入人工中断点，流程不卡死。
+    """
+    outline_response = json.dumps(
+        [
+            {"title": 标题一, "subsections": []},
+            {"title": 标题二, "subsections": []},
+        ],
+        ensure_ascii=False,
+    )
+    framework_responses = [
+        FRAMEWORK_RESPONSES[0],
+        outline_response,
+        FRAMEWORK_RESPONSES[2],
+    ]
+    # 首轮全量核查 2 章 + 增量重审 ch2 一次，语义核查全部放行，
+    # 保证失败仅由编号校验产生。
+    graph, _, config = _build(
+        [*framework_responses, SEMANTIC_PASS, SEMANTIC_PASS, SEMANTIC_PASS],
+        citation_max_retries=1,
+    )
+    result = graph.invoke(initial_state("意图", "身份", "trace-numbering"), config)
+
+    report = result["citation_report"]
+    assert report.passed is False
+    numbering_issues = [
+        issue for issue in report.issues if issue.kind == "numbering_broken"
+    ]
+    assert numbering_issues
+    assert all(issue.chapter_id == "ch2" for issue in numbering_issues)
+    assert any(断言片段 in issue.detail for issue in numbering_issues)
+    # 超限携编号警告进入人工中断点。
+    assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+    warnings = result["__interrupt__"][0].value["citation_warnings"]
+    assert any("numbering_broken" in warning for warning in warnings)
+
+    # 人工裁决仍可定稿收束，流程永不卡死。
+    result = graph.invoke(Command(resume=FINALIZE), config)
+    assert result["status"] == WorkflowStatus.FINISHED
+
+
 def test_LLM调用次数与单元归属():
     fake = FakeLLM(
         list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES

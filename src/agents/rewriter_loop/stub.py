@@ -17,6 +17,9 @@ async def stub_rewriter_loop_run(task: dict[str, Any]) -> dict[str, Any]:
 
     draft 模式承接上一章摘要生成正文；revise 模式在 current_text 基础上
     逐条附注修订指令，保证两种模式的接口都可空转。
+
+    正文含 ## 标题行（spec['title'] 已含模板编号「一、」等，原样输出），
+    满足章节编号连续唯一校验（issue #18）。
     """
     spec = task["chapter_spec"]
     pass_materials = [
@@ -30,11 +33,11 @@ async def stub_rewriter_loop_run(task: dict[str, Any]) -> dict[str, Any]:
         )
         chapter_text = f"{task.get('current_text', '')}{notes}"
     else:
-        paragraphs: list[str] = []
+        paragraphs: list[str] = [f"## {spec['title']}"]
         prev_summary = task["prev_chapter_summary"]
         if prev_summary:
             paragraphs.append(f"承接上一章：{prev_summary}")
-        paragraphs.append(f"本章《{spec['title']}》围绕以下论点展开（打桩正文）。")
+        paragraphs.append("本章围绕以下论点展开（打桩正文）。")
         for point in spec["points"]:
             paragraphs.append(f"论点：{point['text']}（打桩论证）")
         for material in pass_materials:

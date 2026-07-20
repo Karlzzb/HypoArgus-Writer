@@ -43,7 +43,11 @@ def _mat(material_id: str, chapter_id: str, verdict: str = "pass") -> Material:
 def _draft(
     chapter_id: str, text: str, self_check: SelfCheck | None = None
 ) -> ChapterDraft:
-    """构造一章草稿。"""
+    """构造一章草稿。
+
+    大纲标题（见 _state）与正文均不带编号，不触发章节编号校验；
+    编号场景用例自行在 text 中写入带编号的 ## 标题。
+    """
     return ChapterDraft(
         chapter_id=chapter_id,
         text=text,
@@ -268,3 +272,64 @@ def test_环境变量缺省为2() -> None:
 def test_环境变量非法值抛ValueError(raw: str) -> None:
     with pytest.raises(ValueError, match="CITATION_MAX_RETRIES"):
         load_validator_config({"CITATION_MAX_RETRIES": raw})
+
+
+def test_章节编号重复_检出失败() -> None:
+    """测试章节编号重复场景（issue #18）：两个「一、」。"""
+    state = _state(
+        [
+            _draft("ch1", "## 一、专业名称及代码\n内容[m1]"),
+            _draft("ch2", "## 一、入学要求\n内容[m2]"),  # 重复的「一、」
+        ],
+        [_mat("m1", "ch1"), _mat("m2", "ch2")],
+    )
+    result, fake = _run(state, [[_aligned("m1")], [_aligned("m2")]])
+    assert not result["citation_report"].passed
+    issues = result["citation_report"].issues
+    numbering_issues = [issue for issue in issues if issue.kind == "numbering_broken"]
+    assert len(numbering_issues) == 2
+    # ch2 预期「二、」，实际「一、」（断号）。
+    断号_issues = [issue for issue in numbering_issues if "预期" in issue.detail]
+    assert len(断号_issues) == 1
+    assert 断号_issues[0].chapter_id == "ch2"
+    # ch2 与 ch1 重复。
+    重复_issues = [issue for issue in numbering_issues if "重复" in issue.detail]
+    assert len(重复_issues) == 1
+    assert 重复_issues[0].chapter_id == "ch2"
+
+
+def test_章节编号断号_检出失败() -> None:
+    """测试章节编号跳号场景（issue #18）：一、三、（缺二）。"""
+    state = _state(
+        [
+            _draft("ch1", "## 一、专业名称及代码\n内容[m1]"),
+            _draft("ch2", "## 三、学制学位\n内容[m2]"),  # 跳号：缺二
+        ],
+        [_mat("m1", "ch1"), _mat("m2", "ch2")],
+    )
+    result, _ = _run(state, [[_aligned("m1")], [_aligned("m2")]])
+    assert not result["citation_report"].passed
+    issues = result["citation_report"].issues
+    numbering_issues = [issue for issue in issues if issue.kind == "numbering_broken"]
+    assert len(numbering_issues) == 1
+    assert numbering_issues[0].chapter_id == "ch2"
+    assert "预期「二」" in numbering_issues[0].detail
+    assert "实际「三」" in numbering_issues[0].detail
+
+
+def test_章节编号连续_全部通过() -> None:
+    """测试章节编号正确的场景：一、二、三、连续。"""
+    state = _state(
+        [
+            _draft("ch1", "## 一、专业名称及代码\n内容[m1]"),
+            _draft("ch2", "## 二、入学要求\n内容[m2]"),
+            _draft("ch3", "## 三、学制学位\n内容[m3]"),
+        ],
+        [_mat("m1", "ch1"), _mat("m2", "ch2"), _mat("m3", "ch3")],
+    )
+    result, _ = _run(state, [[_aligned("m1")], [_aligned("m2")], [_aligned("m3")]])
+    assert result["citation_report"].passed
+    issues = result["citation_report"].issues
+    numbering_issues = [issue for issue in issues if issue.kind == "numbering_broken"]
+    assert len(numbering_issues) == 0
+

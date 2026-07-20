@@ -32,12 +32,13 @@ class TemplateSkeleton:
     """全文 {xxx} 填充变量名，去重且保持首次出现顺序。"""
 
 
-_CHINESE_DIGITS = "〇零一二三四五六七八九十百千"
+CHINESE_DIGITS = "〇零一二三四五六七八九十百千"
+"""中文数字字符集：标题序号识别的统一口径，公开供编号校验等场景复用。"""
 
-# 中文数字 + 顿号或点号，如 "一、"、"十一、"。
-_CHINESE_NUMBERING = re.compile(rf"^([{_CHINESE_DIGITS}]+)[、.．]\s*")
+# 中文数字 + 顿号或点号，如 "一、"、"十一、"；公开供编号校验等场景复用。
+CHINESE_NUMBERING = re.compile(rf"^([{CHINESE_DIGITS}]+)[、.．]\s*")
 # 全角括号中文数字，如 "（一）"；序号原文含括号。
-_PAREN_NUMBERING = re.compile(rf"^（[{_CHINESE_DIGITS}]+）\s*")
+_PAREN_NUMBERING = re.compile(rf"^（[{CHINESE_DIGITS}]+）\s*")
 # 阿拉伯数字 + 点号或顿号，如 "1."、"2、"。
 _ARABIC_NUMBERING = re.compile(r"^(\d+)[.、．]\s*")
 
@@ -52,7 +53,7 @@ def _split_numbering(heading_text: str) -> tuple[str, str]:
     match = _PAREN_NUMBERING.match(heading_text)
     if match:
         return match.group(0).strip(), heading_text[match.end() :].strip()
-    for pattern in (_CHINESE_NUMBERING, _ARABIC_NUMBERING):
+    for pattern in (CHINESE_NUMBERING, _ARABIC_NUMBERING):
         match = pattern.match(heading_text)
         if match:
             return match.group(1), heading_text[match.end() :].strip()

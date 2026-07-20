@@ -1,11 +1,13 @@
 """citation_validator 主节点：引文双层校验的第二层，全局终审门禁。
 
-三步产生问题清单：
+四步产生问题清单：
 1. 纯程序对账（citation_reconciler，不调 LLM）；
-2. 合并范围内章节的单章自检结果（rewriter_loop 产出的双层校验第一层）；
-3. LLM 语义核查：逐章核对角标位置与素材观点是否对应。
+2. 章节编号连续唯一校验（chapter_numbering_validator，纯程序逻辑）；
+3. 合并范围内章节的单章自检结果（rewriter_loop 产出的双层校验第一层）；
+4. LLM 语义核查：逐章核对角标位置与素材观点是否对应。
 
 核查范围：revised_chapter_ids 非空时增量核查（只重审这些章节），为空时全量核查。
+章节编号校验始终全量执行（编号连续性是全文属性，增量检查无意义）。
 LLM 语义核查各章互不依赖，并发执行（并发度由配置控制），问题清单按章节顺序合并。
 终审失败递增 citation_retry_count；超过上限不再回退，携带未决引文警告
 交人工裁决（回退路由在 graph.py，不在本节点）。
@@ -21,12 +23,14 @@ from typing import Any, Protocol
 
 from assembly.assembler_config import AssemblerConfig
 from domain.citation_reconciler import reconcile
+from domain.chapter_numbering_validator import validate_chapter_numbering
 from assembly.context_assembler import assemble
 from domain.env_config import read_positive_int
 from llm.llm_client import LLM, LLMFactory
 from llm.llm_json import JSON_ONLY_RULE, invoke_json
 from domain.state import (
     ChapterDraft,
+    ChapterSpec,
     CitationIssue,
     CitationReport,
     WorkflowStatus,
@@ -71,8 +75,24 @@ def load_validator_config(env: Mapping[str, str] | None = None) -> ValidatorConf
     )
 
 
+def _chapter_numbering_issues(
+    drafts: list[ChapterDraft], outline: list[ChapterSpec]
+) -> list[CitationIssue]:
+    """步骤 2：章节编号连续唯一校验（始终全量，不受增量核查范围限制）。"""
+    numbering_issues = validate_chapter_numbering(drafts, outline)
+    return [
+        CitationIssue(
+            kind="numbering_broken",
+            chapter_id=issue.chapter_id,
+            material_id="",
+            detail=issue.message,
+        )
+        for issue in numbering_issues
+    ]
+
+
 def _self_check_issues(drafts: list[ChapterDraft]) -> list[CitationIssue]:
-    """步骤 2：把范围内章节的单章自检失败合并为 self_check_failed 问题。"""
+    """步骤 3：把范围内章节的单章自检失败合并为 self_check_failed 问题。"""
     issues: list[CitationIssue] = []
     for draft in drafts:
         if draft.self_check.citations_ok:
@@ -120,7 +140,7 @@ def _semantic_check_chapter(
     chapter_text: str,
     cited: list[dict[str, Any]],
 ) -> list[CitationIssue]:
-    """步骤 3：单章一次 LLM 调用，核查每处角标位置与素材观点是否对应。
+    """步骤 4：单章一次 LLM 调用，核查每处角标位置与素材观点是否对应。
 
     正文与被引素材（含 id/excerpt）均取自装配后的 chapter_text、cited_materials 段。
     """
@@ -197,9 +217,11 @@ def make_citation_validator_node(
 
         # 步骤 1：纯程序对账。
         issues = reconcile(drafts, library, scope)
-        # 步骤 2：单章自检合并。
+        # 步骤 2：章节编号连续唯一校验（始终全量，编号连续性是全文属性）。
+        issues += _chapter_numbering_issues(drafts, state.get("outline", []))
+        # 步骤 3：单章自检合并。
         issues += _self_check_issues(scoped_drafts)
-        # 步骤 3：逐章 LLM 语义核查；正文与被引素材经装配段取得，
+        # 步骤 4：逐章 LLM 语义核查；正文与被引素材经装配段取得，
         # 该章没有任何角标素材时跳过调用。各章核查互不依赖，并发执行，
         # 问题清单按 scoped_drafts 顺序合并保持确定性。
         def check_chapter(draft: ChapterDraft) -> list[CitationIssue]:
