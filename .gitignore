@@ -69,3 +69,7 @@ desktop.ini
 
 # ---- Claude Code (local-only) ----
 .claude/settings.local.json
+
+
+# ---- DIY -----
+reference/
