@@ -36,7 +36,7 @@ from agents.rewriter_loop.writer_client import (
     WriterLlmClient,
     pass_materials,
 )
-from domain.doc_types import carried_doc_facts, tier_from_variant
+from domain.doc_types import carried_doc_facts
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook
 from llm.llm_client import LLMFactory
 
@@ -79,7 +79,7 @@ def make_writer_run(
     """构造写作编排的异步 run：黑盒 dict 进/出，供 ``SubagentAdapter`` 包装。
 
     文种与变体逐任务取自任务包（ADR-0005：State 锚定后经契约携带），
-    校验层次（tier）由变体推导，构造期不再固化任何写作场景配置。
+    lint 与散文注入均按文种+变体两层加载，构造期不再固化任何写作场景配置。
     """
 
     async def run(task: dict[str, Any]) -> dict[str, Any]:
@@ -87,9 +87,8 @@ def make_writer_run(
         chapter_id = spec["id"]
         mode = task["mode"]
         doc_type, doc_variant = carried_doc_facts(task)
-        tier = tier_from_variant(doc_variant)
         materials = pass_materials(task)
-        style_prose = load_prose()
+        style_prose = load_prose(doc_type)
 
         def progress(step: str, **extra: Any) -> None:
             """发进度事件：载荷统一带 unit / chapter_id / mode / step，只放元数据。"""
@@ -121,7 +120,9 @@ def make_writer_run(
             「派生未标」可判，跳过模型调用省一次 LLM 花费；不发 llm_call 事件对
             （没有真实调用），但仍发 audit_done（issues=0）保证步骤流完整可观测。
             """
-            found = lint(text, tier, materials=materials, hypotheses=spec["hypotheses"])
+            found = lint(
+                text, doc_type, doc_variant, materials=materials, hypotheses=spec["hypotheses"]
+            )
             progress("lint_done", violations=len(found))
             if materials:
                 progress("llm_call_start", call="audit")
@@ -145,7 +146,8 @@ def make_writer_run(
         if mode == "revise":
             pre_fix = lint(
                 task.get("current_text", ""),
-                tier,
+                doc_type,
+                doc_variant,
                 materials=materials,
                 hypotheses=spec["hypotheses"],
             )

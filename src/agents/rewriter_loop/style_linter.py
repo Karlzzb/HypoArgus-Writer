@@ -1,8 +1,10 @@
 """style_linter：单章正文的规则校验器（纯函数，不依赖主图与 LLM）。
 
-入口签名：``lint(text, tier, *, style_guide_path=None, ...) -> list[Violation]``。
-词表/禁用词/boilerplate 从随包 ``style_guide.md`` 的 SSoT YAML 块解析加载（单一事实源）；
-机械规则（口语化黑名单、编号）的词表同样来自该 YAML 块，避免指南与校验器漂移。
+入口签名：``lint(text, doc_type, doc_variant=None, *, style_guides_dir=None, ...) -> list[Violation]``。
+规则按文种+变体两层加载（ADR-0005）：随包 ``style_guides/`` 目录每文种一份 md，
+「通用公文.md」既是兑底文种指南也是跨文种通用规则层；其他文种做「通用 + 文种」
+两层合并——列表类规则取并集，标量类规则文种覆盖通用。词表/禁用词/boilerplate
+从各文件的 SSoT YAML 块解析加载，散文与 YAML 同文件双消费，避免指南与校验器漂移。
 正文角标为本项目单方括号 ``[素材id]`` 语义，
 解析复用 ``domain.citation_reconciler.MARKER_PATTERN``（唯一事实源，不另定义角标正则）。
 """
@@ -20,9 +22,10 @@ from pydantic import BaseModel
 
 from agents.contracts import HypothesisPayload, MaterialPayload
 from domain.citation_reconciler import MARKER_PATTERN
+from domain.doc_types import GENERIC_DOC_TYPE, tier_from_variant
 
-# 随包携带的风格指南默认路径：不依赖工作目录，显式传参可覆盖（便于测试）。
-DEFAULT_STYLE_GUIDE_PATH = Path(__file__).parent / "style_guide.md"
+# 随包携带的风格指南目录默认路径：不依赖工作目录，显式传参可覆盖（便于测试）。
+STYLE_GUIDES_DIR = Path(__file__).parent / "style_guides"
 
 _CHINESE_NUMERAL_PREFIX = re.compile(r"^[一二三四五六七八九十百]+[、､]\s*")
 # markdown 表分隔行：起始 |、含 3+ 连字符、结尾 |（如 ``| ---- | ---- |``）。
@@ -85,11 +88,16 @@ def normalize_numeric_text(value: str) -> str:
 
 @dataclass(frozen=True)
 class _LintContext:
-    """一次 lint 调用中传给各规则的共享输入（正文已做 CJK 断词归一）。"""
+    """一次 lint 调用中传给各规则的共享输入（正文已做 CJK 断词归一）。
+
+    ``variant`` 是变体键解析结果（``tier_from_variant``），供变体分键规则
+    （required_terms / forbidden_terms 等 dict[变体→词表]）取值；变体概念仅存活于
+    人培方案文种内部——其他文种的合并配置不含变体分键规则，该值对其天然惰性。
+    """
 
     text: str
     cfg: dict[str, Any]
-    tier: str
+    variant: str
     template: str | None
     domain: str | None
     references: list[Fact] | None
@@ -109,30 +117,90 @@ def register(rule: _Rule) -> _Rule:
     return rule
 
 
-def load_config(style_guide_path: str | Path | None = None) -> dict[str, Any]:
-    """从 style_guide.md 解析 SSoT YAML 块（``<!-- ssot-config-begin ... -end -->`` 之间）。"""
-    path = Path(style_guide_path) if style_guide_path is not None else DEFAULT_STYLE_GUIDE_PATH
+def _resolve_guide_paths(
+    doc_type: str, style_guides_dir: str | Path | None
+) -> tuple[Path, Path | None]:
+    """解析 (通用层文件, 文种层文件) 路径；通用层缺失即配置错误，立即抛出。
+
+    文种层文件不存在返回 None——未落地专属指南的文种（汇报材料/学术论文占位）
+    与兑底文种一样只走通用层，是 ADR-0005 已接受的架构后果，不是错误。
+    """
+    directory = Path(style_guides_dir) if style_guides_dir is not None else STYLE_GUIDES_DIR
+    generic_path = directory / f"{GENERIC_DOC_TYPE}.md"
+    if not generic_path.is_file():
+        raise ValueError(f"style_guides 目录缺少通用层文件「{GENERIC_DOC_TYPE}.md」：{directory}")
+    if doc_type == GENERIC_DOC_TYPE:
+        return generic_path, None
+    specific_path = directory / f"{doc_type}.md"
+    return generic_path, specific_path if specific_path.is_file() else None
+
+
+def _parse_config(path: Path) -> dict[str, Any]:
+    """从单份指南文件解析 SSoT YAML 块（``<!-- ssot-config-begin ... -end -->`` 之间）。"""
     text = path.read_text(encoding="utf-8")
     m = re.search(r"ssot-config-begin\s*\n(.*?)\n\s*ssot-config-end", text, re.S)
     if not m:
-        raise ValueError(f"style_guide 未找到 ssot-config 块：{path}")
+        raise ValueError(f"风格指南未找到 ssot-config 块：{path}")
     config = yaml.safe_load(m.group(1))
     if not isinstance(config, dict):
-        raise ValueError(f"style_guide 的 ssot-config 块须为映射：{path}")
+        raise ValueError(f"风格指南的 ssot-config 块须为映射：{path}")
     return config
 
 
-def load_prose(style_guide_path: str | Path | None = None) -> str:
-    """读取 style_guide.md 散文部分，供注入写作提示词用。
+def _merge_layers(generic: dict[str, Any], specific: dict[str, Any]) -> dict[str, Any]:
+    """两层合并语义（ADR-0005）：列表类取并集，标量类文种覆盖通用。
 
-    YAML 块（``<!-- ssot-config-begin ... -end -->``）是校验器的机器可读编码，
-    散文已用人话描述同样规则，故只注入散文以节省上下文；
-    YAML 仍由 ``load_config`` 独立解析，同一文件双消费、零漂移。
+    - 两侧同为映射：逐键递归（嵌套结构如 ``word_count.chapter`` 内标量按键覆盖）。
+    - 两侧同为列表：并集——通用层条目在前保序，文种层追加未重复条目
+      （纯并集、无豁免/剔除机制，是通用层准入原则的合并侧保障）。
+    - 其余（标量或异型）：文种层覆盖通用层。
     """
-    path = Path(style_guide_path) if style_guide_path is not None else DEFAULT_STYLE_GUIDE_PATH
+    merged = dict(generic)
+    for key, value in specific.items():
+        base = merged.get(key)
+        if isinstance(base, dict) and isinstance(value, dict):
+            merged[key] = _merge_layers(base, value)
+        elif isinstance(base, list) and isinstance(value, list):
+            merged[key] = base + [item for item in value if item not in base]
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(
+    doc_type: str, *, style_guides_dir: str | Path | None = None
+) -> dict[str, Any]:
+    """按文种加载合并后的 SSoT 配置：通用层必加载，文种层存在则两层合并。
+
+    兑底文种（通用公文）与无专属指南文件的文种只得到通用层；
+    其他文种得到「通用 + 文种」合并结果（列表并集、标量覆盖，见 ``_merge_layers``）。
+    """
+    generic_path, specific_path = _resolve_guide_paths(doc_type, style_guides_dir)
+    config = _parse_config(generic_path)
+    if specific_path is not None:
+        config = _merge_layers(config, _parse_config(specific_path))
+    return config
+
+
+def _prose_of(path: Path) -> str:
+    """读取单份指南文件的散文部分（``<!-- ssot-config-begin`` 之前）。"""
     text = path.read_text(encoding="utf-8")
     idx = text.find("<!-- ssot-config-begin")
     return text[:idx] if idx != -1 else text
+
+
+def load_prose(doc_type: str, *, style_guides_dir: str | Path | None = None) -> str:
+    """按文种读取散文部分（通用层散文 + 文种层散文），供注入写作提示词用。
+
+    YAML 块是校验器的机器可读编码，散文已用人话描述同样规则，故只注入散文以
+    节省上下文；YAML 仍由 ``load_config`` 独立解析，同一文件双消费、零漂移。
+    两层散文按「通用在前、文种在后」拼接，与配置合并的层次方向一致。
+    """
+    generic_path, specific_path = _resolve_guide_paths(doc_type, style_guides_dir)
+    prose = _prose_of(generic_path)
+    if specific_path is not None:
+        prose = prose.rstrip() + "\n\n" + _prose_of(specific_path)
+    return prose
 
 
 def detect_chapter_template(text: str, cfg: dict[str, Any] | None = None) -> str | None:
@@ -259,14 +327,14 @@ def _rule_required_terms(ctx: _LintContext) -> list[Violation]:
     tmpl = resolve_template(ctx.cfg, ctx.template)
     if not tmpl:
         return []
-    required = (tmpl.get("required_terms") or {}).get(ctx.tier, [])
+    required = (tmpl.get("required_terms") or {}).get(ctx.variant, [])
     out: list[Violation] = []
     for term in required:
         if term not in ctx.text:
             out.append(
                 Violation(
                     rule="required_terms",
-                    message=f"章型「{ctx.template}」({ctx.tier}) 须含术语「{term}」，但未出现。",
+                    message=f"章型「{ctx.template}」({ctx.variant}) 须含术语「{term}」，但未出现。",
                 )
             )
     return out
@@ -282,14 +350,14 @@ def _rule_forbidden_terms(ctx: _LintContext) -> list[Violation]:
     tmpl = resolve_template(ctx.cfg, ctx.template)
     if not tmpl:
         return []
-    forbidden = (tmpl.get("forbidden_terms") or {}).get(ctx.tier, [])
+    forbidden = (tmpl.get("forbidden_terms") or {}).get(ctx.variant, [])
     out: list[Violation] = []
     for term in forbidden:
         if term in ctx.text:
             out.append(
                 Violation(
                     rule="forbidden_terms",
-                    message=f"章型「{ctx.template}」({ctx.tier}) 禁用措辞「{term}」，属另一层次子风格，不得渗入。",
+                    message=f"章型「{ctx.template}」({ctx.variant}) 禁用措辞「{term}」，属另一层次子风格，不得渗入。",
                 )
             )
     return out
@@ -327,7 +395,7 @@ def _rule_forbidden_subsection(ctx: _LintContext) -> list[Violation]:
     tmpl = resolve_template(ctx.cfg, ctx.template)
     if not tmpl:
         return []
-    forbidden = (tmpl.get("forbidden_subsection_terms") or {}).get(ctx.tier, [])
+    forbidden = (tmpl.get("forbidden_subsection_terms") or {}).get(ctx.variant, [])
     if not forbidden:
         return []
     out: list[Violation] = []
@@ -338,7 +406,7 @@ def _rule_forbidden_subsection(ctx: _LintContext) -> list[Violation]:
                     Violation(
                         rule="forbidden_subsection",
                         message=(
-                            f"章型「{ctx.template}」({ctx.tier}) 禁设独立子项「{term}」"
+                            f"章型「{ctx.template}」({ctx.variant}) 禁设独立子项「{term}」"
                             "（该子项应并入对应子风格结构）。"
                         ),
                     )
@@ -353,7 +421,7 @@ def _rule_avoid_title(ctx: _LintContext) -> list[Violation]:
         return []
     out: list[Violation] = []
     for entry in ctx.cfg.get("glossary", []):
-        if ctx.tier not in (entry.get("tiers") or []):
+        if ctx.variant not in (entry.get("tiers") or []):
             continue
         canonical = entry.get("term", "")
         for avoid in entry.get("avoid", []) or []:
@@ -399,14 +467,14 @@ def _rule_political_theory(ctx: _LintContext) -> list[Violation]:
                 )
             continue
         # 通用串或领域匹配：归位校验按 tier 过滤。
-        if ctx.tier not in (entry.get("tiers") or []):
+        if ctx.variant not in (entry.get("tiers") or []):
             continue
         if chap in required_in and not present:
             out.append(
                 Violation(
                     rule="political_theory_missing",
                     message=(
-                        f"归位章「{ctx.template}」({ctx.tier}) 须逐字含「{verbatim}」，"
+                        f"归位章「{ctx.template}」({ctx.variant}) 须逐字含「{verbatim}」，"
                         "但未出现（不得改写或引错）。"
                     ),
                 )
@@ -436,7 +504,7 @@ def _rule_affective(ctx: _LintContext) -> list[Violation]:
     affective = (ctx.cfg.get("ideology") or {}).get("affective") or {}
     if not affective:
         return []
-    if ctx.tier not in (affective.get("tiers") or []):
+    if ctx.variant not in (affective.get("tiers") or []):
         return []
     chap = resolve_ideology_chapter(ctx.cfg, ctx.template)
     if chap not in (affective.get("required_in") or []):
@@ -447,7 +515,7 @@ def _rule_affective(ctx: _LintContext) -> list[Violation]:
             Violation(
                 rule="affective_missing",
                 message=(
-                    f"归位章「{ctx.template}」({ctx.tier}) 须含价值导向/情感语"
+                    f"归位章「{ctx.template}」({ctx.variant}) 须含价值导向/情感语"
                     f"（{patterns}），但均未出现。"
                 ),
             )
@@ -472,7 +540,7 @@ def _rule_political_theory_partial(ctx: _LintContext) -> list[Violation]:
         trigger = entry.get("partial_trigger")
         if not trigger:
             continue
-        if ctx.tier not in (entry.get("tiers") or []):
+        if ctx.variant not in (entry.get("tiers") or []):
             continue
         ed = entry.get("domain")
         if ed is not None and ed != ctx.domain:
@@ -1107,14 +1175,15 @@ def _rule_word_count(ctx: _LintContext) -> list[Violation]:
 
 
 def word_count_prompt_block(
-    title: str, style_guide_path: str | Path | None = None
+    title: str, doc_type: str, *, style_guides_dir: str | Path | None = None
 ) -> str:
     """按章标题生成写作提示词的目标字数区间块；SSoT 无 ``word_count`` 配置时返回空串。
 
+    区间与章型模板取自该文种的两层合并配置（``load_config``）——
     表章（``table_required`` 章型）提示取中下限且不得表外堆砌；
     叙述章型提示取中上限。区间数值全部取自 SSoT，提示词与校验器零漂移。
     """
-    cfg = load_config(style_guide_path)
+    cfg = load_config(doc_type, style_guides_dir=style_guides_dir)
     wc = cfg.get("word_count")
     if not wc:
         return ""
@@ -1146,9 +1215,10 @@ def word_count_prompt_block(
 
 def lint(
     text: str,
-    tier: str,
+    doc_type: str,
+    doc_variant: str | None = None,
     *,
-    style_guide_path: str | Path | None = None,
+    style_guides_dir: str | Path | None = None,
     domain: str | None = None,
     references: list[Fact] | None = None,
     materials: list[MaterialPayload] | None = None,
@@ -1156,22 +1226,26 @@ def lint(
 ) -> list[Violation]:
     """对单章正文跑全部已注册规则，返回违规列表（纯函数）。
 
-    ``style_guide_path`` 缺省用随包 ``style_guide.md``（不依赖工作目录）；
-    显式传路径便于测试与替换指南。
+    规则集按 ``doc_type`` 两层合并加载（通用层 + 文种层，ADR-0005）；
+    ``doc_variant`` 是文种内变体（人培方案的 本科/高职），经 ``tier_from_variant``
+    解析为变体分键规则的取值键——变体概念仅存活于人培方案内部，其他文种的
+    合并配置不含变体分键规则，该参数对其天然惰性。
+    ``style_guides_dir`` 缺省用随包 ``style_guides/`` 目录（不依赖工作目录）；
+    显式传目录便于测试与替换指南。
     ``domain`` 标注被校验文本所属领域（如「金融」；通用为 None），
-    供意识形态 (A) 的领域专属政治语双向校验。
+    供意识形态 (A) 的领域专属政治语双向校验（规则级条件标签，非加载参数）。
     ``references`` 为本章调用方传入的事实依据（``Fact`` 列表），供「引用事实在位 +
     查臆造」校验；为空/None 则跳过该两条规则（不误伤未补全事实依据的章）。
     ``materials`` 为本章素材池（``MaterialPayload`` 列表），``hypotheses`` 为本章假说列表，
     供素材相关结构校验（无杜撰角标 / 池内 id 唯一 / hypothesis_id 合法 / 照抄型派生未标）；
     为空/None 则跳过素材相关规则（不误伤无素材语料）。
     """
-    cfg = load_config(style_guide_path)
+    cfg = load_config(doc_type, style_guides_dir=style_guides_dir)
     normalized = normalize_cjk_ws(text)
     ctx = _LintContext(
         text=normalized,
         cfg=cfg,
-        tier=tier,
+        variant=tier_from_variant(doc_variant),
         template=detect_chapter_template(normalized, cfg),
         domain=domain,
         references=references,

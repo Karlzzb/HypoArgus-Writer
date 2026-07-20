@@ -12,8 +12,8 @@ from agents.rewriter_loop import (
     WriterEnvelope,
     make_rewriter_loop,
     make_writer_run,
-    tier_from_variant,
 )
+from domain.doc_types import tier_from_variant
 from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
 from llm.llm_client import LLM, FakeLLM
 

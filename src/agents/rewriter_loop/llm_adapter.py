@@ -112,14 +112,14 @@ def _build_context_block(task: dict[str, Any]) -> str:
     """draft / revise 共用的上下文块（章节骨架 / 字数目标 / 素材池 / 假说 / 衔接），不含尾部指令。
 
     文种与变体逐任务取自任务包（ADR-0005）；「层次」行取变体推导的 tier，
-    与编排层喂给 lint 的推导同源——模型被告知的层次与校验执行的层次永远一致
-    （无变体回落缺省「本科」，与废除前环境变量的缺省口径逐字相同）。
+    与 lint 内部的变体键兑底同源——模型被告知的层次与校验执行的层次永远一致
+    （无变体回落缺省「本科」）。字数目标块按文种取两层合并配置。
     """
     doc_type, doc_variant = carried_doc_facts(task)
     tier = tier_from_variant(doc_variant)
     spec = task["chapter_spec"]
     points = "\n".join(f"- {p['text']}" for p in spec["points"]) or "（无）"
-    word_count_block = word_count_prompt_block(spec["title"])
+    word_count_block = word_count_prompt_block(spec["title"], doc_type)
     prev = (
         f"上一章摘要（本章开头须公文风格承上启下衔接）：{task['prev_chapter_summary']}"
         if task["prev_chapter_summary"]

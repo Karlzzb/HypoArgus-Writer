@@ -3,13 +3,13 @@
 真实现见 ``writer``（编排与工厂）、``writer_client``（LLM 注入点协议与假客户端）、
 ``llm_adapter``（真实适配器）；打桩实现见 ``stub``（同包共存，供空转与测试）；
 风格校验器（纯函数，不依赖主图与 LLM）见 ``style_linter``，
-其单一事实源为随包携带的 ``style_guide.md``。
+其单一事实源为随包携带的 ``style_guides/`` 目录（每文种一份指南，ADR-0005）。
 本包对外 re-export 工厂与校验入口，导入路径保持 ``agents.rewriter_loop`` 不变。
 """
 
 from agents.rewriter_loop.llm_adapter import LlmWriterClient
 from agents.rewriter_loop.style_linter import (
-    DEFAULT_STYLE_GUIDE_PATH,
+    STYLE_GUIDES_DIR,
     Fact,
     Violation,
     check_word_count,
@@ -33,7 +33,6 @@ from agents.rewriter_loop.writer import (
     audit_issues_to_violations,
     make_rewriter_loop,
     make_writer_run,
-    tier_from_variant,
 )
 from agents.rewriter_loop.writer_client import (
     AuditEnvelope,
@@ -46,10 +45,10 @@ from agents.rewriter_loop.writer_client import (
 __all__ = [
     "AuditEnvelope",
     "AuditIssue",
-    "DEFAULT_STYLE_GUIDE_PATH",
     "Fact",
     "FakeWriterLlmClient",
     "LlmWriterClient",
+    "STYLE_GUIDES_DIR",
     "UNIT",
     "Violation",
     "WriterEnvelope",
@@ -69,6 +68,5 @@ __all__ = [
     "resolve_ideology_chapter",
     "resolve_template",
     "stub_rewriter_loop_run",
-    "tier_from_variant",
     "word_count_prompt_block",
 ]

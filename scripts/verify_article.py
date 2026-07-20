@@ -69,7 +69,7 @@ def quantitative_violations_strict(body: str, cfg: dict) -> list:
     ctx = _LintContext(
         text=normalized,
         cfg=cfg,
-        tier="本科",
+        variant="本科",
         template=detect_chapter_template(normalized, cfg),
         domain=None,
         references=[],
@@ -82,7 +82,8 @@ def quantitative_violations_strict(body: str, cfg: dict) -> list:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("article", type=Path, help="成品文档路径（-article.md）")
-    parser.add_argument("--tier", default="本科", help="校验档位，与生成时一致")
+    parser.add_argument("--doc-type", default="人才培养方案", help="文种，与生成时一致")
+    parser.add_argument("--doc-variant", default="本科", help="文种变体，与生成时一致")
     args = parser.parse_args()
 
     text = args.article.read_text(encoding="utf-8")
@@ -95,7 +96,7 @@ def main() -> int:
         print("未切出任何章节，请确认成品文档格式。")
         return 1
 
-    cfg = load_config()
+    cfg = load_config(args.doc_type)
     total_violations = 0
 
     print(f"共 {len(chapters)} 章（不含参考文献）\n")
@@ -103,7 +104,7 @@ def main() -> int:
     for title, body in chapters:
         words = count_prose_words(body)
         wc_violations = check_word_count(body, cfg)
-        lint_violations = lint(body, args.tier)
+        lint_violations = lint(body, args.doc_type, args.doc_variant)
         lint_violations.extend(quantitative_violations_strict(body, cfg))
         total_violations += len(lint_violations)
         status = "通过" if not lint_violations else f"{len(lint_violations)} 条违规"

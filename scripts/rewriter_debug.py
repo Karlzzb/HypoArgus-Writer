@@ -48,10 +48,9 @@ from agents.rewriter_loop import (  # noqa: E402
     lint,
     load_prose,
     make_rewriter_loop,
-    tier_from_variant,
 )
 from agents.rewriter_loop.writer_client import WriterEnvelope, pass_materials  # noqa: E402
-from domain.doc_types import carried_doc_facts  # noqa: E402
+from domain.doc_types import carried_doc_facts, tier_from_variant  # noqa: E402
 from llm.llm_client import LLM, FakeLLM, default_llm_factory  # noqa: E402
 
 # 缺省样例任务包路径：按脚本自身位置解析，任意 cwd 下均可直接运行。
@@ -154,7 +153,9 @@ def _print_violations(violations: list[Violation]) -> None:
         print(f"- [{v.rule}] {v.message}")
 
 
-def run_stepwise(client: LlmWriterClient, task: dict[str, Any], tier: str, step: str) -> None:
+def run_stepwise(
+    client: LlmWriterClient, task: dict[str, Any], doc_type: str, doc_variant: str | None, step: str
+) -> None:
     """逐环节直调 LLM 注入点与校验器，跑到 ``step`` 指定环节停并打印中间产物。
 
     环节顺序与真编排（writer.make_writer_run）一致：起草 → lint → 自审 → 修一次；
@@ -164,7 +165,7 @@ def run_stepwise(client: LlmWriterClient, task: dict[str, Any], tier: str, step:
     修一次后不做修后复检（同理，复检结论看整跑的 self_check）。
     """
     mode = task["mode"]
-    style_prose = load_prose()
+    style_prose = load_prose(doc_type)
 
     # 环节一：起草（draft/revise 共用「写作调用」语义）。
     if mode == "revise":
@@ -182,7 +183,11 @@ def run_stepwise(client: LlmWriterClient, task: dict[str, Any], tier: str, step:
     spec = task["chapter_spec"]
     materials = pass_materials(task)
     violations = lint(
-        envelope.chapter_text, tier, materials=materials, hypotheses=spec["hypotheses"]
+        envelope.chapter_text,
+        doc_type,
+        doc_variant,
+        materials=materials,
+        hypotheses=spec["hypotheses"],
     )
     print(f"\n=== 校验（lint）：{len(violations)} 条违规 ===")
     _print_violations(violations)
@@ -279,7 +284,7 @@ def main() -> None:
     # --step：绕开编排逐环节直调，客户端构造口径与 make_rewriter_loop 工厂一致。
     llm: LLM = default_llm_factory(UNIT) if args.real else build_fake_llm(task)
     client = LlmWriterClient(llm)
-    run_stepwise(client, task, tier, args.step)
+    run_stepwise(client, task, doc_type, doc_variant, args.step)
 
 
 if __name__ == "__main__":

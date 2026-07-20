@@ -48,11 +48,12 @@ def carried_doc_facts(source: Mapping[str, Any]) -> tuple[str, str | None]:
 
 
 def tier_from_variant(doc_variant: str | None) -> str:
-    """由文种变体推导校验层次（tier），喂给现有 lint 接口与提示词「层次」行。
+    """人培文种内变体分键规则的取值兑底，与提示词「层次」行同源。
 
-    人才培养方案的 本科/高职 变体即层次；无变体（含其他文种）回落缺省「本科」
-    ——lint 接口按文种+变体加载规则前（issue #23）的过渡语义，
-    与废除前环境变量的缺省一致，保证既有链路产出零回归。
+    人才培养方案的 本科/高职 变体即层次；无变体（含其他文种）回落缺省「本科」，
+    保 学院级多专业(人培, None) 等既有链路产出零回归。变体分键规则
+    （required_terms / forbidden_terms / glossary.tiers 等）仅存活于人培文种的
+    合并配置内，其他文种无此类规则，该兑底值对其天然惰性。
     """
     if doc_variant in _TIER_VARIANTS:
         return doc_variant

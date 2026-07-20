@@ -1,14 +1,15 @@
 """style_linter 逐规则测试：每条规则至少一个命中用例与一个通过用例。
 
-另覆盖 CJK 断词归一化、YAML/散文双消费自同一文件、章型模板解析与别名、tier 分支。
+另覆盖 CJK 断词归一化、YAML/散文双消费自同一文件、章型模板解析与别名、
+文种两层合并（列表并集/标量覆盖）、兑底文种与变体分支。
 断言按规则名过滤，避免不相关规则的违规造成串扰。
 """
 
 from pathlib import Path
 
 from agents.rewriter_loop import (
-    DEFAULT_STYLE_GUIDE_PATH,
     Fact,
+    STYLE_GUIDES_DIR,
     Violation,
     count_prose_words,
     detect_chapter_template,
@@ -66,38 +67,48 @@ def test_归一化_CJK断词_不吞换行结构() -> None:
     assert normalize_cjk_ws("职 业\n面 向") == "职业\n面向"
 
 
-def test_双消费_YAML与散文_取自同一随包指南文件() -> None:
-    cfg = load_config()
-    prose = load_prose()
-    # YAML 侧：机器可读词表可用。
+def test_双消费_YAML与散文_取自同一随包指南目录() -> None:
+    cfg = load_config("人才培养方案")
+    prose = load_prose("人才培养方案")
+    # YAML 侧：机器可读词表可用（通用层口语词 + 文种层章型模板）。
     assert "我们" in cfg["oral_blacklist"]
     assert "学制学位" in cfg["chapter_templates"]
     # 散文侧：不含 YAML 块、保留人话规则描述。
     assert "ssot-config-begin" not in prose
     assert "风格指南" in prose
-    # 两侧同源：默认路径即随包文件。
-    assert DEFAULT_STYLE_GUIDE_PATH.name == "style_guide.md"
-    assert DEFAULT_STYLE_GUIDE_PATH.exists()
+    # 两侧同源：默认目录即随包目录，通用层与文种层文件均在。
+    assert STYLE_GUIDES_DIR.name == "style_guides"
+    assert (STYLE_GUIDES_DIR / "通用公文.md").is_file()
+    assert (STYLE_GUIDES_DIR / "人才培养方案.md").is_file()
 
 
 def test_加载配置_缺少SSoT块_抛出异常(tmp_path: Path) -> None:
-    guide = tmp_path / "broken.md"
+    guide = tmp_path / "通用公文.md"
     guide.write_text("# 无配置块的指南\n", encoding="utf-8")
     try:
-        load_config(guide)
+        load_config("通用公文", style_guides_dir=tmp_path)
     except ValueError as error:
         assert "ssot-config" in str(error)
     else:
         raise AssertionError("缺少 ssot-config 块时应抛 ValueError")
 
 
-def test_显式指南路径_lint使用传入文件的词表(tmp_path: Path) -> None:
-    guide = tmp_path / "guide.md"
+def test_加载配置_通用层文件缺失_抛出异常(tmp_path: Path) -> None:
+    try:
+        load_config("人才培养方案", style_guides_dir=tmp_path)
+    except ValueError as error:
+        assert "通用公文" in str(error)
+    else:
+        raise AssertionError("通用层文件缺失时应抛 ValueError")
+
+
+def test_显式指南目录_lint使用传入目录的词表(tmp_path: Path) -> None:
+    guide = tmp_path / "通用公文.md"
     guide.write_text(
         "# 测试指南\n\n<!-- ssot-config-begin\noral_blacklist:\n  - 测试专用词\nssot-config-end -->\n",
         encoding="utf-8",
     )
-    violations = lint("正文含测试专用词。", "本科", style_guide_path=guide)
+    violations = lint("正文含测试专用词。", "通用公文", style_guides_dir=tmp_path)
     assert _rules(violations) == {"oral_blacklist"}
 
 
@@ -107,13 +118,13 @@ def test_章型解析_中文数字前缀标题_取到章型名() -> None:
 
 
 def test_模板解析_别名归并_高职学制章命中学制学位模板() -> None:
-    cfg = load_config()
+    cfg = load_config("人才培养方案")
     assert resolve_template(cfg, "基本修业年限") is cfg["chapter_templates"]["学制学位"]
     assert resolve_template(cfg, "未登记章型") is None
 
 
 def test_归位章解析_标题变体_归并到规范章名() -> None:
-    cfg = load_config()
+    cfg = load_config("人才培养方案")
     assert resolve_ideology_chapter(cfg, "培养目标及规格") == "培养目标与培养规格"
     assert resolve_ideology_chapter(cfg, "职业面向") == "职业面向"
 
@@ -122,22 +133,22 @@ def test_归位章解析_标题变体_归并到规范章名() -> None:
 
 
 def test_口语黑名单_出现我们_命中() -> None:
-    violations = lint("## 一、总则\n\n本章我们介绍培养定位。", "本科")
+    violations = lint("## 一、总则\n\n本章我们介绍培养定位。", "人才培养方案", "本科")
     assert "oral_blacklist" in _rules(violations)
 
 
 def test_口语黑名单_公文语感正文_通过() -> None:
-    violations = lint("## 一、总则\n\n本专业培养高素质人才。", "本科")
+    violations = lint("## 一、总则\n\n本专业培养高素质人才。", "人才培养方案", "本科")
     assert "oral_blacklist" not in _rules(violations)
 
 
 def test_口语黑名单_正则句式_必要条件句式_命中() -> None:
-    violations = lint("## 一、总则\n\n实践能力是就业竞争力的必要条件。", "本科")
+    violations = lint("## 一、总则\n\n实践能力是就业竞争力的必要条件。", "人才培养方案", "本科")
     assert "oral_blacklist" in _rules(violations)
 
 
 def test_口语黑名单_正则句式_正向预测句式_命中() -> None:
-    violations = lint("## 一、总则\n\n课程成绩正向预测岗位胜任力。", "本科")
+    violations = lint("## 一、总则\n\n课程成绩正向预测岗位胜任力。", "人才培养方案", "本科")
     assert "oral_blacklist" in _rules(violations)
 
 
@@ -148,28 +159,28 @@ def test_口语黑名单_正则句式_不误伤意识形态必含长段() -> Non
         "培养德智体美劳全面发展、具有工匠精神和报国情怀、"
         "面向现代物流行业的高素质技术技能人才。"
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "oral_blacklist" not in _rules(violations)
 
 
 def test_表格必含_职业面向章无表_命中() -> None:
-    violations = lint("## 五、职业面向\n\n本章说明职业面向。", "本科")
+    violations = lint("## 五、职业面向\n\n本章说明职业面向。", "人才培养方案", "本科")
     assert "table_missing" in _rules(violations)
 
 
 def test_表格必含_职业面向章有表_通过() -> None:
     text = "## 五、职业面向\n\n| 对应行业 | 岗位 |\n| --- | --- |\n| 物流 | 调度 |\n"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "table_missing" not in _rules(violations)
 
 
 def test_编号合规_阿拉伯数字顿号起手_命中() -> None:
-    violations = lint("## 一、总则\n\n1、目标定位。", "本科")
+    violations = lint("## 一、总则\n\n1、目标定位。", "人才培养方案", "本科")
     assert "numbering" in _rules(violations)
 
 
 def test_编号合规_中文数字编号_通过() -> None:
-    violations = lint("## 一、总则\n\n（一）目标定位。", "本科")
+    violations = lint("## 一、总则\n\n（一）目标定位。", "人才培养方案", "本科")
     assert "numbering" not in _rules(violations)
 
 
@@ -178,7 +189,7 @@ def test_编号合规_中文数字编号_通过() -> None:
 
 def test_术语必含_本科培养规格缺思政_命中() -> None:
     text = "## 七、培养规格\n\n| 素质 | 知识 | 能力 |\n| --- | --- | --- |\n| a | b | c |\n"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "required_terms" in _rules(violations)
 
 
@@ -187,22 +198,22 @@ def test_术语必含_本科培养规格四分齐备_通过() -> None:
         "## 七、培养规格\n\n| 思政 | 素质 | 知识 | 能力 |\n| --- | --- | --- | --- |\n"
         "| a | b | c | d |\n"
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "required_terms" not in _rules(violations)
 
 
 def test_禁用措辞_本科学制章混入高职措辞_命中() -> None:
-    violations = lint("## 三、学制学位\n\n基本修业年限：四年。", "本科")
+    violations = lint("## 三、学制学位\n\n基本修业年限：四年。", "人才培养方案", "本科")
     assert "forbidden_terms" in _rules(violations)
 
 
 def test_禁用措辞_本科学制章本科口径_通过() -> None:
-    violations = lint("## 三、学制学位\n\n标准学制四年，授予工学学士学位。", "本科")
+    violations = lint("## 三、学制学位\n\n标准学制四年，授予工学学士学位。", "人才培养方案", "本科")
     assert "forbidden_terms" not in _rules(violations)
 
 
 def test_禁用措辞_别名章标题_高职学制章混入本科措辞仍命中() -> None:
-    violations = lint("## 三、基本修业年限\n\n标准学制三年。", "高职")
+    violations = lint("## 三、基本修业年限\n\n标准学制三年。", "人才培养方案", "高职")
     assert "forbidden_terms" in _rules(violations)
 
 
@@ -211,7 +222,7 @@ def test_禁独立子项_高职培养规格设思政子项_命中() -> None:
         "## 七、培养规格\n\n### （一）思政\n\n内容。\n\n| 素质 | 知识 | 能力 |\n"
         "| --- | --- | --- |\n| a | b | c |\n"
     )
-    violations = lint(text, "高职")
+    violations = lint(text, "人才培养方案", "高职")
     assert "forbidden_subsection" in _rules(violations)
 
 
@@ -220,18 +231,18 @@ def test_禁独立子项_高职合并子项思政素质_通过() -> None:
         "## 七、培养规格\n\n### （一）思政素质\n\n内容。\n\n| 素质 | 知识 | 能力 |\n"
         "| --- | --- | --- |\n| a | b | c |\n"
     )
-    violations = lint(text, "高职")
+    violations = lint(text, "人才培养方案", "高职")
     assert "forbidden_subsection" not in _rules(violations)
 
 
 def test_禁用同义词标题_职业领域作大章标题_命中() -> None:
-    violations = lint("## 五、职业领域\n\n本章说明职业面向。", "本科")
+    violations = lint("## 五、职业领域\n\n本章说明职业面向。", "人才培养方案", "本科")
     assert "avoid_title" in _rules(violations)
 
 
 def test_禁用同义词标题_职业面向权威词_通过() -> None:
     text = "## 五、职业面向\n\n| 对应行业 | 岗位 |\n| --- | --- |\n| 物流 | 调度 |\n"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "avoid_title" not in _rules(violations)
 
 
@@ -239,62 +250,62 @@ def test_禁用同义词标题_职业面向权威词_通过() -> None:
 
 
 def test_政治理论_归位章缺必含串_命中missing() -> None:
-    violations = lint("## 三、培养目标与培养规格\n\n培养高素质人才。", "本科")
+    violations = lint("## 三、培养目标与培养规格\n\n培养高素质人才。", "人才培养方案", "本科")
     assert "political_theory_missing" in _rules(violations)
 
 
 def test_政治理论_变体章标题含必含串_通过missing() -> None:
     text = "## 三、培养目标及规格\n\n践行社会主义核心价值观，弘扬工匠精神。"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "political_theory_missing" not in _rules(violations)
 
 
 def test_政治理论_归位章外注入_命中out_of_place() -> None:
     text = "## 五、职业面向\n\n本章践行社会主义核心价值观。"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "political_theory_out_of_place" in _rules(violations)
 
 
 def test_政治理论_tier分支_本科专属串在高职文本不校验() -> None:
     text = "## 五、职业面向\n\n坚定四个自信。"
-    rules_本科 = _rules(lint(text, "本科"))
-    rules_高职 = _rules(lint(text, "高职"))
+    rules_本科 = _rules(lint(text, "人才培养方案", "本科"))
+    rules_高职 = _rules(lint(text, "人才培养方案", "高职"))
     assert "political_theory_out_of_place" in rules_本科
     assert "political_theory_out_of_place" not in rules_高职
 
 
 def test_政治理论_领域专属串出现在通用文档_命中wrong_domain() -> None:
-    violations = lint("## 三、培养目标与培养规格\n\n建设金融强国。", "高职")
+    violations = lint("## 三、培养目标与培养规格\n\n建设金融强国。", "人才培养方案", "高职")
     assert "political_theory_wrong_domain" in _rules(violations)
 
 
 def test_政治理论_领域匹配文档_通过wrong_domain() -> None:
     violations = lint(
-        "## 三、培养目标与培养规格\n\n建设金融强国。", "高职", domain="金融"
+        "## 三、培养目标与培养规格\n\n建设金融强国。", "人才培养方案", "高职", domain="金融"
     )
     assert "political_theory_wrong_domain" not in _rules(violations)
 
 
 def test_情感语_培养目标章无情感语_命中() -> None:
     text = "## 三、培养目标与培养规格\n\n践行社会主义核心价值观。"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "affective_missing" in _rules(violations)
 
 
 def test_情感语_略松正则_爱国情怀算在位() -> None:
     text = "## 三、培养目标与培养规格\n\n践行社会主义核心价值观，厚植爱国情怀。"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "affective_missing" not in _rules(violations)
 
 
 def test_逐字保底_引用触发词但未逐字出全串_命中partial() -> None:
-    violations = lint("## 一、总则\n\n贯彻习近平重要论述。", "本科")
+    violations = lint("## 一、总则\n\n贯彻习近平重要论述。", "人才培养方案", "本科")
     assert "political_theory_partial" in _rules(violations)
 
 
 def test_逐字保底_断词全串经归一化后视为逐字出现_通过partial() -> None:
     text = "## 一、总则\n\n贯彻习近平新 时代中国特色社会主义思想。"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "political_theory_partial" not in _rules(violations)
 
 
@@ -304,6 +315,7 @@ def test_逐字保底_断词全串经归一化后视为逐字出现_通过partia
 def test_事实在位_依据值缺失于正文_命中() -> None:
     violations = lint(
         "## 一、总则\n\n正文未提课程。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="course", value="现代物流管理")],
     )
@@ -313,6 +325,7 @@ def test_事实在位_依据值缺失于正文_命中() -> None:
 def test_事实在位_依据值出现于正文_通过() -> None:
     violations = lint(
         "## 一、总则\n\n开设现代物流管理课程。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="course", value="现代物流管理")],
     )
@@ -322,6 +335,7 @@ def test_事实在位_依据值出现于正文_通过() -> None:
 def test_事实在位_全角数字排版_归一化后通过() -> None:
     violations = lint(
         "## 一、总则\n\n总学分为７８学分。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="credit", value="78学分")],
     )
@@ -331,6 +345,7 @@ def test_事实在位_全角数字排版_归一化后通过() -> None:
 def test_事实在位_带空格数值排版_归一化后通过() -> None:
     violations = lint(
         "## 一、总则\n\n总学分为 78 学分，对应行业代码为 (6 4)。",
+        "人才培养方案",
         "本科",
         references=[
             Fact(type="credit", value="78 学分"),
@@ -343,6 +358,7 @@ def test_事实在位_带空格数值排版_归一化后通过() -> None:
 def test_事实在位_数值类事实确实缺失_归一化后仍命中() -> None:
     violations = lint(
         "## 一、总则\n\n总学分为７８学分。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="credit", value="40学分")],
     )
@@ -352,6 +368,7 @@ def test_事实在位_数值类事实确实缺失_归一化后仍命中() -> Non
 def test_查臆造_行业代码无依据_命中() -> None:
     violations = lint(
         "## 一、总则\n\n对应行业(64)。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="industry_code", value="65")],
     )
@@ -361,6 +378,7 @@ def test_查臆造_行业代码无依据_命中() -> None:
 def test_查臆造_行业代码有依据_通过() -> None:
     violations = lint(
         "## 一、总则\n\n对应行业(64)。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="industry_code", value="64")],
     )
@@ -370,6 +388,7 @@ def test_查臆造_行业代码有依据_通过() -> None:
 def test_查臆造_学分数值无依据_命中() -> None:
     violations = lint(
         "## 一、总则\n\n共计78学分。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="credit", value="40学分")],
     )
@@ -379,6 +398,7 @@ def test_查臆造_学分数值无依据_命中() -> None:
 def test_查臆造_学分数值有依据_通过() -> None:
     violations = lint(
         "## 一、总则\n\n共计78学分。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="credit", value="78学分")],
     )
@@ -388,6 +408,7 @@ def test_查臆造_学分数值有依据_通过() -> None:
 def test_查臆造_证书名无依据_命中() -> None:
     violations = lint(
         "## 一、总则\n\n取得物流管理职业技能等级证书。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="certificate", value="会计职业技能等级证书")],
     )
@@ -397,6 +418,7 @@ def test_查臆造_证书名无依据_命中() -> None:
 def test_查臆造_证书名有依据_通过() -> None:
     violations = lint(
         "## 一、总则\n\n取得物流管理职业技能等级证书。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="certificate", value="物流管理职业技能等级证书")],
     )
@@ -404,7 +426,7 @@ def test_查臆造_证书名有依据_通过() -> None:
 
 
 def test_查臆造_无事实依据参数_整组规则不触发() -> None:
-    violations = lint("## 一、总则\n\n对应行业(64)，共计78学分。", "本科")
+    violations = lint("## 一、总则\n\n对应行业(64)，共计78学分。", "人才培养方案", "本科")
     rules = _rules(violations)
     assert "fabricated_industry_code" not in rules
     assert "fabricated_credit" not in rules
@@ -414,6 +436,7 @@ def test_查臆造_无事实依据参数_整组规则不触发() -> None:
 def test_查臆造_量化断言_无角标无依据_命中() -> None:
     violations = lint(
         "## 一、总则\n\n经课程改革，实践课时提升30%。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="credit", value="78学分")],
     )
@@ -423,6 +446,7 @@ def test_查臆造_量化断言_无角标无依据_命中() -> None:
 def test_查臆造_量化断言_参考依据含该数值_通过() -> None:
     violations = lint(
         "## 一、总则\n\n经课程改革，实践课时提升30%。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="other", value="实践课时提升 ３０%")],
     )
@@ -432,6 +456,7 @@ def test_查臆造_量化断言_参考依据含该数值_通过() -> None:
 def test_查臆造_量化断言_同句素材角标_通过() -> None:
     violations = lint(
         "## 一、总则\n\n经课程改革，实践课时提升30%[m-h-1]。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1")],
     )
@@ -441,6 +466,7 @@ def test_查臆造_量化断言_同句素材角标_通过() -> None:
 def test_查臆造_量化断言_角标紧随句末标点_通过() -> None:
     violations = lint(
         "## 一、总则\n\n经课程改革，实践课时提升30%。[m-h-1]",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1")],
     )
@@ -450,6 +476,7 @@ def test_查臆造_量化断言_角标紧随句末标点_通过() -> None:
 def test_查臆造_量化断言_角标在下一句_命中() -> None:
     violations = lint(
         "## 一、总则\n\n经课程改革，实践课时提升30%。改革成效已获评估认可[m-h-1]。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1")],
     )
@@ -460,18 +487,19 @@ def test_查臆造_量化断言_表内数字_不触发() -> None:
     text = (
         "## 一、总则\n\n| 指标 | 数值 |\n| --- | --- |\n| 实践课时提升30% | 达标 |\n"
     )
-    violations = lint(text, "本科", references=[Fact(type="credit", value="78学分")])
+    violations = lint(text, "人才培养方案", "本科", references=[Fact(type="credit", value="78学分")])
     assert "fabricated_quantitative" not in _rules(violations)
 
 
 def test_查臆造_量化断言_未传素材与依据_不触发() -> None:
-    violations = lint("## 一、总则\n\n经课程改革，实践课时提升30%。", "本科")
+    violations = lint("## 一、总则\n\n经课程改革，实践课时提升30%。", "人才培养方案", "本科")
     assert "fabricated_quantitative" not in _rules(violations)
 
 
 def test_查臆造_量化断言_倍数与时长单位_命中() -> None:
     violations = lint(
         "## 一、总则\n\n实训产出增长1.5倍，平均实习周期缩短2周。",
+        "人才培养方案",
         "本科",
         references=[Fact(type="credit", value="78学分")],
     )
@@ -485,6 +513,7 @@ def test_查臆造_量化断言_倍数与时长单位_命中() -> None:
 def test_素材角标_池外id_命中unknown_material_marker() -> None:
     violations = lint(
         "## 一、总则\n\n结论有据。[m-x-9]",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1")],
     )
@@ -494,6 +523,7 @@ def test_素材角标_池外id_命中unknown_material_marker() -> None:
 def test_素材角标_池内id_通过unknown_material_marker() -> None:
     violations = lint(
         "## 一、总则\n\n结论有据。[m-h-1]",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1")],
     )
@@ -501,13 +531,14 @@ def test_素材角标_池内id_通过unknown_material_marker() -> None:
 
 
 def test_素材角标_无素材池_不校验角标() -> None:
-    violations = lint("## 一、总则\n\n结论有据。[m-x-9]", "本科")
+    violations = lint("## 一、总则\n\n结论有据。[m-x-9]", "人才培养方案", "本科")
     assert "unknown_material_marker" not in _rules(violations)
 
 
 def test_素材池_重复id_命中duplicate_material_id() -> None:
     violations = lint(
         "## 一、总则\n\n正文。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1"), _material("m-h-1")],
     )
@@ -517,6 +548,7 @@ def test_素材池_重复id_命中duplicate_material_id() -> None:
 def test_素材池_id唯一_通过duplicate_material_id() -> None:
     violations = lint(
         "## 一、总则\n\n正文。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1"), _material("m-h-2")],
     )
@@ -526,6 +558,7 @@ def test_素材池_id唯一_通过duplicate_material_id() -> None:
 def test_素材回链_指向不存在假说_命中dangling_hypothesis_id() -> None:
     violations = lint(
         "## 一、总则\n\n正文。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1", hypothesis_id="h-9")],
         hypotheses=[_hypothesis("h-1")],
@@ -536,6 +569,7 @@ def test_素材回链_指向不存在假说_命中dangling_hypothesis_id() -> No
 def test_素材回链_指向既有假说_通过dangling_hypothesis_id() -> None:
     violations = lint(
         "## 一、总则\n\n正文。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1", hypothesis_id="h-1")],
         hypotheses=[_hypothesis("h-1")],
@@ -546,6 +580,7 @@ def test_素材回链_指向既有假说_通过dangling_hypothesis_id() -> None:
 def test_素材回链_未传假说列表_不校验() -> None:
     violations = lint(
         "## 一、总则\n\n正文。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1", hypothesis_id="h-9")],
     )
@@ -556,6 +591,7 @@ def test_照抄守卫_摘录出现于正文且未挂角标_命中() -> None:
     excerpt = "数字化转型正在重塑物流行业格局"
     violations = lint(
         "## 一、总则\n\n数字化转型，正在重塑物流行业格局。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1", excerpt=excerpt)],
     )
@@ -566,6 +602,7 @@ def test_照抄守卫_摘录出现且已挂角标_通过() -> None:
     excerpt = "数字化转型正在重塑物流行业格局"
     violations = lint(
         "## 一、总则\n\n数字化转型正在重塑物流行业格局。[m-h-1]",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1", excerpt=excerpt)],
     )
@@ -575,6 +612,7 @@ def test_照抄守卫_摘录出现且已挂角标_通过() -> None:
 def test_照抄守卫_摘录过短无特征_不触发() -> None:
     violations = lint(
         "## 一、总则\n\n培养高素质人才。",
+        "人才培养方案",
         "本科",
         materials=[_material("m-h-1", excerpt="人才")],
     )
@@ -708,7 +746,7 @@ def test_字数统计_纯标点() -> None:
 def test_字数规则_章超上限_命中() -> None:
     # 构造一章超上限（5000）。标题「一、总则」= 3 字计入，故正文 4998 字，合计 5001 > 5000。
     text = "## 一、总则\n\n" + "字" * 4998
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "word_count" in _rules(violations)
     assert any("超出上限" in v.message for v in violations if v.rule == "word_count")
 
@@ -716,7 +754,7 @@ def test_字数规则_章超上限_命中() -> None:
 def test_字数规则_章不足下限_命中() -> None:
     # 构造一章不足下限（2000）。标题「一、总则」= 3 字计入，故正文 1996 字，合计 1999 < 2000。
     text = "## 一、总则\n\n" + "字" * 1996
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "word_count" in _rules(violations)
     assert any("不足下限" in v.message for v in violations if v.rule == "word_count")
 
@@ -724,14 +762,14 @@ def test_字数规则_章不足下限_命中() -> None:
 def test_字数规则_章在区间内_通过() -> None:
     # 标题「一、总则」= 3 字计入，故正文 2997 字，合计 3000 在区间 [2000, 5000] 内。
     text = "## 一、总则\n\n" + "字" * 2997
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "word_count" not in _rules(violations)
 
 
 def test_字数规则_表章豁免下限_只报上限() -> None:
     # 职业面向章为 table_required；构造 1500 字散文（不足章下限 2000 但在表章合理范围）。
     text = "## 五、职业面向\n\n" + "字" * 1500 + "\n\n| 行业 | 岗位 |\n| --- | --- |\n| x | y |\n"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     # 表章豁免散文下限 → 不报章下限违规；若超上限仍报（这里未超）。
     assert not any(
         v.rule == "word_count" and "不足下限" in v.message for v in violations
@@ -746,7 +784,7 @@ def test_字数规则_节超动态收缩上限_命中() -> None:
         + "### （一）第一节\n\n" + "字" * 1600
         + "\n\n### （二）第二节\n\n" + "字" * 1400
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     rules_wc = [v for v in violations if v.rule == "word_count"]
     assert any("第一节" in v.message and "超出上限" in v.message for v in rules_wc)
 
@@ -760,7 +798,7 @@ def test_字数规则_节不足动态收缩下限_命中() -> None:
         + "\n\n### （二）第二节\n\n" + "字" * 1300
         + "\n\n### （三）第三节\n\n" + "字" * 1300
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     rules_wc = [v for v in violations if v.rule == "word_count"]
     assert any("第一节" in v.message and "不足下限" in v.message for v in rules_wc)
 
@@ -772,7 +810,7 @@ def test_字数规则_节级同级差异超倍数_命中() -> None:
         + "### （一）短节\n\n" + "字" * 800
         + "\n\n### （二）长节\n\n" + "字" * 2000
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     rules_wc = [v for v in violations if v.rule == "word_count"]
     assert any("失衡" in v.message for v in rules_wc)
 
@@ -784,7 +822,7 @@ def test_字数规则_节级同级差异未超倍数_通过() -> None:
         + "### （一）短节\n\n" + "字" * 800
         + "\n\n### （二）长节\n\n" + "字" * 1600
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     # 不报同级差异违规（可能因章/节上下限仍报其他违规，此处只查同级差异）。
     rules_wc = [v for v in violations if v.rule == "word_count"]
     assert not any("失衡" in v.message for v in rules_wc)
@@ -798,7 +836,7 @@ def test_字数规则_表章豁免同级差异_不比对() -> None:
         + "\n\n### （二）长节\n\n" + "字" * 2000
         + "\n\n| 行业 | 岗位 |\n| --- | --- |\n| x | y |\n"
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     rules_wc = [v for v in violations if v.rule == "word_count"]
     # 表章豁免同级差异比对 → 不报失衡。
     assert not any("失衡" in v.message for v in rules_wc)
@@ -813,7 +851,7 @@ def test_字数规则_小节超动态收缩上限_命中() -> None:
         + "\n\n#### 2. 小节二\n\n" + "字" * 400
         + "\n\n#### 3. 小节三\n\n" + "字" * 400
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     rules_wc = [v for v in violations if v.rule == "word_count"]
     assert any("小节一" in v.message and "超出上限" in v.message for v in rules_wc)
 
@@ -829,7 +867,7 @@ def test_字数规则_小节收缩以节区间为父级_区间不退化() -> Non
         + "\n\n#### 2. 小节二\n\n" + "字" * 460
         + "\n\n### （二）第二节\n\n" + "字" * 1100
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     rules_wc = [v for v in violations if v.rule == "word_count"]
     assert not any("小节" in v.message for v in rules_wc)
 
@@ -845,7 +883,7 @@ def test_字数规则_小节按节级收缩区间上下限_均命中() -> None:
         + "\n\n#### 4. 小节四\n\n" + "字" * 300
         + "\n\n### （二）第二节\n\n" + "字" * 1050
     )
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     rules_wc = [v for v in violations if v.rule == "word_count"]
     assert any("小节一" in v.message and "不足下限" in v.message for v in rules_wc)
     assert any("小节二" in v.message and "超出上限" in v.message for v in rules_wc)
@@ -854,12 +892,12 @@ def test_字数规则_小节按节级收缩区间上下限_均命中() -> None:
 def test_字数规则_无章标题_不校验() -> None:
     # 正文无 ## 标题 → 不落入标准章结构 → 不校验字数。
     text = "正文无章标题，不校验字数。"
-    violations = lint(text, "本科")
+    violations = lint(text, "人才培养方案", "本科")
     assert "word_count" not in _rules(violations)
 
 
 def test_字数目标块_叙述章型_取中上限提示() -> None:
-    block = word_count_prompt_block("一、总则")
+    block = word_count_prompt_block("一、总则", "人才培养方案")
     assert "2000～5000" in block
     assert "600～1500" in block
     assert "200～500" in block
@@ -868,7 +906,7 @@ def test_字数目标块_叙述章型_取中上限提示() -> None:
 
 
 def test_字数目标块_表章_取中下限且不得凑段() -> None:
-    block = word_count_prompt_block("五、职业面向")
+    block = word_count_prompt_block("五、职业面向", "人才培养方案")
     assert "2000～5000" in block
     assert "表型章" in block
     assert "中下限" in block
@@ -876,11 +914,85 @@ def test_字数目标块_表章_取中下限且不得凑段() -> None:
 
 
 def test_字数目标块_无字数配置_返回空串(tmp_path: Path) -> None:
-    guide = tmp_path / "no_wc.md"
+    guide = tmp_path / "通用公文.md"
     guide.write_text(
         "# 指南\n\n<!-- ssot-config-begin\noral_blacklist: []\nssot-config-end -->\n",
         encoding="utf-8",
     )
-    block = word_count_prompt_block("一、总则", style_guide_path=guide)
+    block = word_count_prompt_block("一、总则", "通用公文", style_guides_dir=tmp_path)
     assert block == ""
 
+
+# ---------- 文种两层合并：列表并集 / 标量覆盖 / 兑底 / 回落 / 散文拼接 ----------
+
+
+def _write_two_layer_guides(tmp_path: Path) -> None:
+    """写一对最小两层指南（通用公文 + 自定义文种），供合并语义正反例共用。"""
+    (tmp_path / "通用公文.md").write_text(
+        "# 通用指南散文\n\n<!-- ssot-config-begin\n"
+        "oral_blacklist:\n  - 通用词\n  - 共用词\n"
+        "word_count:\n  chapter:\n    min: 100\n    max: 200\n"
+        "ssot-config-end -->\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "自定义文种.md").write_text(
+        "# 文种指南散文\n\n<!-- ssot-config-begin\n"
+        "oral_blacklist:\n  - 文种词\n  - 共用词\n"
+        "word_count:\n  chapter:\n    max: 300\n"
+        "ssot-config-end -->\n",
+        encoding="utf-8",
+    )
+
+
+def test_两层合并_列表并集_通用在前文种追加且去重(tmp_path: Path) -> None:
+    _write_two_layer_guides(tmp_path)
+    cfg = load_config("自定义文种", style_guides_dir=tmp_path)
+    # 并集保序：通用层条目在前，文种层追加未重复条目，重复的「共用词」只留一份。
+    assert cfg["oral_blacklist"] == ["通用词", "共用词", "文种词"]
+
+
+def test_两层合并_嵌套标量覆盖_未覆盖键保留通用值(tmp_path: Path) -> None:
+    _write_two_layer_guides(tmp_path)
+    cfg = load_config("自定义文种", style_guides_dir=tmp_path)
+    # 嵌套映射逐键递归：文种层覆盖 max，未声明的 min 保留通用层值。
+    assert cfg["word_count"]["chapter"] == {"min": 100, "max": 300}
+
+
+def test_两层合并_兑底文种_不受文种层影响(tmp_path: Path) -> None:
+    _write_two_layer_guides(tmp_path)
+    cfg = load_config("通用公文", style_guides_dir=tmp_path)
+    assert cfg["oral_blacklist"] == ["通用词", "共用词"]
+    assert cfg["word_count"]["chapter"] == {"min": 100, "max": 200}
+
+
+def test_兑底文种_基础门禁生效_口语与编号命中() -> None:
+    violations = lint("## 一、总则\n\n本章我们介绍定位。\n1、目标。", "通用公文")
+    rules = _rules(violations)
+    assert "oral_blacklist" in rules
+    assert "numbering" in rules
+
+
+def test_兑底文种_字数门禁生效_章不足下限命中() -> None:
+    violations = lint("## 一、总则\n\n正文过短。", "通用公文")
+    assert "word_count" in _rules(violations)
+
+
+def test_兑底文种_文种层规则不生效_学术断言与意识形态不命中() -> None:
+    # 学术断言句式正则与意识形态词表按 ADR-0005 落文种层，通用公文不加载。
+    text = "## 三、培养目标与培养规格\n\n实践能力是就业竞争力的必要条件。"
+    rules = _rules(lint(text, "通用公文"))
+    assert "oral_blacklist" not in rules
+    assert not any(rule.startswith("political_theory") for rule in rules)
+    assert "affective_missing" not in rules
+
+
+def test_无专属指南文种_汇报材料_回落通用层() -> None:
+    assert load_config("汇报材料") == load_config("通用公文")
+    assert load_prose("汇报材料") == load_prose("通用公文")
+
+
+def test_散文加载_两层拼接_通用在前文种在后(tmp_path: Path) -> None:
+    _write_two_layer_guides(tmp_path)
+    prose = load_prose("自定义文种", style_guides_dir=tmp_path)
+    assert prose.index("通用指南散文") < prose.index("文种指南散文")
+    assert "ssot-config-begin" not in prose
