@@ -57,6 +57,9 @@ class ChapterSpecPayload(TypedDict):
 
     id: str
     title: str
+    chapter_type: str | None
+    """章型：State 大纲随章携带的骨架事实（ADR-0005），编排层原样透传，
+    lint 直接消费、不从位置或标题反推；自由结构模式为 None。"""
     points: list[PointPayload]
     hypotheses: list[HypothesisPayload]
 

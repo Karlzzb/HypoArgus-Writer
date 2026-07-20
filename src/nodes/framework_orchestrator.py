@@ -39,6 +39,7 @@ from domain.state import (
 )
 from domain.template_skeleton import (
     VARIABLE_PATTERN,
+    SectionSkeleton,
     TemplateSkeleton,
     parse_template_skeleton,
 )
@@ -76,6 +77,8 @@ class _OutlineChapter:
 
     title: str
     subsections: tuple[str, ...]
+    chapter_type: str | None = None
+    """章型：所属模板骨架章的标题原文（骨架事实）；自由结构为 None。"""
 
 
 def _default_templates_dir() -> Path:
@@ -167,13 +170,41 @@ def _identify_genre(
     return genre, resolved
 
 
+def _build_outline_chapter(
+    chapter: SectionSkeleton, item: dict[str, Any]
+) -> _OutlineChapter:
+    """把单条 LLM 应答项回填为大纲章：标题 / 子标题缺失或非法时回落骨架原文。
+
+    章型取骨架章标题原文（骨架事实，ADR-0005），不随实例化后的标题变化。
+    """
+    title_raw = item.get("title")
+    if isinstance(title_raw, str) and title_raw.strip():
+        title = title_raw.strip()
+    else:
+        title = chapter.title
+    subsections_raw = item.get("subsections")
+    if isinstance(subsections_raw, list) and all(
+        isinstance(sub, str) for sub in subsections_raw
+    ):
+        subsections = [sub.strip() for sub in subsections_raw if sub.strip()]
+    else:
+        subsections = [sub.title for sub in chapter.subsections]
+    return _OutlineChapter(
+        title=_fill_placeholders(title),
+        subsections=tuple(_fill_placeholders(sub) for sub in subsections),
+        chapter_type=chapter.title,
+    )
+
+
 def _instantiate_template_outline(
     llm: LLM, skeleton: TemplateSkeleton, user_intent: str, user_identity: str
 ) -> list[_OutlineChapter]:
-    """步骤 2a 模板路径大纲：LLM 只做标题实例化与不适用章节裁剪。
+    """步骤 2a 模板路径大纲：LLM 只做标题实例化、不适用章节裁剪与重复位展开。
 
-    程序侧按骨架序号对齐强制结构：超界 / 缺失项回落骨架原标题与子标题；
-    applicable=false 的章节剔除；残留 {变量} 统一替换为占位标记。
+    程序侧按骨架序号对齐强制结构：固定章超界 / 缺失项回落骨架原标题与子标题，
+    applicable=false 的章节剔除；可重复章位（repeat: 1..N）收集共用该序号的
+    全部应答项按序展开，展开为空时回落单章骨架原文（repeat 下限为 1），
+    首尾固定章因此始终按骨架序号强制对齐；残留 {变量} 统一替换为占位标记。
     """
     skeleton_payload = [
         {
@@ -181,13 +212,17 @@ def _instantiate_template_outline(
             "numbering": chapter.numbering,
             "title": chapter.title,
             "subsections": [sub.title for sub in chapter.subsections],
+            **({"repeat": "1..N"} if chapter.repeatable else {}),
         }
         for index, chapter in enumerate(skeleton.chapters, start=1)
     ]
     system = (
         "你是大纲实例化器。给定模板章节骨架与用户写作需求，逐章实例化标题文本。"
-        "严格约束：不得增删章节、不得改变骨架结构，只能实例化标题与子标题文字，"
+        "严格约束：固定章不得增删、不得改变骨架结构，只能实例化标题与子标题文字，"
         "以及把明显不适用于本需求的章节标记为 applicable=false 予以裁剪。"
+        '带 "repeat": "1..N" 标记的章是可重复章位：按用户需求把它展开为'
+        "若干个具体章，逐章一项、共用该章位的骨架序号 index、按行文顺序排列，"
+        "每章标题是凝练的观点标题，并各自给出贴合内容的子标题，至少展开一章。"
         "模板中形如 {变量名} 的填充变量，用户需求提供了对应信息就代入；"
         "未提供时在标题中原样写 【待补充：变量名】 醒目占位继续，不要追问。"
         "输出 JSON 数组，逐章一项："
@@ -203,34 +238,27 @@ def _instantiate_template_outline(
     )
     payload = invoke_json(llm, "模板大纲实例化", system, user, list)
 
-    by_index: dict[int, dict[str, Any]] = {}
+    by_index: dict[int, list[dict[str, Any]]] = {}
     for item in payload:
         if isinstance(item, dict) and isinstance(item.get("index"), int):
-            by_index.setdefault(item["index"], item)
+            by_index.setdefault(item["index"], []).append(item)
 
     chapters: list[_OutlineChapter] = []
     for index, chapter in enumerate(skeleton.chapters, start=1):
-        item = by_index.get(index, {})
+        items = by_index.get(index, [])
+        if chapter.repeatable:
+            expanded = [
+                _build_outline_chapter(chapter, item)
+                for item in items
+                if item.get("applicable", True) is not False
+            ]
+            # 应答未展开重复位（缺失或全部标记不适用）时保底一章：repeat 下限为 1。
+            chapters.extend(expanded or [_build_outline_chapter(chapter, {})])
+            continue
+        item = items[0] if items else {}
         if item.get("applicable", True) is False:
             continue
-        title_raw = item.get("title")
-        if isinstance(title_raw, str) and title_raw.strip():
-            title = title_raw.strip()
-        else:
-            title = chapter.title
-        subsections_raw = item.get("subsections")
-        if isinstance(subsections_raw, list) and all(
-            isinstance(sub, str) for sub in subsections_raw
-        ):
-            subsections = [sub.strip() for sub in subsections_raw if sub.strip()]
-        else:
-            subsections = [sub.title for sub in chapter.subsections]
-        chapters.append(
-            _OutlineChapter(
-                title=_fill_placeholders(title),
-                subsections=tuple(_fill_placeholders(sub) for sub in subsections),
-            )
-        )
+        chapters.append(_build_outline_chapter(chapter, item))
     return chapters
 
 
@@ -499,6 +527,7 @@ def make_framework_orchestrator_node(
                 title=chapter.title,
                 subsections=list(chapter.subsections),
                 points=points,
+                chapter_type=chapter.chapter_type,
             )
 
         outline: list[ChapterSpec] = []

@@ -15,6 +15,7 @@ def draft_task() -> dict[str, Any]:
         "chapter_spec": {
             "id": "ch-1",
             "title": "示例章节",
+            "chapter_type": "示例章节",
             "points": [
                 {"id": "p-1", "text": "论点甲"},
                 {"id": "p-2", "text": "论点乙"},

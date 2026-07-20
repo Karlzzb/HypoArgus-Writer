@@ -136,12 +136,89 @@ def test_变量不跨行不含嵌套花括号():
     assert skeleton.variables == ("内",)
 
 
+def test_章级repeat标记解析为可重复章且标题不含标记():
+    text = "\n".join(
+        [
+            "## 一、监测概述",
+            "## 二、维度章 <!-- repeat: 1..N -->",
+            "## 三、结论与建议",
+        ]
+    )
+    skeleton = parse_template_skeleton(text)
+    assert [c.repeatable for c in skeleton.chapters] == [False, True, False]
+    assert skeleton.chapters[1] == SectionSkeleton(
+        numbering="二", title="维度章", repeatable=True
+    )
+
+
+def test_repeat标记标在小节级被拒绝():
+    text = "\n".join(["## 一、章", "### （一）小节 <!-- repeat: 1..N -->"])
+    with pytest.raises(ValueError, match="章级"):
+        parse_template_skeleton(text)
+
+
+def test_repeat标记嵌套于可重复章的小节被拒绝():
+    text = "\n".join(
+        [
+            "## 一、维度章 <!-- repeat: 1..N -->",
+            "### （一）子维度 <!-- repeat: 1..N -->",
+        ]
+    )
+    with pytest.raises(ValueError, match="章级"):
+        parse_template_skeleton(text)
+
+
+def test_repeat标记标在一级标题被拒绝():
+    with pytest.raises(ValueError, match="章级"):
+        parse_template_skeleton("# 报告标题 <!-- repeat: 1..N -->")
+
+
+def test_一份模板出现多个可重复章位被拒绝():
+    text = "\n".join(
+        [
+            "## 一、维度章 <!-- repeat: 1..N -->",
+            "## 二、专题章 <!-- repeat: 1..N -->",
+        ]
+    )
+    with pytest.raises(ValueError, match="至多一个"):
+        parse_template_skeleton(text)
+
+
+def test_repeat标记标在首个H2之前的孤儿小节同样被拒绝():
+    text = "\n".join(["### 孤儿小节 <!-- repeat: 1..N -->", "## 一、正式章节"])
+    with pytest.raises(ValueError, match="章级"):
+        parse_template_skeleton(text)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ["<!-- repeat: 1..3 -->", "<!-- repeat -->", "<!-- repeat: N -->"],
+)
+def test_非规范repeat写法显式报错不静默当标题文本(marker: str):
+    with pytest.raises(ValueError, match="仅支持 repeat: 1..N"):
+        parse_template_skeleton(f"## 一、维度章 {marker}")
+
+
+def test_围栏代码块内的repeat标记不生效():
+    text = "\n".join(
+        [
+            "## 一、真章节",
+            "```",
+            "## 二、假章节 <!-- repeat: 1..N -->",
+            "```",
+        ]
+    )
+    skeleton = parse_template_skeleton(text)
+    assert [c.repeatable for c in skeleton.chapters] == [False]
+
+
 @pytest.mark.parametrize(
     "filename",
     [
         "人才培养方案总结（汇报）模版.md",
         "学院级多专业培养方案模版.md",
         "本科职业教育人才培养方案模版.md",
+        "调研报告模版.md",
         "高职专科人才培养方案模版.md",
     ],
 )
@@ -149,6 +226,26 @@ def test_真实模板解析不抛错(filename: str):
     text = (TEMPLATES_DIR / filename).read_text(encoding="utf-8")
     skeleton = parse_template_skeleton(text)
     assert isinstance(skeleton, TemplateSkeleton)
+
+
+def test_调研报告模板已知结构断言():
+    """骨架事实：首章固定四小节、单一可重复维度章位、首尾固定章齐全（issue #24）。"""
+    text = (TEMPLATES_DIR / "调研报告模版.md").read_text(encoding="utf-8")
+    skeleton = parse_template_skeleton(text)
+    首章 = skeleton.chapters[0]
+    assert 首章.title == "监测概述与数据说明"
+    assert [sub.title for sub in 首章.subsections] == [
+        "监测背景",
+        "数据来源与可靠性",
+        "核心指标界定",
+        "核心评估维度",
+    ]
+    repeatable = [c for c in skeleton.chapters if c.repeatable]
+    assert [c.title for c in repeatable] == ["维度章"]
+    assert [c.title for c in skeleton.chapters[-2:]] == [
+        "主要发现与问题诊断",
+        "结论与对策建议",
+    ]
 
 
 def test_高职专科模板已知结构断言():

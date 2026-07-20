@@ -112,6 +112,7 @@ def _make_state() -> WritingAgentState:
         ChapterSpec(
             id="ch1",
             title="第一章",
+            chapter_type="维度章",
             points=[
                 ArgumentPoint(
                     id="ch1-p1", text="论点一", hypotheses=[_hypothesis("ch1-p1-h1")]
@@ -205,6 +206,9 @@ def test_任务包章节骨架含论点与全章扁平假说():
     adapter, _ = _run_node()
     spec_ch1 = adapter.tasks[0]["chapter_spec"]
     assert spec_ch1["title"] == "第一章"
+    # 章型骨架事实原样透传进任务包（ADR-0005）；大纲未携带时为 None。
+    assert spec_ch1["chapter_type"] == "维度章"
+    assert adapter.tasks[2]["chapter_spec"]["chapter_type"] is None
     assert [point["id"] for point in spec_ch1["points"]] == ["ch1-p1", "ch1-p2"]
     assert [point["text"] for point in spec_ch1["points"]] == ["论点一", "论点二"]
     assert [hyp["id"] for hyp in spec_ch1["hypotheses"]] == ["ch1-p1-h1", "ch1-p2-h1"]

@@ -418,6 +418,167 @@ def test_识别应答文件名归一化后仍无匹配时回落自由结构(temp
     assert result["template_id"] is None
 
 
+@pytest.fixture()
+def survey_templates_dir(tmp_path: Path) -> Path:
+    """构造含可重复维度章位的调研报告模板目录（用注册表已登记的文件名）。"""
+    (tmp_path / "index.md").write_text(
+        "模板\t典型调用场景\n调研报告模版.md\t年度质量报告、专项调研\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "调研报告模版.md").write_text(
+        "# {学校名称}调研报告\n\n"
+        "## 一、监测概述与数据说明\n### （一）监测背景\n\n"
+        "## 二、维度章 <!-- repeat: 1..N -->\n\n"
+        "## 三、结论与对策建议\n### （一）核心结论\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def _survey_identify() -> dict[str, Any]:
+    return {"genre": "调研报告", "template_file": "调研报告模版.md"}
+
+
+def test_可重复章展开_维度章按应答展开且首尾固定章对齐(
+    survey_templates_dir: Path,
+) -> None:
+    """可重复章实例化（issue #24）：重复位共用骨架序号展开为 N 章，固定章按序号对齐。"""
+    result, _ = _run_node(
+        [
+            _survey_identify(),
+            [
+                {
+                    "index": 1,
+                    "applicable": True,
+                    "title": "监测概述与数据说明",
+                    "subsections": ["监测背景"],
+                },
+                {
+                    "index": 2,
+                    "applicable": True,
+                    "title": "空间下沉：精准破局基层人才荒",
+                    "subsections": ["县域就业分布"],
+                },
+                {
+                    "index": 2,
+                    "applicable": True,
+                    "title": "行业赋能：技术岗位契合度攀升",
+                    "subsections": ["行业流向"],
+                },
+                {
+                    "index": 2,
+                    "applicable": True,
+                    "title": "留才效应：本地就业留存走高",
+                    "subsections": ["留存率对比"],
+                },
+                {
+                    "index": 3,
+                    "applicable": True,
+                    "title": "结论与对策建议",
+                    "subsections": ["核心结论"],
+                },
+            ],
+            _points_all([], [], [], [], []),
+        ],
+        survey_templates_dir,
+    )
+
+    outline = result["outline"]
+    assert [chapter.title for chapter in outline] == [
+        "监测概述与数据说明",
+        "空间下沉：精准破局基层人才荒",
+        "行业赋能：技术岗位契合度攀升",
+        "留才效应：本地就业留存走高",
+        "结论与对策建议",
+    ]
+    # 章 ID 由程序按展开后的最终顺序连续生成。
+    assert [chapter.id for chapter in outline] == ["ch1", "ch2", "ch3", "ch4", "ch5"]
+    # 「章序号 → 章型」映射作为骨架事实随章写入 State（ADR-0005）。
+    assert [chapter.chapter_type for chapter in outline] == [
+        "监测概述与数据说明",
+        "维度章",
+        "维度章",
+        "维度章",
+        "结论与对策建议",
+    ]
+    assert outline[2].subsections == ["行业流向"]
+    assert result["doc_type"] == "调研报告"
+    assert result["doc_variant"] is None
+
+
+def test_可重复章展开_应答缺失重复位时回落单章骨架标题(
+    survey_templates_dir: Path,
+) -> None:
+    """repeat 下限为 1：应答未展开重复位（缺失或全部标记不适用）时保底一章。"""
+    result, _ = _run_node(
+        [
+            _survey_identify(),
+            [
+                {
+                    "index": 1,
+                    "applicable": True,
+                    "title": "监测概述与数据说明",
+                    "subsections": [],
+                },
+                {"index": 2, "applicable": False, "title": "", "subsections": []},
+                {
+                    "index": 3,
+                    "applicable": True,
+                    "title": "结论与对策建议",
+                    "subsections": [],
+                },
+            ],
+            _points_all([], [], []),
+        ],
+        survey_templates_dir,
+    )
+
+    outline = result["outline"]
+    assert [chapter.title for chapter in outline] == [
+        "监测概述与数据说明",
+        "维度章",
+        "结论与对策建议",
+    ]
+    assert outline[1].chapter_type == "维度章"
+
+
+def test_章型_非重复模板各章携带骨架标题为章型(templates_dir: Path) -> None:
+    result, _ = _run_node(
+        [
+            {"genre": "人才培养方案", "template_file": "测试模版.md"},
+            [
+                {
+                    "index": 1,
+                    "applicable": True,
+                    "title": "软件工程专业培养目标",
+                    "subsections": [],
+                },
+                {"index": 2, "applicable": True, "title": "课程体系", "subsections": []},
+                {"index": 3, "applicable": False, "title": "", "subsections": []},
+            ],
+            _points_all([], []),
+        ],
+        templates_dir,
+    )
+    # 章型取骨架章标题原文，不随 LLM 实例化后的标题变化。
+    assert [chapter.chapter_type for chapter in result["outline"]] == [
+        "培养目标",
+        "课程体系",
+    ]
+
+
+def test_章型_自由结构模式为None(templates_dir: Path) -> None:
+    result, _ = _run_node(
+        [
+            {"genre": "行业评论", "template_file": None},
+            [{"title": "引言", "subsections": []}],
+            _points_all([]),
+        ],
+        templates_dir,
+    )
+    assert [chapter.chapter_type for chapter in result["outline"]] == [None]
+
+
 def test_文种锚定_命中注册表模板_State写入文种与变体(tmp_path: Path) -> None:
     """注册表映射进 State（ADR-0005）：模板命中经注册表锚定文种与变体。"""
     (tmp_path / "index.md").write_text(

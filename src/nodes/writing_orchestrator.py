@@ -116,6 +116,7 @@ def _chapter_spec_payload(chapter: ChapterSpec) -> ChapterSpecPayload:
     return ChapterSpecPayload(
         id=chapter.id,
         title=chapter.title,
+        chapter_type=chapter.chapter_type,
         points=[PointPayload(id=point.id, text=point.text) for point in chapter.points],
         hypotheses=_flatten_hypotheses(chapter),
     )

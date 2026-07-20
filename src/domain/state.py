@@ -59,6 +59,10 @@ class ChapterSpec(BaseModel):
     subsections: list[str] = []
     """三级标题实例化文本；保留模板的一二级骨架层级。"""
     points: list[ArgumentPoint] = []
+    chapter_type: str | None = None
+    """章型：模板骨架章标题原文，实例化时由 framework_orchestrator 作为骨架事实
+    随章写入（ADR-0005）——大纲逐章携带即「章序号 → 章型」映射，
+    lint 直接消费、不从位置或标题反推；自由结构模式为 None。"""
 
 
 class Material(BaseModel):
