@@ -91,6 +91,7 @@ python -m mypy src scripts tests
 
 - **改 `agents/` 前必读** `docs/adr/0001-subagent-real-impl-constraints.md`，遵守四条硬约束：章级落 checkpoint、事件带上下文与进度、保持非子图边界、中断场景测试。
 - rewriter_loop 真实实现迁移的架构决策（契约零扩展、LLM 栈归一、修一次链路等）见 `docs/adr/0002-rewriter-loop-migration.md`。
+- rewriter_loop 字数管控口径（三级区间、散文统计、表章豁免、修后字数复检例外）见 `docs/adr/0003-word-count-control.md`。
 - `domain/state.py` 新增状态模型无需手工登记序列化白名单：`graph.py` 的 `CHECKPOINT_MSGPACK_TYPES` 自动收集该模块全部 pydantic 模型与枚举，注册进检查点序列化器（严格模式 `LANGGRAPH_STRICT_MSGPACK=true` 下往返成立，有 `tests/test_checkpoint_serde.py` 回归覆盖）。
 - 节点内用 `asyncio.run` 调子智能体，因此图运行必须经 `asyncio.to_thread` 在独占工作线程同步驱动，绝不能跑在服务事件循环上（见 `src/service/task_service.py` 模块注释）。
 - 双 SSE 通道严格隔离：业务通道每任务一个枢纽、终态后关闭；graph_event 可视化通道全局一个枢纽、永不主动关闭。

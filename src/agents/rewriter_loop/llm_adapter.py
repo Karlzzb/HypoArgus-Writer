@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from agents.contracts import MaterialPayload
-from agents.rewriter_loop.style_linter import Violation
+from agents.rewriter_loop.style_linter import Violation, word_count_prompt_block
 from agents.rewriter_loop.writer_client import (
     AuditEnvelope,
     AuditIssue,
@@ -35,22 +35,27 @@ from llm.llm_json import JSON_ONLY_RULE, parse_json
 
 logger = logging.getLogger(__name__)
 
-# 机械规则由 linter 兜底；此处只列风格指南散文未覆盖、模型须主动遵守的写作约束。
+# 论证指令上位、禁令压缩收尾（机械规则枚举已删——linter 兜底，对模型无用）。
 # 注：勿过度精简「培养规格」章型细结构——style_guide 散文不足以稳住，模型会漂移到 bullet。
 _SYSTEM_INSTRUCTIONS = """\
 你是教务公文写作子智能体，负责把章节骨架逐章展开成正文。
-你必须严格遵循下方「风格指南」：公文范式、对应层次（本科/高职）的子风格、术语与 _Avoid_、boilerplate、few-shot 范例章。
-机械规则（中文数字编号、禁讲客体、该有表须含表、章型术语必含词/禁用同义词、意识形态逐字与归位、引用查臆造等）已见下方风格指南散文、并由 linter 兜底；下方只列风格指南散文未覆盖、模型须主动遵守的写作约束。
 
-1. 衔接与开篇：承上启下经 chapter_summary 传递；本章开头**不加独立前言段、不加「如下表所示」式导引句**——直接 `## 标题` / `### 子节` → 正文或表；若须衔接，以公文短语织入正文首句，禁讲客体。
-2. 事实忠实：证书名等结构化事实值**必须取自素材池摘录中的精确值**；素材无具体证书时**不得写具体证书名，亦不得写「依据相关职业技能等级证书」「不限定为唯一证书」「依据相关职业资格与职业技能等级证书」等无依据泛化句**——表内证书列头可用「职业技能等级证书举例」「职业资格证书」等通用泛称（属列头非事实），数据格无依据则留空，不得以泛化散文句凑充。
+最重要的写作要求：充分论证每个论点——结合本章假说展开，给出依据与技术路径，不得只列结论、不得堆砌术语；每个论点须落到具体方法、措施与实施路径，展开到位后再收束。
+你必须严格遵循下方「风格指南」：公文范式、对应层次（本科/高职）的子风格、术语与 _Avoid_、boilerplate、few-shot 范例章。
+
+1. 衔接与开篇：承上启下经 chapter_summary 传递；若须衔接，以公文短语织入正文首句。
+2. 事实忠实：证书名等结构化事实值**必须取自素材池摘录中的精确值**；表内证书列头可用「职业技能等级证书举例」「职业资格证书」等通用泛称（属列头非事实）。
 3. 章型细结构（风格指南散文未细化、且 linter 不强制、模型易漂移者）：
    - 本科「培养目标与培养规格」合章的 `### （二）培养规格` = `#### 1.思政要求` `#### 2.素质要求` `#### 3.知识要求` `#### 4.能力要求` 四子节（思政独立成项）；`#### 1.思政要求` = **密集长段**（boilerplate 政治理论串整段论述，逐字串织入正文长句，不以 `1)2)3)` 编号条目拆散、亦不以无序 bullet 替）；`#### 4.能力要求` = `|职业能力|职业能力解构|` 式表（思政素质/通用基础/专业核心能力合并入表综合解构，多值单元格 `<br>` 编号密集列表）；素质/知识子节以密集长段或 `1)xxx<br>2)xxx` 编号条目展开。**本科培养规格不用无序 bullet 列表**（bullet 是高职合章口径）。
    - 高职「培养目标与培养规格」合章的 `### （二）培养规格` = `#### 1.素质` `#### 2.知识` `#### 3.能力` 三子节（思政并入素质、不设独立思政子项），各以无序密集 bullet 列表（`- xxx；`）展开，不以表格压缩、不以 `1)2)` 有序编号列表精简、不以叙述段替。
    - 独立「培养规格」章（无培养目标子节，不分本/高职）按黄金章型用单一指标表呈现，不适用上述列表/分节约束、须含表。
    - 课程设置章：课程设置列表用 `1.`/`（1）` 中文数字分点结构（公共课程/专业课程 → 通识必修/通识选修等），**不以简略表替**；学时学分总表用 markdown 表；专业核心课程教学内容与要求用 `#### N 课程名` 条目式（每条含共建企业/典型工作任务/教学内容等结构化散文，**不以表替**）；通识必修思政课须列课程全名逐字串（「习近平新时代中国特色社会主义思想概论」「思想道德与法治」「马克思主义基本原理」等），不以「思政类」「思政课程」等概括。
-4. 各章禁 AI 空泛总结词（「旨在构建」「确保符合」「致力于」「助力」等），公文用密集列举与事实陈述。
-5. 引用角标（仅当传入了素材池时）：支撑论点/数据/观点/结论的句子须附 `[素材id]` 原位角标（单方括号、内为素材池中稳定 id），把角标放在支撑其 hypothesis_id 所指论点的句子处；多论据可并列叠加 `[m1][m2]`，同一素材复用同 id；仅可使用池内 id，禁止新增/篡改/杜撰素材来源。正文不得夹带章内参考文献列表，也不得自行生成可见 `[n]` 序号（书目由下游渲染层统一处理）。
+4. 引用角标（仅当传入了素材池时）：支撑论点/数据/观点/结论的句子须附 `[素材id]` 原位角标（单方括号、内为素材池中稳定 id），把角标放在支撑其 hypothesis_id 所指论点的句子处；多论据可并列叠加 `[m1][m2]`，同一素材复用同 id；仅可使用池内 id。
+5. 禁令：
+   - 禁 AI 空泛总结词与无据定性断言（「旨在构建」「确保符合」「致力于」「助力」「显著提升」「有效解决」等），公文用密集列举与事实陈述。
+   - 本章开头不加独立前言段、不加「如下表所示」式导引句——直接 `## 标题` / `### 子节` → 正文或表；禁讲客体。
+   - 素材无具体证书时不得写具体证书名，亦不得写「依据相关职业技能等级证书」「不限定为唯一证书」等无依据泛化句；数据格无依据则留空，不得以泛化散文句凑充。
+   - 禁止新增/篡改/杜撰素材来源；正文不得夹带章内参考文献列表，也不得自行生成可见 `[n]` 序号（书目由下游渲染层统一处理）。
 
 输出为一个 JSON 对象，字段如下：
 - chapter_text：markdown 正文（含 ## 标题与 [素材id] 角标）；
@@ -100,9 +105,10 @@ def _format_directives(task: dict[str, Any]) -> str:
 
 
 def _build_context_block(task: dict[str, Any], *, tier: str, doc_type: str) -> str:
-    """draft / revise 共用的上下文块（章节骨架 / 素材池 / 假说 / 衔接），不含尾部指令。"""
+    """draft / revise 共用的上下文块（章节骨架 / 字数目标 / 素材池 / 假说 / 衔接），不含尾部指令。"""
     spec = task["chapter_spec"]
     points = "\n".join(f"- {p['text']}" for p in spec["points"]) or "（无）"
+    word_count_block = word_count_prompt_block(spec["title"])
     prev = (
         f"上一章摘要（本章开头须公文风格承上启下衔接）：{task['prev_chapter_summary']}"
         if task["prev_chapter_summary"]
@@ -116,13 +122,14 @@ def _build_context_block(task: dict[str, Any], *, tier: str, doc_type: str) -> s
             f"{_format_hypotheses(spec['hypotheses'])}\n"
             f"素材池（仅可引用池内 id，禁止杜撰/篡改来源）：\n{_format_materials(materials)}\n"
         )
+    word_count_section = f"{word_count_block}\n" if word_count_block else ""
     return f"""文种：{doc_type}
 层次：{tier}
 本章标题与要点：
 - 标题：{spec["title"]}
 - 要点：
 {points}
-{prev}{material_block}"""
+{word_count_section}{prev}{material_block}"""
 
 
 def _system_content(instructions: str, style_prose: str) -> str:

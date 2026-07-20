@@ -755,6 +755,287 @@ def _rule_fabrication(ctx: _LintContext) -> list[Violation]:
     return out
 
 
+def count_prose_words(text: str) -> int:
+    """统计正文散文字数（纯函数）：排除表格、素材角标、公式、代码块、参考文献、附录。
+
+    统计口径：
+    - 排除整个 markdown 表格（含列头、分隔行、数据行）。
+    - 排除素材角标 ``[素材id]``（复用 MARKER_PATTERN）。
+    - 排除行内与块级公式（``$...$`` / ``$$...$$``）。
+    - 排除围栏代码块（````...````）。
+    - 排除参考文献与附录（``## 参考文献`` / ``## 附录`` 之后的全部内容）。
+    - markdown 标题行不做单独排除判断（标题行内容计入字数）。
+
+    仅统计汉字（按字计）+ 半角字母数字词（连续字母数字为一词），
+    标点与空白一律不计。返回总字数。
+    """
+    # 1. 排除参考文献/附录：从首次出现 ``## 参考文献`` 或 ``## 附录`` 处截断。
+    for cutoff in ["\n## 参考文献", "\n## 附录"]:
+        pos = text.find(cutoff)
+        if pos != -1:
+            text = text[:pos]
+
+    # 2. 排除围栏代码块：````...````（多行）。
+    text = re.sub(r"```[\s\S]*?```", "", text)
+
+    # 3. 排除行内与块级公式：``$...$`` / ``$$...$$``。
+    text = re.sub(r"\$\$[\s\S]*?\$\$", "", text)
+    text = re.sub(r"\$[^\$\n]+?\$", "", text)
+
+    # 4. 排除素材角标：``[素材id]``（复用 MARKER_PATTERN）。
+    text = MARKER_PATTERN.sub("", text)
+
+    # 5. 排除整个 markdown 表格（含列头、分隔行、数据行）：逐行扫描，遇分隔行
+    # 开始表区、向前回溯删除列头、向后删除数据行直至非表行。
+    lines = text.splitlines(keepends=True)
+    table_ranges: list[tuple[int, int]] = []
+    i = 0
+    while i < len(lines):
+        if _MD_TABLE_SEP.match(lines[i]):
+            # 分隔行命中：向前回溯列头行（起始 | 的行，允许多行列头）。
+            start = i
+            while start > 0 and lines[start - 1].strip().startswith("|"):
+                start -= 1
+            # 向后吞数据行（起始 | 的行，直至非表行）。
+            end = i + 1
+            while end < len(lines) and lines[end].strip().startswith("|"):
+                end += 1
+            table_ranges.append((start, end))
+            i = end
+        else:
+            i += 1
+    # 倒序删除表区（避免索引偏移）。
+    for start, end in reversed(table_ranges):
+        del lines[start:end]
+    text = "".join(lines)
+
+    # 6. 统计：汉字按字计 + 半角字母数字词计数（连续的字母数字为一词），
+    # 标点（中英文）与空白一律不计。
+    cjk_chars = len(re.findall(r"[一-鿿㐀-䶿]", text))
+    alnum_words = len(re.findall(r"[a-zA-Z0-9]+", text))
+    return cjk_chars + alnum_words
+
+
+def _split_level_blocks(text: str, heading_prefix: str, stop_prefix: str) -> list[tuple[str, str]]:
+    """按 ``heading_prefix`` 级标题切块：返回 (标题, 块正文含标题行) 列表。
+
+    块从该级标题行起，到下一个同级标题、或上一级标题（``stop_prefix``）、
+    或文末止。``heading_prefix`` 形如 ``### ``，``stop_prefix`` 形如 ``## ``
+    （节块遇下一章标题即止；小节块遇节标题即止）。
+    """
+    lines = text.splitlines()
+    blocks: list[tuple[str, str]] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+    for line in lines:
+        is_level = line.startswith(heading_prefix)
+        is_stop = not is_level and line.startswith(stop_prefix)
+        if is_level or is_stop:
+            if current_title is not None:
+                blocks.append((current_title, "\n".join(current_lines)))
+                current_title = None
+                current_lines = []
+            if is_level:
+                current_title = line[len(heading_prefix):].strip()
+                current_lines = [line]
+            continue
+        if current_title is not None:
+            current_lines.append(line)
+    if current_title is not None:
+        blocks.append((current_title, "\n".join(current_lines)))
+    return blocks
+
+
+def _shrunk_range(
+    cfg_min: float, cfg_max: float, ch_min: float, ch_max: float, siblings: int, ratio: float
+) -> tuple[float, float]:
+    """节/小节区间按同级数量动态收缩：上限取「配置上限」与「章上限÷同级数量」较小值，
+    下限取「配置下限×折减系数」与「章下限÷同级数量」较大值；收缩后保证下限不高于上限。
+    """
+    upper = min(cfg_max, ch_max / siblings)
+    lower = max(cfg_min * ratio, ch_min / siblings)
+    return min(lower, upper), upper
+
+
+def check_word_count(text: str, cfg: dict[str, Any]) -> list[Violation]:
+    """字数管控核心校验（纯函数）：三级区间 + 动态收缩 + 节级同级差异 + 表章豁免。
+
+    供 lint 注册规则与「修一次后复检」双消费，同一口径零漂移。
+    ``cfg`` 无 ``word_count`` 节、或正文无 ``## `` 章标题（非标准章结构）时不校验。
+    表章（``table_required`` 章型）豁免各级散文下限与节级同级差异比对，仅保各级上限。
+    """
+    wc = cfg.get("word_count")
+    if not wc:
+        return []
+    title = detect_chapter_template(text, cfg)
+    if title is None:
+        return []
+    tmpl = resolve_template(cfg, title)
+    table_exempt = bool(tmpl and tmpl.get("table_required"))
+    ch_min = float(wc["chapter"]["min"])
+    ch_max = float(wc["chapter"]["max"])
+    ratio = float(wc.get("min_shrink_ratio", 0.7))
+    balance_ratio = float(wc.get("section_balance_max_ratio", 2))
+    out: list[Violation] = []
+
+    # 章级：最终硬标准。表章豁免下限、仅保上限。
+    chapter_count = count_prose_words(text)
+    if chapter_count > ch_max:
+        out.append(
+            Violation(
+                rule="word_count",
+                message=(
+                    f"章「{title}」散文 {chapter_count} 字超出上限 {ch_max:.0f} 字，"
+                    "须压缩正文、去除注水内容。"
+                ),
+            )
+        )
+    elif not table_exempt and chapter_count < ch_min:
+        out.append(
+            Violation(
+                rule="word_count",
+                message=(
+                    f"章「{title}」散文 {chapter_count} 字不足下限 {ch_min:.0f} 字，"
+                    "须充分论证每个论点、结合假说展开、给出依据与技术路径。"
+                ),
+            )
+        )
+
+    # 节级：按同级数量动态收缩后校验。
+    sections = _split_level_blocks(text, "### ", "## ")
+    section_counts: list[tuple[str, int]] = [
+        (sec_title, count_prose_words(sec_text)) for sec_title, sec_text in sections
+    ]
+    if sections:
+        sec_lower, sec_upper = _shrunk_range(
+            float(wc["section"]["min"]), float(wc["section"]["max"]),
+            ch_min, ch_max, len(sections), ratio,
+        )
+        for sec_title, sec_count in section_counts:
+            if sec_count > sec_upper:
+                out.append(
+                    Violation(
+                        rule="word_count",
+                        message=(
+                            f"节「{sec_title}」散文 {sec_count} 字超出上限 {sec_upper:.0f} 字"
+                            f"（{len(sections)} 节动态收缩后区间），须压缩该节。"
+                        ),
+                    )
+                )
+            elif not table_exempt and sec_count < sec_lower:
+                out.append(
+                    Violation(
+                        rule="word_count",
+                        message=(
+                            f"节「{sec_title}」散文 {sec_count} 字不足下限 {sec_lower:.0f} 字"
+                            f"（{len(sections)} 节动态收缩后区间），须充分展开该节论证。"
+                        ),
+                    )
+                )
+
+    # 节级同级差异：最长 ≤ 最短 × 倍数（只查章内节级；表章豁免；不足两节不比）。
+    if not table_exempt and len(section_counts) >= 2:
+        shortest_title, shortest = min(section_counts, key=lambda pair: pair[1])
+        longest_title, longest = max(section_counts, key=lambda pair: pair[1])
+        if shortest > 0 and longest > shortest * balance_ratio:
+            out.append(
+                Violation(
+                    rule="word_count",
+                    message=(
+                        f"章内节级体量失衡：最长节「{longest_title}」{longest} 字超过"
+                        f"最短节「{shortest_title}」{shortest} 字的 {balance_ratio:.0f} 倍，"
+                        "须均衡各节展开程度。"
+                    ),
+                )
+            )
+
+    # 小节级：在各节内部按同级数量动态收缩后校验。
+    for sec_title, sec_text in sections:
+        subsections = _split_level_blocks(sec_text, "#### ", "### ")
+        if not subsections:
+            continue
+        sub_lower, sub_upper = _shrunk_range(
+            float(wc["subsection"]["min"]), float(wc["subsection"]["max"]),
+            ch_min, ch_max, len(subsections), ratio,
+        )
+        for sub_title, sub_text in subsections:
+            sub_count = count_prose_words(sub_text)
+            if sub_count > sub_upper:
+                out.append(
+                    Violation(
+                        rule="word_count",
+                        message=(
+                            f"小节「{sub_title}」散文 {sub_count} 字超出上限 {sub_upper:.0f} 字"
+                            f"（{len(subsections)} 小节动态收缩后区间），须压缩该小节。"
+                        ),
+                    )
+                )
+            elif not table_exempt and sub_count < sub_lower:
+                out.append(
+                    Violation(
+                        rule="word_count",
+                        message=(
+                            f"小节「{sub_title}」散文 {sub_count} 字不足下限 {sub_lower:.0f} 字"
+                            f"（{len(subsections)} 小节动态收缩后区间），须充分展开该小节论证。"
+                        ),
+                    )
+                )
+    return out
+
+
+@register
+def _rule_word_count(ctx: _LintContext) -> list[Violation]:
+    """字数管控：三级区间（章/节/小节）+ 动态收缩 + 节级同级差异 + 表章豁免。
+
+    校验逻辑收敛于 ``check_word_count``（与「修一次后复检」双消费零漂移）；
+    区间配置来自 SSoT ``word_count`` 节，未配置或非标准章结构不校验。
+    """
+    return check_word_count(ctx.text, ctx.cfg)
+
+
+def recheck_word_count(text: str, style_guide_path: str | Path | None = None) -> list[Violation]:
+    """「修一次」后的字数复检（纯函数、零 LLM 成本）：与 lint 规则同口径。
+
+    供写作编排在修订后重新统计字数，结论如实折入 self_check.issues。
+    """
+    cfg = load_config(style_guide_path)
+    return check_word_count(normalize_cjk_ws(text), cfg)
+
+
+def word_count_prompt_block(
+    title: str, style_guide_path: str | Path | None = None
+) -> str:
+    """按章标题生成写作提示词的目标字数区间块；SSoT 无 ``word_count`` 配置时返回空串。
+
+    表章（``table_required`` 章型）提示取中下限且不得表外堆砌；
+    叙述章型提示取中上限。区间数值全部取自 SSoT，提示词与校验器零漂移。
+    """
+    cfg = load_config(style_guide_path)
+    wc = cfg.get("word_count")
+    if not wc:
+        return ""
+    normalized_title = _CHINESE_NUMERAL_PREFIX.sub("", title).strip()
+    tmpl = resolve_template(cfg, normalized_title)
+    table_chapter = bool(tmpl and tmpl.get("table_required"))
+    ch, sec, sub = wc["chapter"], wc["section"], wc["subsection"]
+    lines = [
+        "本章目标字数（散文统计口径：不含表格、素材角标、公式、代码块）：",
+        f"- 章总量 {ch['min']}～{ch['max']} 字；节（###）每节 {sec['min']}～{sec['max']} 字；"
+        f"小节（####）每小节 {sub['min']}～{sub['max']} 字。",
+    ]
+    if table_chapter:
+        lines.append(
+            "- 本章为表型章：信息由表承载，散文只做引言与解读，散文体量取区间中下限即可，"
+            "不得在表外堆砌叙述性段落凑字数。"
+        )
+    else:
+        lines.append(
+            "- 本章为叙述章型：正文体量宜取区间中上限，同章各节展开程度须均衡"
+            "（最长节不超过最短节的 2 倍）。"
+        )
+    return "\n".join(lines)
+
+
 def lint(
     text: str,
     tier: str,

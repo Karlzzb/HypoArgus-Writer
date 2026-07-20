@@ -272,3 +272,54 @@ def test_写作配置_非法层次_抛错并指明变量名() -> None:
         load_writer_settings(env={"REWRITER_LOOP_TIER": "研究生"})
     assert "REWRITER_LOOP_TIER" in str(excinfo.value)
     assert "研究生" in str(excinfo.value)
+
+
+def test_写作编排_修前检出字数违规_修后复检折入self_check(
+    draft_task: dict[str, Any],
+) -> None:
+    # 构造修前违规正文：1999 字章不足下限（2000）；修后产物达标（3000 字）。
+    short_text = "## 一、总则\n\n" + "本专业面向智能制造领域培养高素质人才。" * 100  # 约 1900 字
+    fixed_text = "## 一、总则\n\n" + "本专业面向智能制造领域培养高素质人才。" * 150  # 约 3000 字
+    events, record_hook = _make_recorder()
+    fake = FakeWriterLlmClient(
+        draft_script=[_envelope(short_text), _envelope(fixed_text)],
+        audit_script=[AuditEnvelope()],
+    )
+    run = make_writer_run(fake, tier="本科", event_hook=record_hook)
+    result = asyncio.run(run(draft_task))
+
+    # 触发修订（修前检出字数违规）；修后复检产出折入 self_check.issues。
+    assert len(fake.draft_calls) == 2
+    issues = result["self_check"]["issues"]
+    # 修前违规 + 修后复检达标结论均在 issues 内。
+    assert any("word_count" in issue and "不足下限" in issue for issue in issues)
+    assert any("word_count_recheck" in issue and "达标" in issue for issue in issues)
+    # 字数违规不属引用类 → citations_ok 仍为 True。
+    assert result["self_check"]["citations_ok"] is True
+
+    # 事件流：修订后发 word_count_recheck 进度事件。
+    progress = [payload for event_type, payload in events if event_type == SUBAGENT_PROGRESS]
+    steps = [payload["step"] for payload in progress]
+    assert "word_count_recheck" in steps
+
+
+def test_写作编排_修后复检仍违规_如实折入issues(draft_task: dict[str, Any]) -> None:
+    # 修前不足下限（2000），修后仍不足（如实上报修后未达标）。
+    # 标题「一、总则」= 3 字计入，故正文 1996 字，合计 1999 < 2000。
+    short_text = "## 一、总则\n\n" + "字" * 1996
+    # 修后正文 1897 字，合计 1900 仍不足。
+    still_short = "## 一、总则\n\n" + "字" * 1897
+    fake = FakeWriterLlmClient(
+        draft_script=[_envelope(short_text), _envelope(still_short)],
+        audit_script=[AuditEnvelope()],
+    )
+    run = make_writer_run(fake, tier="本科")
+    result = asyncio.run(run(draft_task))
+
+    issues = result["self_check"]["issues"]
+    # 修前违规 + 修后复检仍未达标均在 issues 内。
+    assert any("word_count" in issue and "不足下限" in issue for issue in issues)
+    recheck_issues = [issue for issue in issues if "word_count_recheck" in issue]
+    assert len(recheck_issues) == 1
+    assert "未达标" in recheck_issues[0]
+

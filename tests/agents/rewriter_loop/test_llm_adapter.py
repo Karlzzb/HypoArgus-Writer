@@ -214,3 +214,61 @@ def test_真实适配器_draft系统提示词_不含双方括号残留(draft_tas
     _make_client(llm).draft(draft_task, _STYLE_PROSE)
 
     assert "[[" not in llm.calls[0][0]["content"]
+
+
+def test_真实适配器_draft字数目标_叙述章型注入中上限提示(draft_task: dict[str, Any]) -> None:
+    # 章标题非 table_required 章型 → 叙述章型 → 字数目标块含「中上限」提示。
+    draft_task["chapter_spec"]["title"] = "一、总则"
+    llm = FakeLLM(responses=[_writer_json("正文。")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    user = llm.calls[0][1]["content"]
+    assert "本章目标字数" in user
+    assert "2000～5000" in user
+    assert "600～1500" in user
+    assert "200～500" in user
+    assert "中上限" in user
+    assert "表型章" not in user
+
+
+def test_真实适配器_draft字数目标_表章注入中下限且不得凑段(draft_task: dict[str, Any]) -> None:
+    # 职业面向章为 table_required → 表章 → 字数目标块含「中下限」「不得表外堆砌」。
+    draft_task["chapter_spec"]["title"] = "五、职业面向"
+    llm = FakeLLM(responses=[_writer_json("正文。")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    user = llm.calls[0][1]["content"]
+    assert "本章目标字数" in user
+    assert "表型章" in user
+    assert "中下限" in user
+    assert "不得在表外堆砌" in user
+
+
+def test_真实适配器_revise字数目标_同样注入目标区间(draft_task: dict[str, Any]) -> None:
+    # revise 与 draft 共用上下文块 → 修订提示词同样携带本章目标字数区间。
+    draft_task["chapter_spec"]["title"] = "一、总则"
+    draft_task["mode"] = "revise"
+    draft_task["revision_directives"] = [{"type": "rewrite_only", "instruction": "精简第一段"}]
+    draft_task["current_text"] = "现有正文初稿。"
+    llm = FakeLLM(responses=[_writer_json("改后正文。")])
+    _make_client(llm).revise(draft_task, _STYLE_PROSE)
+
+    user = llm.calls[0][1]["content"]
+    assert "本章目标字数" in user
+    assert "2000～5000" in user
+
+
+def test_真实适配器_系统提示词再平衡_论证指令上位(draft_task: dict[str, Any]) -> None:
+    llm = FakeLLM(responses=[_writer_json("正文。")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    system = llm.calls[0][0]["content"]
+    # 最重要的写作要求置于指令首行（论证指令上位）。
+    lines = [line for line in system.split("\n") if line.strip()]
+    first_instruction_line = next(
+        (line for line in lines if "充分论证每个论点" in line or "最重要的写作要求" in line), None
+    )
+    assert first_instruction_line is not None
+    # 空泛总结词禁令补充「显著提升」「有效解决」等定性断言词。
+    assert "显著提升" in system or "有效解决" in system
+

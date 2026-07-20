@@ -21,7 +21,12 @@ from typing import Any
 
 from agents.contracts import SelfCheckPayload, SubagentAdapter
 from agents.rewriter_loop.llm_adapter import LlmWriterClient
-from agents.rewriter_loop.style_linter import Violation, lint, load_prose
+from agents.rewriter_loop.style_linter import (
+    Violation,
+    lint,
+    load_prose,
+    recheck_word_count,
+)
 from agents.rewriter_loop.stub import UNIT
 from agents.rewriter_loop.writer_client import (
     AuditIssue,
@@ -168,14 +173,29 @@ def make_writer_run(
             progress("audit_done", issues=0, degraded=False)
 
         fix_degraded_empty = False
+        word_count_recheck_issues: list[str] | None = None
         if violations:
-            # 恰好一次修订，修后不复检（v1）：以修订产物为最终正文与摘要。
+            # 恰好一次修订，修后一般不复检（v1）：以修订产物为最终正文与摘要。
             progress("revise_triggered", violations=len(violations))
             envelope = call_write("fix", fix=violations)
             fix_degraded_empty = not envelope.chapter_text.strip()
+            # 例外：修前检出过字数违规时，修后用纯函数复检字数（零 LLM 成本），
+            # 结论无论达标与否均如实折入 self_check.issues，供终审与人工可见。
+            if not fix_degraded_empty and any(v.rule == "word_count" for v in violations):
+                recheck = recheck_word_count(envelope.chapter_text)
+                progress("word_count_recheck", violations=len(recheck))
+                if recheck:
+                    word_count_recheck_issues = [
+                        f"[word_count_recheck] 修后复检未达标：{v.message}" for v in recheck
+                    ]
+                else:
+                    word_count_recheck_issues = ["[word_count_recheck] 修后复检：字数达标"]
 
-        # self_check 折叠的是修前质检结论（修后不复检），全局终审兜底。
+        # self_check 折叠的是修前质检结论（引用类修后不复检），全局终审兜底；
+        # 字数是唯一例外——修后复检结论一并折入（纯函数、不引入二次 LLM 修订）。
         issues = [f"[{v.rule}] {v.message}" for v in violations]
+        if word_count_recheck_issues:
+            issues.extend(word_count_recheck_issues)
         citations_ok = not any(v.rule in _CITATION_RULES for v in violations)
         if fix_degraded_empty:
             # 修订产物退化为空：保留修前违规明细，追加退化说明并判引用不通过。
