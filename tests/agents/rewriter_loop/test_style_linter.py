@@ -132,6 +132,27 @@ def test_口语黑名单_公文语感正文_通过() -> None:
     assert "oral_blacklist" not in _rules(violations)
 
 
+def test_口语黑名单_正则句式_必要条件句式_命中() -> None:
+    violations = lint("## 一、总则\n\n实践能力是就业竞争力的必要条件。", "本科")
+    assert "oral_blacklist" in _rules(violations)
+
+
+def test_口语黑名单_正则句式_正向预测句式_命中() -> None:
+    violations = lint("## 一、总则\n\n课程成绩正向预测岗位胜任力。", "本科")
+    assert "oral_blacklist" in _rules(violations)
+
+
+def test_口语黑名单_正则句式_不误伤意识形态必含长段() -> None:
+    text = (
+        "## 三、培养目标与培养规格\n\n"
+        "本专业坚持立德树人，践行社会主义核心价值观，"
+        "培养德智体美劳全面发展、具有工匠精神和报国情怀、"
+        "面向现代物流行业的高素质技术技能人才。"
+    )
+    violations = lint(text, "本科")
+    assert "oral_blacklist" not in _rules(violations)
+
+
 def test_表格必含_职业面向章无表_命中() -> None:
     violations = lint("## 五、职业面向\n\n本章说明职业面向。", "本科")
     assert "table_missing" in _rules(violations)
@@ -299,6 +320,36 @@ def test_事实在位_依据值出现于正文_通过() -> None:
     assert "reference_missing" not in _rules(violations)
 
 
+def test_事实在位_全角数字排版_归一化后通过() -> None:
+    violations = lint(
+        "## 一、总则\n\n总学分为７８学分。",
+        "本科",
+        references=[Fact(type="credit", value="78学分")],
+    )
+    assert "reference_missing" not in _rules(violations)
+
+
+def test_事实在位_带空格数值排版_归一化后通过() -> None:
+    violations = lint(
+        "## 一、总则\n\n总学分为 78 学分，对应行业代码为 (6 4)。",
+        "本科",
+        references=[
+            Fact(type="credit", value="78 学分"),
+            Fact(type="industry_code", value="(64)"),
+        ],
+    )
+    assert "reference_missing" not in _rules(violations)
+
+
+def test_事实在位_数值类事实确实缺失_归一化后仍命中() -> None:
+    violations = lint(
+        "## 一、总则\n\n总学分为７８学分。",
+        "本科",
+        references=[Fact(type="credit", value="40学分")],
+    )
+    assert "reference_missing" in _rules(violations)
+
+
 def test_查臆造_行业代码无依据_命中() -> None:
     violations = lint(
         "## 一、总则\n\n对应行业(64)。",
@@ -359,6 +410,74 @@ def test_查臆造_无事实依据参数_整组规则不触发() -> None:
     assert "fabricated_industry_code" not in rules
     assert "fabricated_credit" not in rules
     assert "reference_missing" not in rules
+
+
+def test_查臆造_量化断言_无角标无依据_命中() -> None:
+    violations = lint(
+        "## 一、总则\n\n经课程改革，实践课时提升30%。",
+        "本科",
+        references=[Fact(type="credit", value="78学分")],
+    )
+    assert "fabricated_quantitative" in _rules(violations)
+
+
+def test_查臆造_量化断言_参考依据含该数值_通过() -> None:
+    violations = lint(
+        "## 一、总则\n\n经课程改革，实践课时提升30%。",
+        "本科",
+        references=[Fact(type="other", value="实践课时提升 ３０%")],
+    )
+    assert "fabricated_quantitative" not in _rules(violations)
+
+
+def test_查臆造_量化断言_同句素材角标_通过() -> None:
+    violations = lint(
+        "## 一、总则\n\n经课程改革，实践课时提升30%[m-h-1]。",
+        "本科",
+        materials=[_material("m-h-1")],
+    )
+    assert "fabricated_quantitative" not in _rules(violations)
+
+
+def test_查臆造_量化断言_角标紧随句末标点_通过() -> None:
+    violations = lint(
+        "## 一、总则\n\n经课程改革，实践课时提升30%。[m-h-1]",
+        "本科",
+        materials=[_material("m-h-1")],
+    )
+    assert "fabricated_quantitative" not in _rules(violations)
+
+
+def test_查臆造_量化断言_角标在下一句_命中() -> None:
+    violations = lint(
+        "## 一、总则\n\n经课程改革，实践课时提升30%。改革成效已获评估认可[m-h-1]。",
+        "本科",
+        materials=[_material("m-h-1")],
+    )
+    assert "fabricated_quantitative" in _rules(violations)
+
+
+def test_查臆造_量化断言_表内数字_不触发() -> None:
+    text = (
+        "## 一、总则\n\n| 指标 | 数值 |\n| --- | --- |\n| 实践课时提升30% | 达标 |\n"
+    )
+    violations = lint(text, "本科", references=[Fact(type="credit", value="78学分")])
+    assert "fabricated_quantitative" not in _rules(violations)
+
+
+def test_查臆造_量化断言_未传素材与依据_不触发() -> None:
+    violations = lint("## 一、总则\n\n经课程改革，实践课时提升30%。", "本科")
+    assert "fabricated_quantitative" not in _rules(violations)
+
+
+def test_查臆造_量化断言_倍数与时长单位_命中() -> None:
+    violations = lint(
+        "## 一、总则\n\n实训产出增长1.5倍，平均实习周期缩短2周。",
+        "本科",
+        references=[Fact(type="credit", value="78学分")],
+    )
+    matched = [v for v in violations if v.rule == "fabricated_quantitative"]
+    assert len(matched) == 2
 
 
 # ---------- 素材角标规则：杜撰 / 重复 / 悬空 / 照抄未标 ----------

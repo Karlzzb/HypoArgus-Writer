@@ -68,6 +68,21 @@ def normalize_cjk_ws(text: str) -> str:
     return text
 
 
+# 数值类事实的排版归一：全角数字/小数点/百分号/括号/冒号转半角（比对前统一口径）。
+_FULLWIDTH_NUMERIC = str.maketrans("０１２３４５６７８９．％（）：", "0123456789.%():")
+# 数值类事实类型：在位比对前须做排版归一（全角转半角 + 去空白），修排版差异漏判。
+_NUMERIC_FACT_TYPES = frozenset({"credit", "industry_code"})
+
+
+def normalize_numeric_text(value: str) -> str:
+    """数值比对口径归一：全角数字/符号转半角，去除全部空白（含全角空格）。
+
+    参考依据与正文常有排版差异（「７８学分」vs「78学分」、「78 学分」vs「78学分」），
+    这些差异不是事实差异，比对前两侧同做此归一化，避免漏判/误伤。
+    """
+    return re.sub(r"\s+", "", value.translate(_FULLWIDTH_NUMERIC))
+
+
 @dataclass(frozen=True)
 class _LintContext:
     """一次 lint 调用中传给各规则的共享输入（正文已做 CJK 断词归一）。"""
@@ -178,7 +193,12 @@ def resolve_ideology_chapter(cfg: dict[str, Any], title: str | None) -> str | No
 
 @register
 def _rule_oral_blacklist(ctx: _LintContext) -> list[Violation]:
-    """禁讲客体/口语化表达（黑名单来自 SSoT YAML）。"""
+    """禁讲客体/口语化表达与学术断言句式（黑名单来自 SSoT YAML）。
+
+    逐字词条来自 ``oral_blacklist``（子串匹配）；句式词条来自
+    ``oral_blacklist_patterns``（正则 ``search``，与编号黑名单同一模式机制），
+    抓「XX是XX的必要条件」「XX正向预测XX」这类实证研究口吻。
+    """
     out: list[Violation] = []
     for term in ctx.cfg.get("oral_blacklist", []):
         if term in ctx.text:
@@ -186,6 +206,15 @@ def _rule_oral_blacklist(ctx: _LintContext) -> list[Violation]:
                 Violation(
                     rule="oral_blacklist",
                     message=f"出现讲客体/口语化表达「{term}」，公文须用第三人称/无主语祈使。",
+                )
+            )
+    for pat in ctx.cfg.get("oral_blacklist_patterns", []):
+        m = re.search(pat, ctx.text)
+        if m:
+            out.append(
+                Violation(
+                    rule="oral_blacklist",
+                    message=f"出现禁用断言句式「{m.group(0)}」（模式 {pat}），公文不用学术论文口吻。",
                 )
             )
     return out
@@ -469,14 +498,23 @@ def _rule_reference_present(ctx: _LintContext) -> list[Violation]:
     """引用事实在位：``references`` 里每个 Fact.value 须出现于正文。
 
     防写作漏写调用方传入的事实依据（行业代码/课程/学分/证书）。``value`` 作
-    子串匹配（``in``）。``references`` 为空/None 则不校验（未补全事实依据时不误伤）。
+    子串匹配（``in``）；数值类事实（``_NUMERIC_FACT_TYPES``）两侧先做
+    ``normalize_numeric_text`` 归一（全角转半角、去空格）再比对，
+    修排版差异漏判。``references`` 为空/None 则不校验（未补全事实依据时不误伤）。
     事实来源由调用方传入，非 SSoT。
     """
     if not ctx.references:
         return []
+    numeric_text: str | None = None
     out: list[Violation] = []
     for fact in ctx.references:
-        if fact.value not in ctx.text:
+        if fact.type in _NUMERIC_FACT_TYPES:
+            if numeric_text is None:
+                numeric_text = normalize_numeric_text(ctx.text)
+            present = normalize_numeric_text(fact.value) in numeric_text
+        else:
+            present = fact.value in ctx.text
+        if not present:
             out.append(
                 Violation(
                     rule="reference_missing",
@@ -687,6 +725,66 @@ def extract_facts(text: str, cfg: dict[str, Any]) -> list[Fact]:
     return facts
 
 
+# 量化断言的同句判定所用句末标点（角标可紧随句末标点之后，仍算同句）。
+_SENTENCE_TERMINATORS = "。！？；"
+
+
+def _sentence_with_trailing_markers(line: str, start: int, end: int) -> str:
+    """取 ``line[start:end]`` 所在句，句末标点后紧随的 ``[素材id]`` 角标一并计入。
+
+    句边界按 ``_SENTENCE_TERMINATORS`` 划定；语料中角标既见于句内
+    （``…提升30%[m-h-1]。``）也见于紧随句末标点（``…提升30%。[m-h-1]``），
+    两种写法均属该句的溯源标注，故向后扩展吞并紧随的角标序列。
+    """
+    begin = max(line.rfind(ch, 0, start) for ch in _SENTENCE_TERMINATORS) + 1
+    stops = [i for i in (line.find(ch, end) for ch in _SENTENCE_TERMINATORS) if i != -1]
+    stop = min(stops) + 1 if stops else len(line)
+    trailing = re.match(r"(?:\s*\[[A-Za-z0-9_\-]+\])+", line[stop:])
+    if trailing:
+        stop += trailing.end()
+    return line[begin:stop]
+
+
+def _quantitative_violations(ctx: _LintContext, fab: dict[str, Any]) -> list[Violation]:
+    """量化断言查臆造（``fabrication.quantitative`` 子类型）。
+
+    正文散文出现「提升/降低/缩短/增长/减少 + 数值单位」的量化断言时，
+    须同句挂 ``[素材id]`` 角标、或断言数值（``value_pattern`` 抽取）能在任一
+    reference value（数值归一化后）中找到依据，二者皆无则违规。
+    表行（``|`` 起手）不抽取——表内数字由表承载，另有表规则管。
+    """
+    spec = fab.get("quantitative") or {}
+    pat = spec.get("pattern")
+    if not pat:
+        return []
+    value_pat = spec.get("value_pattern")
+    backed_nums: set[str] = set()
+    if value_pat:
+        for fact in ctx.references or []:
+            backed_nums.update(re.findall(value_pat, normalize_numeric_text(fact.value)))
+    out: list[Violation] = []
+    for line in ctx.text.splitlines():
+        if line.lstrip().startswith("|"):
+            continue
+        for m in re.finditer(pat, line):
+            sentence = _sentence_with_trailing_markers(line, m.start(), m.end())
+            if MARKER_PATTERN.search(sentence):
+                continue
+            num = re.search(value_pat, m.group(0)) if value_pat else None
+            if num and num.group(0) in backed_nums:
+                continue
+            out.append(
+                Violation(
+                    rule="fabricated_quantitative",
+                    message=(
+                        f"量化断言「{m.group(0)}」无同句素材角标、数值亦无 references 依据，"
+                        "疑为臆造，须挂角标或改用有据数值。"
+                    ),
+                )
+            )
+    return out
+
+
 @register
 def _rule_fabrication(ctx: _LintContext) -> list[Violation]:
     """查臆造：正则从正文抽候选 token，须能在 references 找到依据。
@@ -695,15 +793,19 @@ def _rule_fabrication(ctx: _LintContext) -> list[Violation]:
     ≥1 条时才校验该类型——调用方未提供某类型依据即视为该类型不在本章事实范围内，
     不误伤未补全 references 的章。token 抽取委托 ``extract_facts``，
     模式来自 SSoT ``fabrication``，避免校验器与指南漂移。
+    quantitative 子类型另有素材角标这一备用依据通道，故只要调用方提供了
+    references 或 materials 之一即校验（两者皆无仍整组跳过，不误伤裸语料）。
     """
-    if not ctx.references:
+    if not ctx.references and not ctx.materials:
         return []
     fab = ctx.cfg.get("fabrication") or {}
+    out: list[Violation] = _quantitative_violations(ctx, fab)
+    if not ctx.references:
+        return out
     by_type: dict[str, list[Fact]] = {}
     for f in ctx.references:
         by_type.setdefault(f.type, []).append(f)
     text_facts = extract_facts(ctx.text, ctx.cfg)
-    out: list[Violation] = []
 
     ic_refs = by_type.get("industry_code")
     if ic_refs:
