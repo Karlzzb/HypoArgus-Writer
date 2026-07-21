@@ -3,7 +3,8 @@
 LLM 调用序列（每步只输出 JSON）：
 1. 品类识别与模板匹配（置信度低转自由结构，不报错）；
 2. 大纲生成：模板路径只做标题实例化与不适用章节裁剪，自由结构路径直接生成；
-3. 全文论点生成（所有章节合并为一次调用）；
+3. 全文论点生成（所有章节合并为一次调用，同时逐章产出规划摘要，
+   供并行首写时后章用前章的规划摘要衔接；缺失时程序从标题与论点兜底）；
 4. 逐论点假说生成（每论点一次调用；六角度发散、可证伪、按证据可检索性筛选），
    各章节并发执行（并发度由配置控制），章内论点保持顺序。
 
@@ -306,9 +307,12 @@ def _generate_points_all(
     genre: str,
     chapters: list[_OutlineChapter],
     max_points: int,
-) -> list[list[str]]:
-    """步骤 3 全文论点：所有章节合并为一次调用，返回与章节等长的论点文本列表。
+) -> tuple[list[list[str]], list[str]]:
+    """步骤 3 全文论点：所有章节合并为一次调用，返回（论点文本列表, 规划摘要列表）。
 
+    两个返回值都与章节等长。规划摘要在同一次全局视角调用里逐章产出，
+    供并行首写时后章用前章的规划摘要衔接；应答缺失或非法时由程序
+    从标题与论点确定性兜底（_fallback_planned_summary）。
     程序侧按章节序号对齐：缺失或非法的章节项按空论点处理，逐章截断至上限。
     """
     chapters_payload = [
@@ -324,8 +328,11 @@ def _generate_points_all(
         "每条论点是该章存在的理由之一，是后续假说与检索的锚点；"
         "全文视角下各章论点互不重复、彼此衔接。"
         f"每章数量不超过 {max_points} 条。"
+        "同时为每一章给出一句规划摘要：预告该章将论述的核心内容与落点，"
+        "供后续章节行文承接前文，措辞如同该章已写成后的内容概要。"
         "输出 JSON 数组，逐章一项："
-        '{"chapter_index": 章节序号, "points": [{"text": "论点表述"}, ...]}。'
+        '{"chapter_index": 章节序号, "planned_summary": "本章规划摘要", '
+        '"points": [{"text": "论点表述"}, ...]}。'
         + JSON_ONLY_RULE
     )
     user = (
@@ -336,6 +343,7 @@ def _generate_points_all(
     payload = invoke_json(llm, "全文论点生成", system, user, list)
 
     by_index: dict[int, list[Any]] = {}
+    summary_by_index: dict[int, str] = {}
     for item in payload:
         if (
             isinstance(item, dict)
@@ -343,6 +351,11 @@ def _generate_points_all(
             and isinstance(item.get("points"), list)
         ):
             by_index.setdefault(item["chapter_index"], item["points"])
+            summary_raw = item.get("planned_summary")
+            if isinstance(summary_raw, str) and summary_raw.strip():
+                summary_by_index.setdefault(
+                    item["chapter_index"], summary_raw.strip()
+                )
 
     def point_text(point: Any) -> str:
         """取论点文本：兼容 {"text": ...} 对象与直接的字符串两种应答形态。"""
@@ -353,6 +366,7 @@ def _generate_points_all(
         return ""
 
     points_per_chapter: list[list[str]] = []
+    planned_summaries: list[str] = []
     for index in range(1, len(chapters) + 1):
         texts = [
             text
@@ -360,6 +374,10 @@ def _generate_points_all(
             if (text := point_text(point))
         ]
         points_per_chapter.append(texts[:max_points])
+        planned_summaries.append(
+            summary_by_index.get(index)
+            or _fallback_planned_summary(chapters[index - 1], texts[:max_points])
+        )
     if not any(points_per_chapter):
         # 应答非空但解析后全部章节论点为空：打印原始 payload 定位格式偏差
         # （曾出现关思考后 points 直接给成字符串数组的形态漂移）。
@@ -368,7 +386,20 @@ def _generate_points_all(
             f"{json.dumps(payload, ensure_ascii=False)[:1500]}",
             flush=True,
         )
-    return points_per_chapter
+    return points_per_chapter, planned_summaries
+
+
+def _fallback_planned_summary(
+    chapter: _OutlineChapter, point_texts: list[str]
+) -> str:
+    """规划摘要的确定性兜底：从章节标题与论点拼一句内容概要。
+
+    LLM 应答缺失或为空时使用；无论点时退化为标题概述，保证摘要恒非空，
+    并行首写的前章衔接因此不会出现空洞。
+    """
+    if point_texts:
+        return f"本章《{chapter.title}》论述：{'；'.join(point_texts)}。"
+    return f"本章《{chapter.title}》围绕该主题展开论述。"
 
 
 def _generate_hypotheses(
@@ -480,7 +511,7 @@ def make_framework_orchestrator_node(
         else:
             outline_chapters = _generate_free_outline(llm, user_intent, user_identity)
 
-        point_texts_per_chapter = _generate_points_all(
+        point_texts_per_chapter, planned_summaries = _generate_points_all(
             llm,
             user_intent,
             user_identity,
@@ -528,6 +559,7 @@ def make_framework_orchestrator_node(
                 subsections=list(chapter.subsections),
                 points=points,
                 chapter_type=chapter.chapter_type,
+                planned_summary=planned_summaries[chapter_index],
             )
 
         outline: list[ChapterSpec] = []

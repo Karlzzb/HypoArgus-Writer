@@ -19,6 +19,7 @@ from assembly.context_assembler import (
     extract_chapter_draft,
     extract_chapter_materials,
     extract_citation_digest,
+    extract_planned_summary_chain,
     extract_summary_chain,
 )
 from llm.llm_config import RUNTIME_UNITS
@@ -122,7 +123,7 @@ def test_未知单元抛ValueError():
         assemble(_make_state(), "no_such_unit", config=_DEFAULT_CONFIG)
 
 
-def test_七个运行单元都能装配不抛错():
+def test_全部运行单元都能装配不抛错():
     state = _make_state()
     for unit in RUNTIME_UNITS:
         context = assemble(state, unit, config=_DEFAULT_CONFIG)
@@ -237,6 +238,72 @@ def test_摘要链无前章时两段皆空():
     by_name = {segment.name: segment.text for segment in segments}
     assert by_name["summary_chain"] == ""
     assert by_name["prev_chapter_summary"] == ""
+
+
+# ---------- 规划摘要链 ----------
+
+
+def _planned_state() -> WritingAgentState:
+    """三章大纲各带规划摘要、无任何草稿（并行首写现场）。"""
+    return WritingAgentState(
+        outline=[
+            ChapterSpec(id="ch1", title="第一章", planned_summary="规划一。"),
+            ChapterSpec(id="ch2", title="第二章", planned_summary="规划二。"),
+            ChapterSpec(id="ch3", title="第三章", planned_summary="规划三。"),
+        ],
+        chapter_drafts=[],
+    )
+
+
+def test_规划摘要链_取目标章之前各章的规划摘要且不依赖草稿():
+    segments = extract_planned_summary_chain(
+        _planned_state(), {"chapter_id": "ch3"}, _DEFAULT_CONFIG
+    )
+    (segment,) = segments
+    assert segment.name == "summary_chain"
+    assert segment.text == "【第一章】规划一。\n【第二章】规划二。"
+
+
+def test_规划摘要链_首章为空串():
+    (segment,) = extract_planned_summary_chain(
+        _planned_state(), {"chapter_id": "ch1"}, _DEFAULT_CONFIG
+    )
+    assert segment.text == ""
+
+
+def test_规划摘要链_缺chapter_id或不在大纲返回空段列表():
+    state = _planned_state()
+    assert extract_planned_summary_chain(state, {}, _DEFAULT_CONFIG) == []
+    assert (
+        extract_planned_summary_chain(state, {"chapter_id": "chX"}, _DEFAULT_CONFIG)
+        == []
+    )
+
+
+def test_规划摘要链_超阈值时按摘要链同款策略压缩():
+    config = AssemblerConfig(
+        summary_chain_max_chars=24,
+        summary_digest_max_chars=6,
+        ledger_keep_rounds=2,
+        ledger_digest_max_chars=60,
+    )
+    state = WritingAgentState(
+        outline=[
+            ChapterSpec(
+                id="ch1", title="第一章", planned_summary="很长的规划句子甲。补充说明甲。"
+            ),
+            ChapterSpec(
+                id="ch2", title="第二章", planned_summary="很长的规划句子乙。补充说明乙。"
+            ),
+            ChapterSpec(id="ch3", title="第三章", planned_summary="规划三。"),
+        ],
+    )
+    (segment,) = extract_planned_summary_chain(
+        state, {"chapter_id": "ch3"}, config
+    )
+    # 最后一章（ch2）保留原文，更早章（ch1）截为首句摘要并限长。
+    assert "很长的规划句子乙。补充说明乙。" in segment.text
+    assert "补充说明甲" not in segment.text
 
 
 # ---------- 修订台账 ----------

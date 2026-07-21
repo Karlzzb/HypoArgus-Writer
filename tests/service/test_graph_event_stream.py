@@ -126,7 +126,7 @@ def test_合成流块_state_snapshot只含元数据且状态为纯字符串():
         {
             "writing_orchestrator": {
                 "status": WorkflowStatus.ARTICLE_WRITING,
-                "chapter_drafts": [object(), object()],
+                "chapter_drafts": [{"chapter_id": "ch1"}, {"chapter_id": "ch2"}],
             }
         },
     )
@@ -258,7 +258,7 @@ def test_合成流块_seed后快照沿用检查点计数():
         {
             "status": WorkflowStatus.AWAIT_USER_REVIEW,
             "outline": ["ch1", "ch2"],
-            "chapter_drafts": ["d1", "d2"],
+            "chapter_drafts": [{"chapter_id": "ch1"}, {"chapter_id": "ch2"}],
             "citation_library": ["m1", "m2"],
             "iteration_round": 1,
         }
@@ -285,8 +285,10 @@ def test_合成流块_子智能体progress事件挂最近一次subagent_start():
     events: list[EventEnvelope] = []
     emitter = _make_emitter(events)
     emitter.emit_root(type="progress", unit="graph", payload={})
-    # 先有当前主节点，subagent_start 才能挂到该节点的 node_start 之下。
-    emitter.handle("debug", _task_chunk("writing_orchestrator", 3))
+    # 并行首写分支：draft 模式的子智能体事件按章节挂 chapter_drafter 的 node_start。
+    chunk = _task_chunk("chapter_drafter", 3)
+    chunk["payload"]["input"] = {"draft_chapter_id": "ch-1"}
+    emitter.handle("debug", chunk)
     hook = emitter.make_subagent_hook()
 
     start_payload = {"unit": "rewriter_loop", "chapter_id": "ch-1", "mode": "draft"}
@@ -407,7 +409,7 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
     _, _, _ = _run_first_pass(events)
 
     root_id = events[0].event_id
-    # writing_orchestrator 自环：每章一个超步，node_start 每单元可能多条。
+    # chapter_drafter 并行扇出：每章一个任务，node_start 每单元可能多条。
     node_start_ids: dict[str, set[str]] = {}
     for event in events:
         if event.type == "node_start":
@@ -415,12 +417,12 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
     assert set(node_start_ids) == {
         "framework_orchestrator",
         "reference_orchestrator",
-        "writing_orchestrator",
+        "chapter_drafter",
         "citation_validator",
         "human_review_gate",
     }
-    # 2 章自环：writing_orchestrator 恰好进入两次。
-    assert len(node_start_ids["writing_orchestrator"]) == 2
+    # 2 章并行扇出：chapter_drafter 恰好两个任务。
+    assert len(node_start_ids["chapter_drafter"]) == 2
     for event in events:
         if event.type == "node_start":
             assert event.parent_id == root_id
@@ -449,17 +451,20 @@ def test_真图集成_子智能体事件成对且挂当前节点():
     assert {event.unit for event in starts} == {"search_agent", "rewriter_loop"}
 
     # subagent_start 挂当前主节点的某条 node_start；
-    # 写作自环下每章的 rewriter_loop 挂各自超步的 node_start。
-    expected_parents = {
-        "search_agent": set(node_start_ids["reference_orchestrator"]),
-        "rewriter_loop": set(node_start_ids["writing_orchestrator"]),
+    # 并行首写下每章的 rewriter_loop 精确挂到本章 chapter_drafter 分支的
+    # node_start（按 node_start 载荷里的 chapter_id 配对，跨线程到达顺序无关）。
+    chapter_start_by_id = {
+        event.payload["chapter_id"]: event.event_id
+        for event in events
+        if event.type == "node_start" and event.unit == "chapter_drafter"
     }
     for event in starts:
-        assert event.parent_id in expected_parents[event.unit]
-    rewriter_parents = [
-        event.parent_id for event in starts if event.unit == "rewriter_loop"
-    ]
-    assert rewriter_parents == node_start_ids["writing_orchestrator"]
+        if event.unit == "search_agent":
+            assert event.parent_id in node_start_ids["reference_orchestrator"]
+        else:
+            assert event.parent_id == chapter_start_by_id[
+                event.payload["chapter_id"]
+            ]
 
     # subagent_end 挂对应的 subagent_start：按单元名配对顺序逐一对应。
     start_ids = {event.event_id for event in starts}

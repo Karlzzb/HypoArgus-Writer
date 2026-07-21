@@ -15,14 +15,16 @@ TaskManager 把编译好的 LangGraph 图包装成任务粒度的服务对象：
 
 子智能体事件钩子按运行动态路由：build_graph 只在建服务时调用一次，
 而每次运行有自己的翻译器（emitter）。SubagentHookDispatcher 基于
-threading.local 分发——每次运行独占一个工作线程，节点内 asyncio.run
-仍在同一 OS 线程执行，线程本地变量可靠指向当前运行的钩子。
+contextvars 分发——每次运行独占一个工作线程，LangGraph 把节点任务连同
+copy_context() 派发进执行器线程池，并行首写分支内的钩子仍可靠指向
+当前运行（详见 SubagentHookDispatcher docstring）。
 """
 
 from __future__ import annotations
 
 import asyncio
-import threading
+import contextvars
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +36,7 @@ from langgraph.types import Command
 
 from llm import observability
 from domain.bibliography import render_article
+from domain.env_config import read_positive_int
 from service.event_broker import EventHub
 from service.event_envelope import new_envelope
 from domain.units import MAIN_NODES
@@ -55,26 +58,32 @@ class InvalidReview(Exception):
 
 
 class SubagentHookDispatcher:
-    """基于 threading.local 的子智能体事件钩子分发器。
+    """基于 contextvars 的子智能体事件钩子分发器。
 
     构图时作为 EventHook 一次性注入打桩适配层；每次图运行在自己的
     工作线程开头登记当前运行的真实钩子，结束时清除。
+    用 ContextVar 而非 threading.local：LangGraph 把每个节点任务连同
+    copy_context() 派发进执行器线程池（并行首写的 chapter_drafter 分支
+    不在驱动线程上执行），contextvars 随任务复制、钩子在并行分支内依然
+    指向当前运行；不同运行各占独立驱动线程，上下文互不串扰。
     """
 
     def __init__(self) -> None:
-        self._local = threading.local()
+        self._hook_var: contextvars.ContextVar[EventHook | None] = (
+            contextvars.ContextVar("subagent_hook", default=None)
+        )
 
     def set_hook(self, hook: EventHook) -> None:
-        """登记当前线程（即当前运行）的真实钩子。"""
-        self._local.hook = hook
+        """登记当前运行（当前上下文）的真实钩子。"""
+        self._hook_var.set(hook)
 
     def clear_hook(self) -> None:
-        """清除当前线程的钩子登记。"""
-        self._local.hook = None
+        """清除当前上下文的钩子登记。"""
+        self._hook_var.set(None)
 
     def __call__(self, event_type: str, payload: dict[str, Any]) -> None:
-        """把子智能体事件转发给当前线程登记的钩子；未登记则丢弃。"""
-        hook = getattr(self._local, "hook", None)
+        """把子智能体事件转发给当前上下文登记的钩子；未登记则丢弃。"""
+        hook = self._hook_var.get()
         if hook is not None:
             hook(event_type, payload)
 
@@ -366,7 +375,21 @@ class TaskManager:
         return entry
 
     def _thread_config(self, thread_id: str) -> RunnableConfig:
-        return cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
+        """构造运行配置：线程 id + 并行任务并发上限。
+
+        max_concurrency 是 langgraph 读取的 RunnableConfig 顶层键，
+        约束同一超步内并行任务（首写扇出的 chapter_drafter 分支）的并发数，
+        按环境变量 GRAPH_MAX_CONCURRENCY 配置（缺省 4，兼顾服务商限流）。
+        """
+        return cast(
+            RunnableConfig,
+            {
+                "configurable": {"thread_id": thread_id},
+                "max_concurrency": read_positive_int(
+                    os.environ, "GRAPH_MAX_CONCURRENCY", 4
+                ),
+            },
+        )
 
     def _new_emitter(self, entry: _TaskEntry) -> GraphRunEmitter:
         """为一次运行构造事件翻译器，发布到全局 graph_event 枢纽。"""

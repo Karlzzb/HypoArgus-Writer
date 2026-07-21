@@ -18,6 +18,8 @@
   按报告问题拼出纯改写指令做定向重写。
 - 首写模式（其余情形）：目标章 = 大纲中第一个没有草稿的章，
   前章草稿均已在 State 中，用其摘要承接摘要链。
+  正常路径下首写已由 chapter_drafter 并行扇出承担（见 graph.py），
+  此分支仅作防御保留，不在主路径可达。
 
 素材与前文摘要一律经 context_assembler 现场装配：任务包的
 prev_chapter_summary 注入装配后的 summary_chain 段（该章之前的全部前章摘要链，
@@ -98,7 +100,7 @@ def next_writing_step(state: WritingAgentState) -> WritingStep | None:
     return None
 
 
-def _flatten_hypotheses(chapter: ChapterSpec) -> list[HypothesisPayload]:
+def flatten_hypotheses(chapter: ChapterSpec) -> list[HypothesisPayload]:
     """把章节内全部论点下的假说按顺序拉平为任务包条目。"""
     return [
         HypothesisPayload(
@@ -111,18 +113,18 @@ def _flatten_hypotheses(chapter: ChapterSpec) -> list[HypothesisPayload]:
     ]
 
 
-def _chapter_spec_payload(chapter: ChapterSpec) -> ChapterSpecPayload:
+def chapter_spec_payload(chapter: ChapterSpec) -> ChapterSpecPayload:
     """章节骨架转任务包字典：论点列表 + 该章全部假说扁平列表。"""
     return ChapterSpecPayload(
         id=chapter.id,
         title=chapter.title,
         chapter_type=chapter.chapter_type,
         points=[PointPayload(id=point.id, text=point.text) for point in chapter.points],
-        hypotheses=_flatten_hypotheses(chapter),
+        hypotheses=flatten_hypotheses(chapter),
     )
 
 
-def _materials_from_segment(chapter_materials_json: str) -> list[MaterialPayload]:
+def materials_from_segment(chapter_materials_json: str) -> list[MaterialPayload]:
     """把 chapter_materials 段（该章 verdict=pass 素材的 JSON）转为任务包条目。
 
     段文本由 context_assembler.extract_chapter_materials 装配（已按章过滤并只留
@@ -175,7 +177,7 @@ def _report_repair_payload(
     )
 
 
-def _chapter_by_id(state: WritingAgentState, chapter_id: str) -> ChapterSpec:
+def chapter_by_id(state: WritingAgentState, chapter_id: str) -> ChapterSpec:
     """按 id 取大纲章节；判别函数已保证目标章在大纲中。"""
     for chapter in state.get("outline", []):
         if chapter.id == chapter_id:
@@ -213,8 +215,8 @@ def make_writing_orchestrator_node(
             mode="draft",
             doc_type=doc_type,
             doc_variant=doc_variant,
-            chapter_spec=_chapter_spec_payload(chapter),
-            materials=_materials_from_segment(context.text("chapter_materials")),
+            chapter_spec=chapter_spec_payload(chapter),
+            materials=materials_from_segment(context.text("chapter_materials")),
             prev_chapter_summary=context.text("summary_chain"),
         )
         result = await rewriter_loop.run(dict(task))
@@ -250,7 +252,7 @@ def make_writing_orchestrator_node(
         )
         task = SearchTask(
             chapter_id=chapter.id,
-            hypotheses=_flatten_hypotheses(chapter),
+            hypotheses=flatten_hypotheses(chapter),
             genre=state.get("genre", ""),
             existing_materials_digest=context.text("citation_digest"),
         )
@@ -311,8 +313,8 @@ def make_writing_orchestrator_node(
             mode="revise",
             doc_type=doc_type,
             doc_variant=doc_variant,
-            chapter_spec=_chapter_spec_payload(chapter),
-            materials=_materials_from_segment(context.text("chapter_materials")),
+            chapter_spec=chapter_spec_payload(chapter),
+            materials=materials_from_segment(context.text("chapter_materials")),
             prev_chapter_summary=context.text("summary_chain"),
             revision_directives=payloads,
             current_text=draft.text,
@@ -336,7 +338,7 @@ def make_writing_orchestrator_node(
         grouped = _grouped_directives(
             state.get("pending_directives", []), state.get("outline", [])
         )
-        chapter = _chapter_by_id(state, chapter_id)
+        chapter = chapter_by_id(state, chapter_id)
         chapter_directives = grouped[chapter_id]
         library = list(state.get("citation_library", []))
         if any(
@@ -355,7 +357,11 @@ def make_writing_orchestrator_node(
     def _replace_draft(
         state: WritingAgentState, new_draft: ChapterDraft
     ) -> list[ChapterDraft]:
-        """整值覆盖语义：读旧草稿列表，替换目标章草稿，其余章草稿对象原样保留。"""
+        """读旧草稿列表，替换目标章草稿，其余章草稿对象原样保留。
+
+        chapter_drafts 带按 chapter_id 合并的 reducer：回写完整列表时逐项
+        同 id 替换，与旧的整值覆盖语义等价。
+        """
         return [
             new_draft if draft.chapter_id == new_draft.chapter_id else draft
             for draft in state.get("chapter_drafts", [])
@@ -401,7 +407,7 @@ def make_writing_orchestrator_node(
         if mode == "fallback":
             report = state.get("citation_report")
             assert report is not None  # 判别函数已保证。
-            chapter = _chapter_by_id(state, chapter_id)
+            chapter = chapter_by_id(state, chapter_id)
             library = list(state.get("citation_library", []))
             new_draft = asyncio.run(
                 _revise_chapter(
@@ -413,7 +419,7 @@ def make_writing_orchestrator_node(
                 )
             )
             return _revised_step_update(state, new_draft, chapter_id)
-        chapter = _chapter_by_id(state, chapter_id)
+        chapter = chapter_by_id(state, chapter_id)
         draft = asyncio.run(_draft_chapter(state, chapter, config))
         return WritingAgentState(
             chapter_drafts=[*state.get("chapter_drafts", []), draft],

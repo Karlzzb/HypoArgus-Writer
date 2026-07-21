@@ -18,6 +18,9 @@
 每完成一章，产物必须进入主图 state 并被 checkpoint 覆盖，使中断后 resume 不重复已完成章节的外部调用与 LLM 花费。
 实现手段不限（图内循环边、`Send` 分发、或节点内显式提交），但"崩溃重跑只损失当前进行中的一章"是验收标准。
 
+补记（2026-07-21，首写并行化）：首写阶段改为 `Send` 并行扇出后，本约束在并行波次下的成立依赖 LangGraph 的超步事务语义——超步内某分支失败时，带 checkpointer 的运行会把已成功分支的写入保存为 pending writes，resume 只重跑未完成分支（官方文档「Run graph nodes in parallel > Exception handling」明确此语义）。
+验收标准相应表述为"崩溃重跑只损失进行中的分支"，并已在中断恢复 E2E（`tests/e2e/test_graph_e2e.py` 的崩溃恢复用例）中对该机制做实测验证：已完成分支零重复模型调用、待执行任务只剩失败分支。
+
 ### 2. 事件契约必须带业务上下文与运行中进度
 
 `subagent_start`/`subagent_end` 载荷不得只有 unit 名：至少携带 chapter_id 与调用模式（首写/修订/终审回退）。

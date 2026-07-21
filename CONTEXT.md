@@ -6,7 +6,7 @@
 
 - **章节（Chapter）** — 文章的二级标题单元，写作与检索的基本执行粒度。
   一个章节包含 1..n 个论点。
-  章节严格串行写作，承接上一章节摘要。
+  首写阶段各章并行写作，承接前章规划摘要链；修订与终审回退按章串行执行。
 - **论点（Argument Point）** — 章节内的一个中心主张，章节存在的理由之一。
   一个论点派生 1..N 条假说。
 - **假说（Hypothesis）** — 从论点派生的可证伪、可检索验证的具体命题。
@@ -20,8 +20,10 @@
 ## 运行单元
 
 - **运行单元（Runtime Unit）** — 可独立配置 LLM 参数（model / base_url / api_key）的最小执行体。
-  共 7 个：5 个 LangGraph 主节点（framework_orchestrator、reference_orchestrator、writing_orchestrator、citation_validator、human_review_gate）+ 2 个业务子智能体（search_agent、rewriter_loop）。
+  共 8 个：6 个 LangGraph 主节点（framework_orchestrator、reference_orchestrator、chapter_drafter、writing_orchestrator、citation_validator、human_review_gate）+ 2 个业务子智能体（search_agent、rewriter_loop）。
   未单独配置的单元回落到全局缺省 LLM 配置。
+- **并行首写（Parallel Drafting）** — 首写阶段由 chapter_drafter 节点经 Send 扇出承担：每个未写章节一个并行分支，各分支承接前章规划摘要链、只回写单章草稿。
+  修订与终审回退仍由 writing_orchestrator 串行自环处理。
 
 ## 文种
 
@@ -91,6 +93,7 @@
   禁止读取 State 之外的全局可变状态；定位类参数（如 chapter_id）缺失时返回空段而不抛错。
 - **内容段（Segment）** — 装配产出的最小单位，形如 段名 + 文本，供节点按名取用构造 prompt 或任务包字段。
 - **修订台账（Revision Ledger）** — 用户历轮意见与解析出的修订指令的全量持久化记录，装配时按需注入，保证多轮迭代不失忆。
-- **摘要链（Summary Chain）** — 已完成各章摘要按顺序拼接成的前文链，供当前章写作承接；超阈值时压缩，未超时原样拼接，首章为空。
+- **摘要链（Summary Chain）** — 已完成各章摘要按顺序拼接成的前文链，供修订改写时承接；超阈值时压缩，未超时原样拼接，首章为空。
+- **规划摘要链（Planned Summary Chain）** — 框架生成时逐章预判的规划摘要（ChapterSpec.planned_summary）按顺序拼接成的前文链，供并行首写时后章承接前文；行格式与压缩策略与摘要链一致。
 - **保留策略（Retention Policy）** — 装配时对过长上下文的压缩规则：摘要链过长做「摘要的摘要」；修订台账保最近 K 轮原文加更早轮次一句话摘要。
   压缩只在超阈值时发生，阈值可配置。

@@ -99,16 +99,51 @@ def extract_user_intent(
     ]
 
 
+def _compressed_chain_text(
+    entries: list[tuple[str, str]], config: AssemblerConfig
+) -> str:
+    """（标题, 摘要）序列 → 摘要链文本，超阈值时做「摘要的摘要」压缩。
+
+    压缩策略：总字符数超 summary_chain_max_chars 时，除最后一章保留原文外，
+    更早各章截为首句摘要；仍超阈值则从最早章节起丢弃并在段首标注省略数量。
+    实际摘要链与规划摘要链共用此行格式与压缩策略。
+    """
+
+    def _line(title: str, summary: str) -> str:
+        return f"【{title}】{summary}"
+
+    lines = [_line(title, summary) for title, summary in entries]
+    text = "\n".join(lines)
+    if len(text) > config.summary_chain_max_chars and lines:
+        compressed = [
+            _line(
+                title,
+                _first_sentence_digest(summary, config.summary_digest_max_chars),
+            )
+            for title, summary in entries[:-1]
+        ]
+        compressed.append(lines[-1])
+        dropped = 0
+        while (
+            len("\n".join(compressed)) > config.summary_chain_max_chars
+            and len(compressed) > 1
+        ):
+            compressed.pop(0)
+            dropped += 1
+        if dropped:
+            compressed.insert(0, f"（更早 {dropped} 章摘要已省略）")
+        text = "\n".join(compressed)
+    return text
+
+
 def extract_summary_chain(
     state: WritingAgentState,
     params: Mapping[str, object],
     config: AssemblerConfig,
 ) -> list[Segment]:
-    """提取前文摘要链，超阈值时做「摘要的摘要」压缩。
+    """提取前文摘要链（实际写成的章节摘要），超阈值时压缩。
 
     params 支持可选 chapter_id：装配到该章之前的所有前章摘要；缺省取全部草稿。
-    压缩策略：总字符数超 summary_chain_max_chars 时，除最后一章保留原文外，
-    更早各章截为首句摘要；仍超阈值则从最早章节起丢弃并在段首标注省略数量。
     """
     drafts = list(state.get("chapter_drafts", []))
     chapter_id = params.get("chapter_id")
@@ -122,37 +157,41 @@ def extract_summary_chain(
 
     titles = {chapter.id: chapter.title for chapter in state.get("outline", [])}
     prev_summary = drafts[-1].summary if drafts else ""
-
-    def _line(chapter_draft_id: str, summary: str) -> str:
-        return f"【{titles.get(chapter_draft_id, chapter_draft_id)}】{summary}"
-
-    lines = [_line(draft.chapter_id, draft.summary) for draft in drafts]
-    text = "\n".join(lines)
-    if len(text) > config.summary_chain_max_chars and lines:
-        # 摘要的摘要：最后一章保留原文，更早各章压缩为首句摘要。
-        compressed = [
-            _line(
-                draft.chapter_id,
-                _first_sentence_digest(draft.summary, config.summary_digest_max_chars),
-            )
-            for draft in drafts[:-1]
-        ]
-        compressed.append(lines[-1])
-        dropped = 0
-        while (
-            len("\n".join(compressed)) > config.summary_chain_max_chars
-            and len(compressed) > 1
-        ):
-            compressed.pop(0)
-            dropped += 1
-        if dropped:
-            compressed.insert(0, f"（更早 {dropped} 章摘要已省略）")
-        text = "\n".join(compressed)
-
+    entries = [
+        (titles.get(draft.chapter_id, draft.chapter_id), draft.summary)
+        for draft in drafts
+    ]
     return [
-        Segment("summary_chain", text),
+        Segment("summary_chain", _compressed_chain_text(entries, config)),
         Segment("prev_chapter_summary", prev_summary),
     ]
+
+
+def extract_planned_summary_chain(
+    state: WritingAgentState,
+    params: Mapping[str, object],
+    config: AssemblerConfig,
+) -> list[Segment]:
+    """提取规划摘要链：目标章之前各章的规划摘要拼链，供并行首写承接前文。
+
+    并行首写时前章草稿尚未写成，衔接依据改为框架生成时的规划摘要
+    （ChapterSpec.planned_summary）；段名沿用 summary_chain，
+    行格式与压缩策略与实际摘要链一致，首章为空串。
+    params 需带 chapter_id；缺失或不在大纲中时返回空段列表。
+    """
+    chapter_id = params.get("chapter_id")
+    if chapter_id is None:
+        return []
+    outline = state.get("outline", [])
+    index = next(
+        (i for i, chapter in enumerate(outline) if chapter.id == chapter_id), None
+    )
+    if index is None:
+        return []
+    entries = [
+        (chapter.title, chapter.planned_summary) for chapter in outline[:index]
+    ]
+    return [Segment("summary_chain", _compressed_chain_text(entries, config))]
 
 
 def extract_revision_ledger(
@@ -282,14 +321,19 @@ def extract_user_feedback(
 # 两份配方共享一个较宽的摘要链预算覆盖；其余阈值沿用全局配置。
 _WRITING_BUDGET = BudgetOverride(summary_chain_max_chars=1200)
 
-# 按运行单元注册的装配配方；键覆盖 llm_config.RUNTIME_UNITS 全部 7 个单元。
-# 写作两配方只留 RewriteTask 实际消费的段（摘要链与章节素材）。
+# 按运行单元注册的装配配方；键覆盖 llm_config.RUNTIME_UNITS 全部 8 个单元。
+# 写作各配方只留 RewriteTask 实际消费的段（摘要链与章节素材）；
+# chapter_drafter（并行首写）用规划摘要链替代实际摘要链，其余与写作配方一致。
 RECIPES: dict[str, Recipe] = {
     "framework_orchestrator": Recipe(extractors=(extract_user_intent,)),
     "reference_orchestrator": Recipe(
         extractors=(extract_user_intent, extract_citation_digest)
     ),
     "search_agent": Recipe(extractors=(extract_citation_digest,)),
+    "chapter_drafter": Recipe(
+        extractors=(extract_planned_summary_chain, extract_chapter_materials),
+        budget=_WRITING_BUDGET,
+    ),
     "writing_orchestrator": Recipe(
         extractors=(extract_summary_chain, extract_chapter_materials),
         budget=_WRITING_BUDGET,

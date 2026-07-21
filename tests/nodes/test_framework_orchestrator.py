@@ -328,6 +328,69 @@ def test_上限截断与总数配额耗尽后跳过假说调用(templates_dir: P
     assert len(fake.calls) == 4
 
 
+def test_规划摘要_应答携带时随章写入大纲(templates_dir: Path) -> None:
+    result, _ = _run_node(
+        [
+            {"genre": "方案", "template_file": None},
+            [
+                {"title": "第一章", "subsections": []},
+                {"title": "第二章", "subsections": []},
+            ],
+            [
+                {
+                    "chapter_index": 1,
+                    "planned_summary": "本章交代研究背景与问题定义。",
+                    "points": [{"text": "论点甲"}],
+                },
+                {
+                    "chapter_index": 2,
+                    "planned_summary": "本章给出解决方案与实施路径。",
+                    "points": [{"text": "论点乙"}],
+                },
+            ],
+        ],
+        templates_dir,
+        keyed={
+            _hyp_key("论点甲"): [[_hyp("假说甲")]],
+            _hyp_key("论点乙"): [[_hyp("假说乙")]],
+        },
+    )
+
+    outline = result["outline"]
+    assert outline[0].planned_summary == "本章交代研究背景与问题定义。"
+    assert outline[1].planned_summary == "本章给出解决方案与实施路径。"
+
+
+def test_规划摘要_应答缺失或为空时从标题与论点确定性兜底(templates_dir: Path) -> None:
+    result, _ = _run_node(
+        [
+            {"genre": "方案", "template_file": None},
+            [
+                {"title": "第一章", "subsections": []},
+                {"title": "第二章", "subsections": []},
+            ],
+            [
+                # 第 1 章 planned_summary 为空白串 → 兜底；第 2 章整项缺失 → 兜底。
+                {
+                    "chapter_index": 1,
+                    "planned_summary": "   ",
+                    "points": [{"text": "论点甲"}, {"text": "论点乙"}],
+                },
+            ],
+        ],
+        templates_dir,
+        keyed={
+            _hyp_key("论点甲"): [[_hyp("假说甲")]],
+            _hyp_key("论点乙"): [[_hyp("假说乙")]],
+        },
+    )
+
+    outline = result["outline"]
+    assert outline[0].planned_summary == "本章《第一章》论述：论点甲；论点乙。"
+    # 无论点的章节退化为标题概述，摘要恒非空。
+    assert outline[1].planned_summary == "本章《第二章》围绕该主题展开论述。"
+
+
 def test_配额预分配_按论点顺序扣减且不回补() -> None:
     limits = FrameworkLimits(
         max_points_per_chapter=4, max_hypotheses_per_point=3, max_hypotheses_total=4

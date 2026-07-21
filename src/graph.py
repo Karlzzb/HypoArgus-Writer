@@ -1,10 +1,16 @@
-"""LangGraph 迭代闭环图：5 个主节点的接线与条件路由。
+"""LangGraph 迭代闭环图：6 个主节点的接线与条件路由。
 
 主流程：framework_orchestrator（论证框架生成）→ reference_orchestrator（检索调度）
-→ writing_orchestrator（串行写作总控）→ citation_validator（引文终审门禁）
+→ chapter_drafter（首写并行扇出）→ citation_validator（引文终审门禁）
 → human_review_gate（人工中断点与迭代路由）。
-writing_orchestrator 是图内自环：每个超步只处理一章、章级产物落 checkpoint，
-条件边判定还有未完成章即回到自身写下一章，全部完成才前进终审。
+首写阶段：reference_orchestrator 后的条件边为每个未写章节各发一个 Send，
+chapter_drafter 各分支并行写一章（前文承接用框架生成的规划摘要链），
+产物经 chapter_drafts 合并 reducer 汇入主状态、按超步落 checkpoint，
+全部分支完成后汇合前进终审；带 checkpointer 时某分支失败，
+已完成分支的写入被保留，resume 只重跑未完成分支（ADR-0001 约束 1）。
+writing_orchestrator 保留修订与终审回退的图内串行自环：每个超步只处理一章，
+条件边判定还有未完成章即回到自身，全部完成才前进终审
+（其 draft 分支仅作防御，正常路径不再可达）。
 
 闭环路由：
 - citation_validator 终审失败且未超重试上限时，定向回退 writing_orchestrator
@@ -25,6 +31,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Send
 from psycopg import Connection
 from psycopg.rows import dict_row
 from pydantic import BaseModel
@@ -38,6 +45,7 @@ from domain.state import WorkflowStatus, WritingAgentState
 from domain.units import MAIN_NODES
 from llm import observability
 from llm.llm_client import LLMFactory, default_llm_factory
+from nodes.chapter_drafter import draft_send_payloads, make_chapter_drafter_node
 from nodes.citation_validator import ValidatorConfig, make_citation_validator_node
 from nodes.framework_orchestrator import make_framework_orchestrator_node
 from nodes.human_review_gate import make_human_review_gate_node
@@ -74,12 +82,26 @@ def checkpoint_serializer() -> JsonPlusSerializer:
 NODE_STATUS: dict[str, WorkflowStatus] = {
     "framework_orchestrator": WorkflowStatus.FRAMEWORK_BUILDING,
     "reference_orchestrator": WorkflowStatus.REFERENCE_FETCHING,
+    "chapter_drafter": WorkflowStatus.ARTICLE_WRITING,
     "writing_orchestrator": WorkflowStatus.ARTICLE_WRITING,
     "citation_validator": WorkflowStatus.CITATION_CHECKING,
     "human_review_gate": WorkflowStatus.AWAIT_USER_REVIEW,
 }
 
 assert tuple(NODE_STATUS) == MAIN_NODES, "NODE_STATUS 必须与运行单元名册的主节点一致"
+
+
+def route_after_reference_orchestrator(state: WritingAgentState) -> str | list[Send]:
+    """检索完成后的路由：为每个未写章节各发一个 Send 并行首写。
+
+    Send 载荷（目标章 id + 装配所需状态切片）与选章判定收敛于
+    chapter_drafter.draft_send_payloads 单一事实源；全部章节已有草稿
+    （恢复续跑等场景）时直接前进终审。
+    """
+    payloads = draft_send_payloads(state)
+    if not payloads:
+        return "citation_validator"
+    return [Send("chapter_drafter", payload) for payload in payloads]
 
 
 def route_after_writing_orchestrator(state: WritingAgentState) -> str:
@@ -144,6 +166,9 @@ def build_graph(
         "reference_orchestrator": make_reference_orchestrator_node(
             effective_search_agent, assembler_config
         ),
+        "chapter_drafter": make_chapter_drafter_node(
+            effective_rewriter_loop, assembler_config
+        ),
         "writing_orchestrator": make_writing_orchestrator_node(
             effective_rewriter_loop, effective_search_agent, assembler_config
         ),
@@ -165,7 +190,12 @@ def build_graph(
 
     builder.add_edge(START, "framework_orchestrator")
     builder.add_edge("framework_orchestrator", "reference_orchestrator")
-    builder.add_edge("reference_orchestrator", "writing_orchestrator")
+    builder.add_conditional_edges(
+        "reference_orchestrator",
+        route_after_reference_orchestrator,
+        ["chapter_drafter", "citation_validator"],
+    )
+    builder.add_edge("chapter_drafter", "citation_validator")
     builder.add_conditional_edges(
         "writing_orchestrator",
         route_after_writing_orchestrator,

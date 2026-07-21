@@ -99,7 +99,10 @@ def test_启用后一次完整运行span覆盖全部运行单元(captured_spans)
     names = [span.name for span in captured_spans]
 
     assert observability.RUN_SPAN_NAME in names
+    # writing_orchestrator 只在修订与终审回退时运行，首跑主路径不经过它。
     for node in MAIN_NODES:
+        if node == "writing_orchestrator":
+            continue
         assert f"node:{node}" in names, f"缺少主节点 span：{node}"
     for unit in ("search_agent", "rewriter_loop"):
         assert f"subagent:{unit}" in names, f"缺少子智能体 span：{unit}"
