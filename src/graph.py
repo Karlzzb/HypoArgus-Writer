@@ -1,12 +1,16 @@
 """LangGraph 迭代闭环图：6 个主节点的接线与条件路由。
 
-主流程：framework_orchestrator（论证框架生成）→ reference_orchestrator（检索调度）
+主流程：framework_orchestrator（论证框架生成）→ reference_orchestrator（检索并行扇出）
 → chapter_drafter（首写并行扇出）→ citation_validator（引文终审门禁）
 → human_review_gate（人工中断点与迭代路由）。
-首写阶段：reference_orchestrator 后的条件边为每个未写章节各发一个 Send，
+检索阶段：framework_orchestrator 后的条件边为每个待检索章节各发一个 Send，
+reference_orchestrator 各分支并行检索一章（existing_materials_digest 只反映
+扇出前的既有引文库），素材经 citation_library 合并 reducer 汇入主状态并
+跨章按 URL 去重、按超步落 checkpoint，全部分支完成后汇合进入首写扇出。
+首写阶段：检索汇合节点 reference_join 后的条件边为每个未写章节各发一个 Send，
 chapter_drafter 各分支并行写一章（前文承接用框架生成的规划摘要链），
 产物经 chapter_drafts 合并 reducer 汇入主状态、按超步落 checkpoint，
-全部分支完成后汇合前进终审；带 checkpointer 时某分支失败，
+全部分支完成后汇合前进终审。两段并行带 checkpointer 时某分支失败，
 已完成分支的写入被保留，resume 只重跑未完成分支（ADR-0001 约束 1）。
 writing_orchestrator 保留修订与终审回退的图内串行自环：每个超步只处理一章，
 条件边判定还有未完成章即回到自身，全部完成才前进终审
@@ -49,7 +53,10 @@ from nodes.chapter_drafter import draft_send_payloads, make_chapter_drafter_node
 from nodes.citation_validator import ValidatorConfig, make_citation_validator_node
 from nodes.framework_orchestrator import make_framework_orchestrator_node
 from nodes.human_review_gate import make_human_review_gate_node
-from nodes.reference_orchestrator import make_reference_orchestrator_node
+from nodes.reference_orchestrator import (
+    make_reference_orchestrator_node,
+    reference_send_payloads,
+)
 from nodes.writing_orchestrator import (
     make_writing_orchestrator_node,
     next_writing_step,
@@ -91,8 +98,33 @@ NODE_STATUS: dict[str, WorkflowStatus] = {
 assert tuple(NODE_STATUS) == MAIN_NODES, "NODE_STATUS 必须与运行单元名册的主节点一致"
 
 
-def route_after_reference_orchestrator(state: WritingAgentState) -> str | list[Send]:
-    """检索完成后的路由：为每个未写章节各发一个 Send 并行首写。
+def route_after_framework_orchestrator(state: WritingAgentState) -> str | list[Send]:
+    """框架完成后的路由：为每个待检索章节各发一个 Send 并行检索。
+
+    Send 载荷（目标章 id + 装配所需状态切片）与选章判定收敛于
+    reference_orchestrator.reference_send_payloads 单一事实源；
+    没有任何待检索章节（全部章节无假说、或恢复续跑时素材已齐）时
+    落回首写扇出路由，不经过检索节点。
+    """
+    payloads = reference_send_payloads(state)
+    if not payloads:
+        return route_after_reference_join(state)
+    return [Send("reference_orchestrator", payload) for payload in payloads]
+
+
+def reference_join(state: WritingAgentState) -> None:
+    """检索并行分支的汇合点：无操作节点，不写任何状态。
+
+    LangGraph 对同名节点并行任务的条件边是逐任务求值的，且每次求值只见
+    该任务自身的写入；首写扇出必须基于全部检索分支合并后的完整引文库，
+    故经本节点的静态边先汇合（静态边按节点名去重激活，目标只跑一次），
+    下一超步再从这里的条件边做首写扇出。
+    """
+    return None
+
+
+def route_after_reference_join(state: WritingAgentState) -> str | list[Send]:
+    """检索汇合后的路由：为每个未写章节各发一个 Send 并行首写。
 
     Send 载荷（目标章 id + 装配所需状态切片）与选章判定收敛于
     chapter_drafter.draft_send_payloads 单一事实源；全部章节已有草稿
@@ -189,10 +221,16 @@ def build_graph(
         builder.add_node(name, observability.traced_node(name, node_fn))
 
     builder.add_edge(START, "framework_orchestrator")
-    builder.add_edge("framework_orchestrator", "reference_orchestrator")
     builder.add_conditional_edges(
-        "reference_orchestrator",
-        route_after_reference_orchestrator,
+        "framework_orchestrator",
+        route_after_framework_orchestrator,
+        ["reference_orchestrator", "chapter_drafter", "citation_validator"],
+    )
+    builder.add_node("reference_join", reference_join)
+    builder.add_edge("reference_orchestrator", "reference_join")
+    builder.add_conditional_edges(
+        "reference_join",
+        route_after_reference_join,
         ["chapter_drafter", "citation_validator"],
     )
     builder.add_edge("chapter_drafter", "citation_validator")

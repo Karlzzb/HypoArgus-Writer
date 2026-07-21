@@ -11,10 +11,11 @@
 - updates 块是 ``{节点名: 部分状态}``，中断时是 ``{"__interrupt__": (Interrupt, ...)}``。
 - 串行路径的到达顺序恒为：task → updates（该节点）→ task_result，
   因此节点内派生事件的父 id 总能取到该节点的 node_start。
-- 并行扇出（首写阶段的 chapter_drafter）时同名节点有多个任务交错到达：
-  node_start/node_end 按 LangGraph task id 配对，子智能体成对事件按
-  （单元名, chapter_id）配对；updates 块无任务标识，其派生事件的父 id
-  退化为该节点最近一次 node_start（视觉归组可接受，链路不丢）。
+- 并行扇出（检索阶段的 reference_orchestrator 与首写阶段的 chapter_drafter）
+  时同名节点有多个任务交错到达：node_start/node_end 按 LangGraph task id
+  配对，子智能体成对事件按（单元名, chapter_id）配对；updates 块无任务
+  标识，其派生事件的父 id 退化为该节点最近一次 node_start
+  （视觉归组可接受，链路不丢）。
 
 父子链路规则：根事件（服务层经 emit_root 发出）→ node_start →
 节点派生事件（node_end / state_snapshot / llm_config_used / branch_taken /
@@ -75,11 +76,13 @@ class GraphRunEmitter:
         self._task_start_ids: dict[str, str] = {}
         """LangGraph task id → 该任务 node_start 的 event_id：并行扇出时
         同名节点有多个任务在跑，node_end 按 task id 配对各自的 node_start。"""
-        self._chapter_node_start_ids: dict[str, str] = {}
-        """目标章 id → 该章 chapter_drafter 分支 node_start 的 event_id：
-        并行首写的子智能体事件按章节确定性挂到所属分支；子智能体事件先于
-        debug 任务块到达时由发射器代为发出该分支的 node_start（见
-        _ensure_chapter_node_start），真实任务块随后到达时复用不重复发。"""
+        self._chapter_node_start_ids: dict[tuple[str, str], str] = {}
+        """（节点名, 目标章 id）→ 该章并行分支 node_start 的 event_id：
+        检索（reference_orchestrator）与首写（chapter_drafter）两段扇出的
+        子智能体事件按章节确定性挂到所属分支；同一章在两段各有一个分支，
+        故键须带节点名区分。子智能体事件先于 debug 任务块到达时由发射器
+        代为发出该分支的 node_start（见 _ensure_chapter_node_start），
+        真实任务块随后到达时复用不重复发。"""
         self._subagent_start_ids: dict[tuple[str, str | None], str] = {}
         """（子智能体单元名, chapter_id）→ 最近一次 subagent_start 的 event_id：
         并行首写时同一单元的多个实例按章节区分，成对事件不互相覆盖。"""
@@ -89,6 +92,10 @@ class GraphRunEmitter:
         self._completed_chapter_ids: set[str] = set()
         """已观察到草稿的章节 id 累积：并行分支的 update 只带单章列表，
         chapters_completed 由此累积集合计数而非单次 update 的长度。"""
+        self._material_ids: set[str] = set()
+        """已观察到素材的 id 累积：并行检索分支的 update 只带单章素材，
+        material_count 由此累积集合计数而非单次 update 的长度（合并 reducer
+        跨章按 URL 去重丢弃的条目不从计数回收，计数语义为「观察到的素材」）。"""
         self._interrupt_payload: dict[str, Any] | None = None
         self._last_status: WorkflowStatus | None = None
         # 快照元数据累积器：跨流块累积，保证每条 state_snapshot 字段完整。
@@ -187,31 +194,43 @@ class GraphRunEmitter:
             )
 
     def _subagent_parent(self, payload: dict[str, Any]) -> str | None:
-        """subagent_start 的父 id：并行首写分支按章节配对，其余挂当前节点。
+        """subagent_start 的父 id：并行分支按章节配对，其余挂当前节点。
 
         rewriter_loop 的 draft 模式只会从 chapter_drafter 分支发起
         （writing_orchestrator 的 draft 分支仅作防御、正常不可达），
         故按 chapter_id 取（必要时代发）该分支的 node_start；
+        search_agent 带 chapter_id 时同理挂检索分支——例外是修订轮的
+        增量检索从串行的 writing_orchestrator 发起（串行超步内任务块
+        先于子智能体事件处理，_current_node 判定无竞态），挂当前节点；
         其余场景沿用「当前执行中节点的 node_start，未知退根事件」。
         """
         chapter_id = payload.get("chapter_id")
         if payload.get("mode") == "draft" and isinstance(chapter_id, str):
-            return self._ensure_chapter_node_start(chapter_id)
+            return self._ensure_chapter_node_start("chapter_drafter", chapter_id)
+        if (
+            payload.get("unit") == "search_agent"
+            and isinstance(chapter_id, str)
+            and self._current_node != "writing_orchestrator"
+        ):
+            return self._ensure_chapter_node_start(
+                "reference_orchestrator", chapter_id
+            )
         return self._parent_for(self._current_node or "")
 
     def _ensure_chapter_node_start(
         self,
+        node: str,
         chapter_id: str,
         step: Any = None,
         task_id: str | None = None,
     ) -> str:
-        """取（或代发）指定章节 chapter_drafter 分支的 node_start，返回其 event_id。
+        """取（或代发）指定章节并行分支（检索或首写）的 node_start，返回其 event_id。
 
         子智能体事件在执行器线程可能先于驱动线程处理该分支的 debug 任务块，
         此时代为发出 node_start 保证父链确定；真实任务块随后到达时复用同一
         event_id，不重复发 node_start，仅补记 task id 配对（供 node_end 使用）。
         """
-        existing = self._chapter_node_start_ids.get(chapter_id)
+        existing = self._chapter_node_start_ids.get((node, chapter_id))
         if existing is not None:
             if task_id is not None:
                 self._task_start_ids[task_id] = existing
@@ -221,15 +240,15 @@ class GraphRunEmitter:
             start_payload["step"] = step
         envelope = self._emit(
             type="node_start",
-            unit="chapter_drafter",
+            unit=node,
             payload=start_payload,
             parent_id=self._root_id,
         )
-        self._chapter_node_start_ids[chapter_id] = envelope.event_id
-        self._node_start_ids["chapter_drafter"] = envelope.event_id
+        self._chapter_node_start_ids[(node, chapter_id)] = envelope.event_id
+        self._node_start_ids[node] = envelope.event_id
         if task_id is not None:
             self._task_start_ids[task_id] = envelope.event_id
-        self._current_node = "chapter_drafter"
+        self._current_node = node
         return envelope.event_id
 
     # ---- 内部实现 ----
@@ -274,9 +293,10 @@ class GraphRunEmitter:
         if chunk_type == "task":
             chapter_id = self._task_chapter_id(payload)
             if chapter_id is not None:
-                # 并行首写分支：经章节键控入口取（或代发）node_start，
-                # 子智能体事件先到时已代发过，这里复用不重复发。
+                # 并行分支（检索或首写）：经（节点, 章节）键控入口取（或代发）
+                # node_start，子智能体事件先到时已代发过，这里复用不重复发。
                 self._ensure_chapter_node_start(
+                    node,
                     chapter_id,
                     step=chunk.get("step"),
                     task_id=task_id if isinstance(task_id, str) else None,
@@ -318,12 +338,13 @@ class GraphRunEmitter:
 
     @staticmethod
     def _task_chapter_id(payload: dict[str, Any]) -> str | None:
-        """从 debug 任务载荷的 input 提取目标章 id（并行首写的 Send 任务态携带）。"""
+        """从 debug 任务载荷的 input 提取目标章 id（并行扇出的 Send 任务态携带）。"""
         task_input = payload.get("input")
         if isinstance(task_input, dict):
-            chapter_id = task_input.get("draft_chapter_id")
-            if isinstance(chapter_id, str):
-                return chapter_id
+            for key in ("draft_chapter_id", "reference_chapter_id"):
+                chapter_id = task_input.get(key)
+                if isinstance(chapter_id, str):
+                    return chapter_id
         return None
 
     def _handle_updates(self, chunk: Any) -> None:
@@ -372,7 +393,17 @@ class GraphRunEmitter:
             )
             self._snapshot["chapters_completed"] = len(self._completed_chapter_ids)
         if "citation_library" in update:
-            self._snapshot["material_count"] = len(update["citation_library"])
+            # 并行检索各分支的 update 只带单章素材：按素材 id 集合累积计数，
+            # 串行节点回写完整列表时并集不变，两种形态计数都正确。
+            self._material_ids.update(
+                material
+                if isinstance(material, str)
+                else material["id"]
+                if isinstance(material, dict)
+                else material.id
+                for material in update["citation_library"]
+            )
+            self._snapshot["material_count"] = len(self._material_ids)
         if "citation_warnings" in update:
             self._snapshot["citation_warning_count"] = len(update["citation_warnings"])
 

@@ -9,10 +9,10 @@
 
 ```
 framework_orchestrator → reference_orchestrator → chapter_drafter → writing_orchestrator → citation_validator → human_review_gate
-     论证框架生成              检索调度            并行首写（Send 扇出）    修订与回退串行总控        引文终审门禁          人工中断点与迭代路由
+     论证框架生成          并行检索（Send 扇出）   并行首写（Send 扇出）    修订与回退串行总控        引文终审门禁          人工中断点与迭代路由
 ```
 
-首写阶段由 chapter_drafter 经 `Send` 并行扇出：每个未写章节一个分支，各分支承接前章规划摘要链、只回写单章草稿；修订与终审回退仍由 writing_orchestrator 串行自环处理。
+检索与首写两段均经 `Send` 并行扇出：reference_orchestrator 每个待检索章节一个分支、只回写单章素材，引文库经合并 reducer 汇入并跨章按 URL 去重；chapter_drafter 每个未写章节一个分支，各分支承接前章规划摘要链、只回写单章草稿；修订与终审回退仍由 writing_orchestrator 串行自环处理。
 
 - 论证体系三层结构：章节 1—n 论点，论点 1—N 假说；假说可证伪、可检索验证，是检索任务的直接驱动源。
 - 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入；rewriter_loop 已为真实实现（写作、风格校验、自审、修一次），search_agent 仍为打桩。

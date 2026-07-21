@@ -1,6 +1,6 @@
 """chapter_drafter 主节点：首写阶段经 Send 并行扇出的单章首写。
 
-reference_orchestrator 后的条件边为每个未写章节各发一个 Send（见 graph.py），
+检索汇合节点 reference_join 后的条件边为每个未写章节各发一个 Send（见 graph.py），
 本节点每个并行分支只写一章：Send 载荷携带目标章 id 与装配所需的状态切片，
 产物经 chapter_drafts 的合并 reducer 汇入主状态并按超步落 checkpoint
 （ADR-0001 约束 1：崩溃重跑只损失进行中的分支），

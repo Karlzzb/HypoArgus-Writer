@@ -1,11 +1,12 @@
 """WritingAgentState 图状态定义与全局状态机枚举。
 
 层级关系（见 CONTEXT.md）：章节 1—n 论点，论点 1—N 假说。
-list 字段缺省采用整值覆盖语义；唯一例外是 chapter_drafts——
-首写阶段经 Send 并行扇出后各分支只回写单章草稿，该字段使用
-merge_chapter_drafts reducer 按 chapter_id 合并（同 id 替换、新 id 插入、
-按 ch 编号排序），串行路径整值覆盖在该语义下逐项等价。
-status 与 current_node_llm_config 使用 keep_last reducer：并行首写分支
+list 字段缺省采用整值覆盖语义；两个例外是并行扇出阶段各分支只回写单章
+产物的字段——chapter_drafts 使用 merge_chapter_drafts reducer 按 chapter_id
+合并（同 id 替换、新 id 插入、按 ch 编号排序），citation_library 使用
+merge_citation_library reducer 按素材 id 合并并跨章按 URL 去重；
+串行路径整值覆盖在两者语义下逐项等价。
+status 与 current_node_llm_config 使用 keep_last reducer：并行分支
 在同一超步写入相同值时不再触发 LastValue 冲突，串行语义不变。
 """
 
@@ -189,6 +190,34 @@ def merge_chapter_drafts(
     )
 
 
+def merge_citation_library(
+    existing: list[Material] | None, new: list[Material] | None
+) -> list[Material]:
+    """citation_library 的 reducer：按素材 id 合并，再按章排序并跨章按 URL 去重。
+
+    检索阶段经 Send 并行扇出后各分支只回写单章素材，合并语义：
+    同 id 新值替换、新 id 插入，结果按章节编号排序（章内保持插入顺序），
+    使并行分支的完成顺序不影响引文库顺序；同 URL 素材只保留章序最靠前的
+    一条（跨章去重从检索编排收敛到此处），url 为 None 的素材不参与去重。
+    修订轮增量检索回写完整列表时逐项同 id 替换，与旧的整值覆盖语义等价。
+    """
+    merged = {material.id: material for material in (existing or [])}
+    for material in new or []:
+        merged[material.id] = material
+    ordered = sorted(
+        merged.values(), key=lambda material: _chapter_order_key(material.chapter_id)
+    )
+    seen_urls: set[str] = set()
+    library: list[Material] = []
+    for material in ordered:
+        if material.url is not None:
+            if material.url in seen_urls:
+                continue
+            seen_urls.add(material.url)
+        library.append(material)
+    return library
+
+
 def keep_last(existing: object, new: object) -> object:
     """标量字段的 keep_last reducer：并行分支写入相同值时不冲突，串行语义同 LastValue。
 
@@ -213,9 +242,10 @@ class WritingAgentState(TypedDict, total=False):
     doc_variant: str | None
     """文种内变体（目前仅人才培养方案声明本科/高职）；无变体为 None，与文种同刻写入、只读。"""
     outline: list[ChapterSpec]
-    citation_library: list[Material]
+    citation_library: Annotated[list[Material], merge_citation_library]
+    """引文库：并行检索各分支只回写单章素材，经合并 reducer 汇入并跨章去重。"""
     chapter_drafts: Annotated[list[ChapterDraft], merge_chapter_drafts]
-    """章节草稿：唯一使用合并 reducer 的字段（并行首写各分支只回写单章）。"""
+    """章节草稿：并行首写各分支只回写单章草稿，经合并 reducer 汇入。"""
     revision_ledger: list[RevisionRound]
     pending_directives: list[RevisionDirective]
     """本轮待执行的修订指令；writing_orchestrator 执行完毕后清空。"""

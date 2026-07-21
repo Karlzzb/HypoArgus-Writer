@@ -573,8 +573,11 @@ def test_断点续跑_图运行中途死亡后resume续跑至中断点():
             and "reference_orchestrator" in (chunk["payload"].get("next") or [])
         ):
             break
-    # 死亡现场：最近检查点的待执行节点是 reference_orchestrator。
-    assert graph.get_state(config).next == ("reference_orchestrator",)
+    # 死亡现场：最近检查点的待执行任务是检索并行扇出的 2 个单章分支。
+    assert graph.get_state(config).next == (
+        "reference_orchestrator",
+        "reference_orchestrator",
+    )
 
     async def main() -> None:
         # 新进程只需剩余阶段的应答：2 章语义核查各一条。

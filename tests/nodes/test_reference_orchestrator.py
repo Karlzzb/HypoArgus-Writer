@@ -1,16 +1,22 @@
-"""reference_orchestrator 节点测试：用假适配器验证逐章调度与结构化引文库入库。
+"""reference_orchestrator 检索并行扇出测试：载荷切分与单章分支节点。
 
 假适配器记录收到的任务包并返回预置素材（含 verdict=fail 条目），
-覆盖调用次数与顺序、无假说章节跳过、素材回链、摘要递增与状态机推进。
+覆盖载荷切分（无假说跳过、已检索不重发、状态切片字段）、
+单章分支的任务包字段、素材回链、既有引文库摘要与状态机推进。
 """
 
 from typing import Any
 
-from nodes.reference_orchestrator import make_reference_orchestrator_node
+from nodes.reference_orchestrator import (
+    REFERENCE_CHAPTER_ID_KEY,
+    make_reference_orchestrator_node,
+    reference_send_payloads,
+)
 from domain.state import (
     ArgumentPoint,
     ChapterSpec,
     Hypothesis,
+    Material,
     WorkflowStatus,
     WritingAgentState,
 )
@@ -119,11 +125,56 @@ def _make_adapter() -> 假检索适配器:
     )
 
 
-def test_每章恰好一次调用且顺序与任务包字段正确():
+def _ch1_library_material() -> Material:
+    return Material(
+        id="m-ch1-p1-h1",
+        hypothesis_id="ch1-p1-h1",
+        chapter_id="ch1",
+        source="来源 m-ch1-p1-h1",
+        excerpt="摘录 m-ch1-p1-h1",
+        relevance_score=0.8,
+        verdict="pass",
+    )
+
+
+def test_载荷切分_有假说章节各一个且无假说章节跳过():
+    payloads = reference_send_payloads(_build_state())
+
+    assert [payload[REFERENCE_CHAPTER_ID_KEY] for payload in payloads] == [
+        "ch1",
+        "ch3",
+    ]
+
+
+def test_载荷切分_已有素材入库章节不重发():
+    state = _build_state()
+    state["citation_library"] = [_ch1_library_material()]
+
+    payloads = reference_send_payloads(state)
+
+    assert [payload[REFERENCE_CHAPTER_ID_KEY] for payload in payloads] == ["ch3"]
+
+
+def test_载荷只携带状态切片_大纲按目标章过滤且引文库整体携带():
+    state = _build_state()
+    state["citation_library"] = [_ch1_library_material()]
+
+    payloads = reference_send_payloads(state)
+
+    payload = payloads[0]
+    assert [chapter.id for chapter in payload["outline"]] == ["ch3"]
+    assert payload["citation_library"] == state["citation_library"]
+    assert payload["genre"] == "行业评论"
+    assert "chapter_drafts" not in payload
+
+
+def test_单章分支任务包字段与假说扁平列表正确():
     adapter = _make_adapter()
     node = make_reference_orchestrator_node(adapter)
+    payloads = reference_send_payloads(_build_state())
 
-    node(_build_state())
+    for payload in payloads:
+        node(payload)
 
     assert [task["chapter_id"] for task in adapter.tasks] == ["ch1", "ch3"]
     for task in adapter.tasks:
@@ -155,35 +206,31 @@ def test_每章恰好一次调用且顺序与任务包字段正确():
     ]
 
 
-def test_无假说章节被跳过不调用适配器():
+def test_单章分支素材入库回链假说与章节且fail素材保留():
     adapter = _make_adapter()
     node = make_reference_orchestrator_node(adapter)
+    payloads = reference_send_payloads(_build_state())
 
-    node(_build_state())
+    updates = [node(payload) for payload in payloads]
 
-    assert "ch2" not in {task["chapter_id"] for task in adapter.tasks}
-
-
-def test_素材入库回链假说与章节且fail素材保留():
-    adapter = _make_adapter()
-    node = make_reference_orchestrator_node(adapter)
-
-    update = node(_build_state())
-
-    library = update["citation_library"]
-    assert [material.id for material in library] == [
+    # 每个分支只回写目标章素材，跨分支合并交给 citation_library reducer。
+    assert [material.id for material in updates[0]["citation_library"]] == [
         "m-ch1-p1-h1",
         "m-ch1-p1-h2",
         "m-ch1-p2-h1",
-        "m-ch3-p1-h1",
     ]
-    by_id = {material.id for material in library}
-    assert "m-ch1-p1-h2" in by_id, "fail 素材也必须入库供后续环节筛选"
+    assert [material.id for material in updates[1]["citation_library"]] == [
+        "m-ch3-p1-h1"
+    ]
+    library = [
+        material for update in updates for material in update["citation_library"]
+    ]
+    by_material_id = {material.id: material for material in library}
+    assert "m-ch1-p1-h2" in by_material_id, "fail 素材也必须入库供后续环节筛选"
     for material in library:
         assert material.id == f"m-{material.hypothesis_id}"
         assert material.chapter_id == material.hypothesis_id.split("-")[0]
     # url 与 source_kind 从检索结果透传入库，不再硬编码。
-    by_material_id = {material.id: material for material in library}
     assert by_material_id["m-ch3-p1-h1"].url == "https://example.com/ch3"
     assert by_material_id["m-ch3-p1-h1"].source_kind == "web"
     assert by_material_id["m-ch1-p1-h1"].url is None
@@ -193,24 +240,39 @@ def test_素材入库回链假说与章节且fail素材保留():
     assert verdicts["m-ch1-p1-h1"] == "pass"
 
 
-def test_existing_materials_digest经引文库摘要段逐章反映增长():
+def test_existing_materials_digest只反映既有引文库():
+    adapter = _make_adapter()
+    node = make_reference_orchestrator_node(adapter)
+    state = _build_state()
+    state["citation_library"] = [_ch1_library_material()]
+
+    for payload in reference_send_payloads(state):
+        node(payload)
+
+    # 语义降档：digest 是扇出前既有引文库的快照，不再逐章反映轮内增长。
+    assert [task["existing_materials_digest"] for task in adapter.tasks] == [
+        "引文库共 1 条素材。\n章节 ch1：通过 1 条，未通过 0 条"
+    ]
+
+
+def test_首轮空引文库时digest为零条素材():
     adapter = _make_adapter()
     node = make_reference_orchestrator_node(adapter)
 
-    node(_build_state())
+    for payload in reference_send_payloads(_build_state()):
+        node(payload)
 
-    digests = [task["existing_materials_digest"] for task in adapter.tasks]
-    # digest 改由 citation_digest 段装配：ch1 调用前引文库为空；
-    # ch3 调用前已累积 ch1 返回的 3 条素材（2 通过 1 未通过，均属 ch1）。
-    assert digests[0] == "引文库共 0 条素材。"
-    assert digests[1] == "引文库共 3 条素材。\n章节 ch1：通过 2 条，未通过 1 条"
+    assert {task["existing_materials_digest"] for task in adapter.tasks} == {
+        "引文库共 0 条素材。"
+    }
 
 
 def test_状态机推进到REFERENCE_FETCHING且记录节点配置():
     adapter = _make_adapter()
     node = make_reference_orchestrator_node(adapter)
+    payload = reference_send_payloads(_build_state())[0]
 
-    update = node(_build_state())
+    update = node(payload)
 
     assert update["status"] == WorkflowStatus.REFERENCE_FETCHING
     assert update["current_node_llm_config"] == {"unit": "reference_orchestrator"}

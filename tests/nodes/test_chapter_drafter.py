@@ -19,7 +19,7 @@ from domain.state import (
     WorkflowStatus,
     WritingAgentState,
 )
-from graph import route_after_reference_orchestrator
+from graph import route_after_reference_join
 from nodes.chapter_drafter import (
     DRAFT_CHAPTER_ID_KEY,
     draft_send_payloads,
@@ -102,7 +102,7 @@ def test_载荷构造_已写章节不再扇出():
 
 
 def test_路由_未写章节扇出Send_全部已写直进终审():
-    routed = route_after_reference_orchestrator(_state())
+    routed = route_after_reference_join(_state())
     assert isinstance(routed, list)
     assert all(isinstance(send, Send) for send in routed)
     assert [send.node for send in routed] == ["chapter_drafter", "chapter_drafter"]
@@ -112,7 +112,7 @@ def test_路由_未写章节扇出Send_全部已写直进终审():
         ChapterDraft(chapter_id="ch1", text="a", summary="s"),
         ChapterDraft(chapter_id="ch2", text="b", summary="s"),
     ]
-    assert route_after_reference_orchestrator(state) == "citation_validator"
+    assert route_after_reference_join(state) == "citation_validator"
 
 
 def test_节点单分支_任务包承接规划摘要链且只回写reducer字段():

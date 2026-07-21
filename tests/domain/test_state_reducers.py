@@ -1,10 +1,31 @@
-"""chapter_drafts 合并 reducer 与 keep_last reducer 的语义测试。"""
+"""chapter_drafts / citation_library 合并 reducer 与 keep_last reducer 的语义测试。"""
 
-from domain.state import ChapterDraft, keep_last, merge_chapter_drafts
+from domain.state import (
+    ChapterDraft,
+    Material,
+    keep_last,
+    merge_chapter_drafts,
+    merge_citation_library,
+)
 
 
 def _draft(chapter_id: str, text: str = "正文") -> ChapterDraft:
     return ChapterDraft(chapter_id=chapter_id, text=text, summary=f"{chapter_id}摘要")
+
+
+def _material(
+    mat_id: str, chapter_id: str, url: str | None = None, excerpt: str = "摘录"
+) -> Material:
+    return Material(
+        id=mat_id,
+        hypothesis_id=f"{chapter_id}-p1-h1",
+        chapter_id=chapter_id,
+        source=f"来源 {mat_id}",
+        url=url,
+        excerpt=excerpt,
+        relevance_score=0.8,
+        verdict="pass",
+    )
 
 
 def test_同id替换_新id插入() -> None:
@@ -46,3 +67,52 @@ def test_非ch形态id靠后按字典序稳定排序() -> None:
 
 def test_keep_last_取最后写入值() -> None:
     assert keep_last("旧", "新") == "新"
+
+
+def test_引文库同id替换_新id插入且按章排序() -> None:
+    existing = [_material("m1", "ch1", excerpt="旧"), _material("m2", "ch2")]
+    merged = merge_citation_library(
+        existing, [_material("m1", "ch1", excerpt="新"), _material("m3", "ch3")]
+    )
+    assert [material.id for material in merged] == ["m1", "m2", "m3"]
+    assert merged[0].excerpt == "新"
+
+
+def test_引文库并行分支到达顺序不影响结果() -> None:
+    ch1_mats = [_material("m1a", "ch1"), _material("m1b", "ch1")]
+    ch2_mats = [_material("m2a", "ch2")]
+    先一后二 = merge_citation_library(merge_citation_library([], ch1_mats), ch2_mats)
+    先二后一 = merge_citation_library(merge_citation_library([], ch2_mats), ch1_mats)
+    assert 先一后二 == 先二后一
+    assert [material.id for material in 先一后二] == ["m1a", "m1b", "m2a"]
+
+
+def test_引文库跨章按URL去重保留前章条目() -> None:
+    url = "https://example.com/shared"
+    ch1_mats = [_material("m1", "ch1", url=url)]
+    ch3_mats = [_material("m3", "ch3", url=url)]
+    # 无论分支到达顺序，同 URL 只保留章序靠前的条目。
+    for first, second in ((ch1_mats, ch3_mats), (ch3_mats, ch1_mats)):
+        merged = merge_citation_library(merge_citation_library([], first), second)
+        assert [material.id for material in merged] == ["m1"]
+
+
+def test_引文库url为None不参与去重() -> None:
+    merged = merge_citation_library(
+        [], [_material("m1", "ch1", url=None), _material("m2", "ch2", url=None)]
+    )
+    assert [material.id for material in merged] == ["m1", "m2"]
+
+
+def test_引文库整值覆盖回写在合并语义下等价() -> None:
+    # 修订轮增量检索路径回写完整列表：既有条目逐项同 id 替换、新条目插入。
+    existing = [_material("m1", "ch1"), _material("m2", "ch2")]
+    full_rewrite = [_material("m1", "ch1"), _material("m2", "ch2"), _material("m2b", "ch2")]
+    merged = merge_citation_library(existing, full_rewrite)
+    assert [material.id for material in merged] == ["m1", "m2", "m2b"]
+
+
+def test_引文库空值与None入参安全() -> None:
+    assert merge_citation_library(None, None) == []
+    assert merge_citation_library(None, [_material("m1", "ch1")])[0].id == "m1"
+    assert merge_citation_library([_material("m1", "ch1")], None)[0].id == "m1"

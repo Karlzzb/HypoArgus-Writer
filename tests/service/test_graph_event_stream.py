@@ -338,6 +338,77 @@ def test_合成流块_子智能体progress无前置start时挂根事件():
     assert progress.payload["step"] == "warmup"
 
 
+def test_合成流块_检索子智能体事件先到时代发检索分支node_start并复用():
+    events: list[EventEnvelope] = []
+    emitter = _make_emitter(events)
+    emitter.emit_root(type="progress", unit="graph", payload={})
+    hook = emitter.make_subagent_hook()
+
+    # 并行检索分支：子智能体事件在执行器线程先于 debug 任务块到达。
+    hook(SUBAGENT_START, {"unit": "search_agent", "chapter_id": "ch1", "mode": None})
+    chunk = _task_chunk("reference_orchestrator", 2)
+    chunk["payload"]["input"] = {"reference_chapter_id": "ch1"}
+    emitter.handle("debug", chunk)
+    hook(SUBAGENT_END, {"unit": "search_agent", "chapter_id": "ch1", "mode": None})
+    emitter.handle("debug", _task_result_chunk("reference_orchestrator", 2))
+
+    node_starts = [event for event in events if event.type == "node_start"]
+    # 代发的分支 node_start 唯一：真实任务块到达时复用不重复发。
+    assert len(node_starts) == 1
+    assert node_starts[0].unit == "reference_orchestrator"
+    assert node_starts[0].payload["chapter_id"] == "ch1"
+    start = next(event for event in events if event.type == "subagent_start")
+    end = next(event for event in events if event.type == "subagent_end")
+    node_end = next(event for event in events if event.type == "node_end")
+    assert start.parent_id == node_starts[0].event_id
+    assert end.parent_id == start.event_id
+    # node_end 按 task id 配对到代发的 node_start。
+    assert node_end.parent_id == node_starts[0].event_id
+
+
+def test_合成流块_并行检索单章更新按素材id累积material_count():
+    events: list[EventEnvelope] = []
+    emitter = _make_emitter(events)
+    emitter.emit_root(type="progress", unit="graph", payload={})
+
+    # 两个检索分支各回写单章素材列表：计数按 id 集合累积而非单次长度。
+    emitter.handle(
+        "updates",
+        {
+            "reference_orchestrator": {
+                "status": WorkflowStatus.REFERENCE_FETCHING,
+                "citation_library": [{"id": "m-ch1-a"}, {"id": "m-ch1-b"}],
+            }
+        },
+    )
+    emitter.handle(
+        "updates",
+        {
+            "reference_orchestrator": {
+                "status": WorkflowStatus.REFERENCE_FETCHING,
+                "citation_library": [{"id": "m-ch2-a"}],
+            }
+        },
+    )
+    # 串行节点回写完整列表（修订轮增量检索）：并集不变，计数不回退。
+    emitter.handle(
+        "updates",
+        {
+            "writing_orchestrator": {
+                "status": WorkflowStatus.ARTICLE_WRITING,
+                "citation_library": [
+                    {"id": "m-ch1-a"},
+                    {"id": "m-ch1-b"},
+                    {"id": "m-ch2-a"},
+                ],
+            }
+        },
+    )
+
+    snapshots = [event for event in events if event.type == "state_snapshot"]
+    assert [snapshot.payload["material_count"] for snapshot in snapshots] == [2, 3, 3]
+
+
 def _run_first_pass(events: list[EventEnvelope]):
     """真图首跑到人工中断点：返回（graph, config, emitter）。"""
     fake = FakeLLM(
@@ -421,7 +492,8 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
         "citation_validator",
         "human_review_gate",
     }
-    # 2 章并行扇出：chapter_drafter 恰好两个任务。
+    # 2 章并行扇出：检索与首写两段各恰好两个任务。
+    assert len(node_start_ids["reference_orchestrator"]) == 2
     assert len(node_start_ids["chapter_drafter"]) == 2
     for event in events:
         if event.type == "node_start":
@@ -450,21 +522,24 @@ def test_真图集成_子智能体事件成对且挂当前节点():
     assert len(starts) == len(ends) == 4
     assert {event.unit for event in starts} == {"search_agent", "rewriter_loop"}
 
-    # subagent_start 挂当前主节点的某条 node_start；
-    # 并行首写下每章的 rewriter_loop 精确挂到本章 chapter_drafter 分支的
-    # node_start（按 node_start 载荷里的 chapter_id 配对，跨线程到达顺序无关）。
-    chapter_start_by_id = {
-        event.payload["chapter_id"]: event.event_id
+    # 并行扇出下每章的子智能体精确挂到本章所属分支的 node_start
+    #（按 node_start 载荷里的 chapter_id 配对，跨线程到达顺序无关）：
+    # search_agent 挂检索分支，draft 模式的 rewriter_loop 挂首写分支。
+    branch_start_by_key = {
+        (event.unit, event.payload["chapter_id"]): event.event_id
         for event in events
-        if event.type == "node_start" and event.unit == "chapter_drafter"
+        if event.type == "node_start"
+        and event.unit in {"reference_orchestrator", "chapter_drafter"}
     }
     for event in starts:
-        if event.unit == "search_agent":
-            assert event.parent_id in node_start_ids["reference_orchestrator"]
-        else:
-            assert event.parent_id == chapter_start_by_id[
-                event.payload["chapter_id"]
-            ]
+        branch_node = (
+            "reference_orchestrator"
+            if event.unit == "search_agent"
+            else "chapter_drafter"
+        )
+        assert event.parent_id == branch_start_by_key[
+            (branch_node, event.payload["chapter_id"])
+        ]
 
     # subagent_end 挂对应的 subagent_start：按单元名配对顺序逐一对应。
     start_ids = {event.event_id for event in starts}
