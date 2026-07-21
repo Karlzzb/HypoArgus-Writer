@@ -38,11 +38,19 @@ def _hypothesis(hyp_id: str) -> Hypothesis:
     )
 
 
-def _material(mat_id: str, hyp_id: str, verdict: str = "pass") -> dict[str, Any]:
+def _material(
+    mat_id: str,
+    hyp_id: str,
+    verdict: str = "pass",
+    url: str | None = None,
+    source_kind: str = "knowledge_base",
+) -> dict[str, Any]:
     return {
         "id": mat_id,
         "hypothesis_id": hyp_id,
         "source": f"来源 {mat_id}",
+        "url": url,
+        "source_kind": source_kind,
         "excerpt": f"摘录 {mat_id}",
         "relevance_score": 0.8,
         "verdict": verdict,
@@ -99,7 +107,14 @@ def _make_adapter() -> 假检索适配器:
                 _material("m-ch1-p1-h2", "ch1-p1-h2", verdict="fail"),
                 _material("m-ch1-p2-h1", "ch1-p2-h1"),
             ],
-            "ch3": [_material("m-ch3-p1-h1", "ch3-p1-h1")],
+            "ch3": [
+                _material(
+                    "m-ch3-p1-h1",
+                    "ch3-p1-h1",
+                    url="https://example.com/ch3",
+                    source_kind="web",
+                )
+            ],
         }
     )
 
@@ -165,9 +180,14 @@ def test_素材入库回链假说与章节且fail素材保留():
     by_id = {material.id for material in library}
     assert "m-ch1-p1-h2" in by_id, "fail 素材也必须入库供后续环节筛选"
     for material in library:
-        assert material.url is None
         assert material.id == f"m-{material.hypothesis_id}"
         assert material.chapter_id == material.hypothesis_id.split("-")[0]
+    # url 与 source_kind 从检索结果透传入库，不再硬编码。
+    by_material_id = {material.id: material for material in library}
+    assert by_material_id["m-ch3-p1-h1"].url == "https://example.com/ch3"
+    assert by_material_id["m-ch3-p1-h1"].source_kind == "web"
+    assert by_material_id["m-ch1-p1-h1"].url is None
+    assert by_material_id["m-ch1-p1-h1"].source_kind == "knowledge_base"
     verdicts = {material.id: material.verdict for material in library}
     assert verdicts["m-ch1-p1-h2"] == "fail"
     assert verdicts["m-ch1-p1-h1"] == "pass"

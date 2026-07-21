@@ -297,6 +297,8 @@ def _new_material(mat_id: str, hypothesis_id: str) -> MaterialPayload:
         id=mat_id,
         hypothesis_id=hypothesis_id,
         source=f"增量来源 {mat_id}",
+        url=f"https://example.com/{mat_id}",
+        source_kind="web",
         excerpt=f"增量摘录 {mat_id}",
         relevance_score=0.9,
         verdict="pass",
@@ -427,6 +429,9 @@ def test_增量素材入库与去重():
     assert added.chapter_id == "ch2"
     assert added.hypothesis_id == "ch2-p1-h2"
     assert added.source == "增量来源 m-new"
+    # url 与 source_kind 从检索结果透传入库，不再硬编码。
+    assert added.url == "https://example.com/m-new"
+    assert added.source_kind == "web"
 
 
 def _make_fallback_state(failed_chapter_ids: list[str]) -> WritingAgentState:

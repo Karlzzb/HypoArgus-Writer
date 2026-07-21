@@ -27,6 +27,8 @@
       "id": "m-h-1",
       "hypothesis_id": "h-1",
       "source": "来源一",
+      "url": "https://example.com/m-h-1",
+      "source_kind": "web",
       "excerpt": "摘录一",
       "relevance_score": 0.9,
       "verdict": "pass"
@@ -35,6 +37,8 @@
       "id": "m-h-2",
       "hypothesis_id": "h-2",
       "source": "来源二",
+      "url": null,
+      "source_kind": "knowledge_base",
       "excerpt": "摘录二",
       "relevance_score": 0.8,
       "verdict": "pass"
@@ -43,6 +47,8 @@
       "id": "m-fail-x",
       "hypothesis_id": "h-2",
       "source": "来源三",
+      "url": null,
+      "source_kind": "structured_data",
       "excerpt": "摘录三",
       "relevance_score": 0.1,
       "verdict": "fail"

@@ -9,16 +9,27 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from domain.citation_reconciler import MARKER_PATTERN
-from domain.state import ChapterDraft, Material
+from domain.state import ChapterDraft, Material, SourceKind
 
 EntryRenderer = Callable[[int, Material], str]
 """条目渲染器：（序号，素材）→ 单条书目文本。"""
 
 
+# GB/T 7714—2015 表 1 文献类型标识按来源通道选取：联网来源是在线电子公告
+# [EB/OL]、知识库来源是在线数据库 [DB/OL]、结构化数据来源是数据集 [DS]。
+# 键类型收紧到 SourceKind：新增通道漏配码表在类型检查期暴露。
+_GBT7714_TYPE_CODES: dict[SourceKind, str] = {
+    "web": "EB/OL",
+    "knowledge_base": "DB/OL",
+    "structured_data": "DS",
+}
+
+
 def _render_gbt7714(index: int, material: Material) -> str:
-    """GB/T 7714 风格：[序号] 来源[EB/OL]. 链接."""
+    """GB/T 7714 风格：[序号] 来源[类型标识]. 链接."""
+    type_code = _GBT7714_TYPE_CODES[material.source_kind]
     link = f" {material.url}." if material.url else ""
-    return f"[{index}] {material.source}[EB/OL].{link}"
+    return f"[{index}] {material.source}[{type_code}].{link}"
 
 
 def _render_apa(index: int, material: Material) -> str:

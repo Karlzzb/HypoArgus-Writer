@@ -13,7 +13,12 @@ from typing import Protocol
 from assembly.assembler_config import AssemblerConfig
 from assembly.context_assembler import assemble_with
 from domain.state import ChapterSpec, Material, WorkflowStatus, WritingAgentState
-from agents.contracts import HypothesisPayload, SearchTask, Subagent
+from agents.contracts import (
+    HypothesisPayload,
+    SearchTask,
+    Subagent,
+    material_from_payload,
+)
 
 
 class ReferenceOrchestratorNode(Protocol):
@@ -70,18 +75,7 @@ def make_reference_orchestrator_node(
             )
             result = await search_agent.run(dict(task))
             for material in result["materials"]:
-                library.append(
-                    Material(
-                        id=material["id"],
-                        hypothesis_id=material["hypothesis_id"],
-                        chapter_id=chapter.id,
-                        source=material["source"],
-                        url=None,
-                        excerpt=material["excerpt"],
-                        relevance_score=material["relevance_score"],
-                        verdict=material["verdict"],
-                    )
-                )
+                library.append(material_from_payload(material, chapter.id))
         return library
 
     def node(state: WritingAgentState) -> WritingAgentState:

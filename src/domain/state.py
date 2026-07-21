@@ -75,6 +75,10 @@ class ChapterSpec(BaseModel):
     LLM 应答缺失时由程序从标题与论点确定性兜底，默认空串兼容旧 checkpoint。"""
 
 
+SourceKind = Literal["web", "knowledge_base", "structured_data"]
+"""素材来源通道：联网搜索 / 知识库 / 结构化数据，三条检索通道各占一值。"""
+
+
 class Material(BaseModel):
     """结构化引文库条目：正文只嵌其 id 作为轻量角标。"""
 
@@ -83,6 +87,9 @@ class Material(BaseModel):
     chapter_id: str
     source: str
     url: str | None = None
+    source_kind: SourceKind = "web"
+    """来源通道：驱动书目渲染的类型标识；
+    默认 web 兼容旧 checkpoint（与既有条目全按联网来源渲染的行为一致）。"""
     excerpt: str
     relevance_score: float
     verdict: Literal["pass", "fail"]

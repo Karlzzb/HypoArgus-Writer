@@ -43,6 +43,7 @@ def _sample_objects() -> list[object]:
             chapter_id="ch1",
             source="来源",
             url=None,
+            source_kind="knowledge_base",
             excerpt="摘录",
             relevance_score=0.9,
             verdict="pass",

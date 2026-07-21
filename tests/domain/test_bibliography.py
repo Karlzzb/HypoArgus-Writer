@@ -3,16 +3,22 @@
 import pytest
 
 from domain.bibliography import SUPPORTED_FORMATS, render_article
-from domain.state import ChapterDraft, Material
+from domain.state import ChapterDraft, Material, SourceKind
 
 
-def _material(material_id: str, chapter_id: str, url: str | None) -> Material:
+def _material(
+    material_id: str,
+    chapter_id: str,
+    url: str | None,
+    source_kind: SourceKind = "web",
+) -> Material:
     return Material(
         id=material_id,
         hypothesis_id=f"h-{material_id}",
         chapter_id=chapter_id,
         source=f"来源{material_id}",
         url=url,
+        source_kind=source_kind,
         excerpt="摘录",
         relevance_score=0.9,
         verdict="pass",
@@ -58,6 +64,20 @@ def test_三种内置格式渲染同一引文库产出不同文本():
         assert "来源m2" in entries[0]
         assert "https://example.com/1" in entries[1]
     assert len({entries[1] for entries in texts.values()}) == 3
+
+
+def test_gbt7714按来源通道输出类型标识():
+    """联网 [EB/OL]、知识库 [DB/OL]、结构化数据 [DS]，联网来源带真实链接位。"""
+    library = [
+        _material("mw", "ch1", "https://example.com/w", source_kind="web"),
+        _material("mk", "ch1", None, source_kind="knowledge_base"),
+        _material("ms", "ch1", None, source_kind="structured_data"),
+    ]
+    drafts = [ChapterDraft(chapter_id="ch1", text="甲[mw]乙[mk]丙[ms]。", summary="s")]
+    rendered = render_article(drafts, library, "gbt7714")
+    assert rendered.entries[0].text == "[1] 来源mw[EB/OL]. https://example.com/w."
+    assert rendered.entries[1].text == "[2] 来源mk[DB/OL]."
+    assert rendered.entries[2].text == "[3] 来源ms[DS]."
 
 
 def test_gbt7714条目带方括号序号_markdown条目为有序列表():

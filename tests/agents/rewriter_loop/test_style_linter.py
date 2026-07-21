@@ -43,6 +43,8 @@ def _material(
         "id": material_id,
         "hypothesis_id": hypothesis_id,
         "source": "来源一",
+        "url": None,
+        "source_kind": "knowledge_base",
         "excerpt": excerpt,
         "relevance_score": 0.9,
         "verdict": "pass",

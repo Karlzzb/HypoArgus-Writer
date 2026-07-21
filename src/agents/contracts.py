@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
 from domain.events import SUBAGENT_END, SUBAGENT_START, EventHook, noop_hook
+from domain.state import Material, SourceKind
 
 
 class HypothesisPayload(TypedDict):
@@ -25,9 +26,30 @@ class MaterialPayload(TypedDict):
     id: str
     hypothesis_id: str
     source: str
+    url: str | None
+    """来源链接：联网来源必带真实链接，知识库与结构化来源可为 None。"""
+    source_kind: SourceKind
     excerpt: str
     relevance_score: float
     verdict: Literal["pass", "fail"]
+
+
+def material_from_payload(payload: MaterialPayload, chapter_id: str) -> Material:
+    """检索结果素材条目转结构化引文库条目：契约到 State 的唯一映射点。
+
+    chapter_id 由编排方按当前检索章节补齐（契约条目只回链假说，不带章节）。
+    """
+    return Material(
+        id=payload["id"],
+        hypothesis_id=payload["hypothesis_id"],
+        chapter_id=chapter_id,
+        source=payload["source"],
+        url=payload["url"],
+        source_kind=payload["source_kind"],
+        excerpt=payload["excerpt"],
+        relevance_score=payload["relevance_score"],
+        verdict=payload["verdict"],
+    )
 
 
 class SearchTask(TypedDict):
