@@ -1,7 +1,7 @@
 """事件信封：graph_event 可视化通道的统一事件封装。
 
-信封字段与事件类型枚举来自 PRD「对外服务与事件流」一节，字段即决策。
-事件信封只携带元数据与轻量载荷，正文全文绝不入信封（state_snapshot 约束见 PRD）。
+信封字段与事件类型枚举为设计定稿（字段即决策），对外契约见 docs/api.md。
+事件信封只携带元数据与轻量载荷，正文全文绝不入信封（state_snapshot 同受此约束）。
 """
 
 from __future__ import annotations

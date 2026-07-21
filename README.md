@@ -1,16 +1,18 @@
 # HypoArgus-Writer
 
 纯 LangGraph 单一技术栈的工业级结构化写作后端服务，只提供后端能力，不含前端页面。
-项目唯一有效 PRD 见 `PRD.md`；领域术语以 `CONTEXT.md` 词汇表为准。
+立项需求存档见 `docs/prd-archive.md`；领域术语以 `CONTEXT.md` 词汇表为准。
 
 ## 架构总览
 
-由 5 个 LangGraph 主节点组成固定顺序流水线，构成迭代闭环：
+由 6 个 LangGraph 主节点组成主路径流水线，构成迭代闭环：
 
 ```
-framework_orchestrator → reference_orchestrator → writing_orchestrator → citation_validator → human_review_gate
-     论证框架生成              检索调度                串行写作总控            引文终审门禁          人工中断点与迭代路由
+framework_orchestrator → reference_orchestrator → chapter_drafter → writing_orchestrator → citation_validator → human_review_gate
+     论证框架生成              检索调度            并行首写（Send 扇出）    修订与回退串行总控        引文终审门禁          人工中断点与迭代路由
 ```
+
+首写阶段由 chapter_drafter 经 `Send` 并行扇出：每个未写章节一个分支，各分支承接前章规划摘要链、只回写单章草稿；修订与终审回退仍由 writing_orchestrator 串行自环处理。
 
 - 论证体系三层结构：章节 1—n 论点，论点 1—N 假说；假说可证伪、可检索验证，是检索任务的直接驱动源。
 - 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入；rewriter_loop 已为真实实现（写作、风格校验、自审、修一次），search_agent 仍为打桩。
@@ -37,14 +39,14 @@ cp .env.example .env          # 按下文约定填写
 
 ### LLM 配置（单元前缀 + 全局回落）
 
-全部 7 个运行单元支持独立配置，未配置项逐字段回落无前缀的全局缺省变量。
+全部 8 个运行单元支持独立配置，未配置项逐字段回落无前缀的全局缺省变量。
 
 | 变量 | 说明 |
 | --- | --- |
 | `LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY` | 全局缺省，必填 |
 | `<单元前缀>_LLM_MODEL` 等三项 | 单元独立配置，可选 |
 
-单元前缀共 7 个：`FRAMEWORK_ORCHESTRATOR`、`REFERENCE_ORCHESTRATOR`、`WRITING_ORCHESTRATOR`、`CITATION_VALIDATOR`、`HUMAN_REVIEW_GATE`、`SEARCH_AGENT`、`REWRITER_LOOP`。
+单元前缀共 8 个：`FRAMEWORK_ORCHESTRATOR`、`REFERENCE_ORCHESTRATOR`、`CHAPTER_DRAFTER`、`WRITING_ORCHESTRATOR`、`CITATION_VALIDATOR`、`HUMAN_REVIEW_GATE`、`SEARCH_AGENT`、`REWRITER_LOOP`。
 所有模型统一按 OpenAI 兼容接口封装，`base_url` 止于兼容根路径（不要带 `/chat/completions`）。
 
 ### 持久化与可观测
@@ -64,6 +66,9 @@ cp .env.example .env          # 按下文约定填写
 | `FRAMEWORK_MAX_HYPOTHESES_PER_POINT` | 3 | 每论点假说数上限 |
 | `FRAMEWORK_MAX_HYPOTHESES_TOTAL` | 60 | 全文假说总数上限 |
 | `CITATION_MAX_RETRIES` | 2 | 引文终审失败重试上限，超限带警告交人工裁决 |
+| `GRAPH_MAX_CONCURRENCY` | 4 | 图级并行分支上限（首写阶段 Send 扇出的并发度） |
+| `FRAMEWORK_MAX_CONCURRENT_CHAPTERS` | 4 | 论证框架论点假说生成的章节级 LLM 并发上限 |
+| `CITATION_MAX_CONCURRENT_CHAPTERS` | 4 | 引文语义核查的章节级 LLM 并发上限 |
 | `ASSEMBLER_*` | 见 `.env.example` | 上下文装配压缩阈值与保留策略 |
 
 ## 启动方式
@@ -104,12 +109,12 @@ python scripts/demo.py --real    # 与生产一致的演示：真实 LLM + Postg
 - `LANGFUSE_PUBLIC_KEY` 与 `LANGFUSE_SECRET_KEY` 齐备即启用；未配置时完全无副作用。
 - 启用与否在服务启动（构图）时确定，修改 Langfuse 配置后需重启服务。
 - 每次图运行一条 trace，关联 `thread_id` / `session_id` / `execution_trace_id`。
-- trace 覆盖全部 7 个运行单元：5 个主节点为 `node:*` span，2 个子智能体为 `subagent:*` span，每次 LLM 调用自动上报 generation（输入输出、token 用量、耗时、成本）。
+- trace 覆盖全部 8 个运行单元：6 个主节点为 `node:*` span，2 个子智能体为 `subagent:*` span，每次 LLM 调用自动上报 generation（输入输出、token 用量、耗时、成本）。
 - 人工中断点的正常中断不会被标记为错误 span。
 
 ## ulmen 压缩 serde 实验结论：不启用
 
-PRD 约定 ulmen-langgraph 压缩仅作为实验性可选序列化器接入检查点保存器，且「关闭开关后历史检查点必须仍可读取，做不到则不启用」。
+立项约定 ulmen-langgraph 压缩仅作为实验性可选序列化器接入检查点保存器，且「关闭开关后历史检查点必须仍可读取，做不到则不启用」。
 实验结论（`tests/e2e/test_ulmen_serde_experiment.py` 固化为回归证据）：
 
 - 正向兼容成立：开启压缩后可以读取此前未压缩写入的历史存档。
@@ -131,8 +136,8 @@ python -m mypy src      # 类型检查
 
 ## 文档
 
-- `PRD.md` — 唯一有效产品需求文档。
 - `CONTEXT.md` — 领域词汇表，全部文档与注释使用平实中文术语。
+- `docs/prd-archive.md` — 立项需求存档（问题陈述、用户故事、范围外），不描述实现现状。
 - `docs/development.md` — 开发者入门与日常开发指引。
 - `docs/api.md` — 对外 REST + SSE 接口契约（含 Java 端对接示例）。
 - `docs/deployment.md` — 面向运维人员的简明部署文档（含国内网络下的安装渠道建议）。

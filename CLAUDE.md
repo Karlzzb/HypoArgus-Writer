@@ -1,7 +1,7 @@
 # HypoArgus-Writer
 
 纯 LangGraph 单一技术栈的工业级结构化写作后端服务。
-项目唯一有效 PRD 见根目录 `PRD.md`；领域术语以 `CONTEXT.md` 词汇表为准。
+实现现状以 `README.md` 与 `docs/` 为准，架构决策以 `docs/adr/` 为准，立项需求存档见 `docs/prd-archive.md`；领域术语以 `CONTEXT.md` 词汇表为准。
 全部文档与注释使用平实中文术语。
 
 ## Agent skills

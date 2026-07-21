@@ -2,7 +2,7 @@
 
 调用形态为黑盒异步可调用，不强制改造为 LangGraph 子图；
 编排节点只依赖本模块的 Subagent 协议，不关心真实现或打桩。
-任务包与结果的字段规范来自设计定稿（字段即决策），见 PRD「子智能体接入」。
+任务包与结果的字段规范以本文件为唯一事实源（字段即决策）。
 """
 
 from collections.abc import Awaitable, Callable

@@ -6,11 +6,11 @@
 未启用时本模块所有入口都是直通实现：不建客户端、不发网络请求、
 不改变任何行为，测试与本地开发无需 Langfuse 设施。
 
-覆盖面对齐 PRD「全部 7 个运行单元」：
+覆盖全部运行单元（名册见 domain/units.py）：
 - 每次图运行一条 trace：task_service 在工作线程内用 run_span 包住整次
   stream 驱动，trace 关联 thread_id / session_id / execution_trace_id；
-- 5 个主节点：graph 构图时用 traced_node 包装节点函数，成为 trace 下的 span；
-- 2 个子智能体：适配层调用被 wrap_subagent 包住，发 subagent 级 span；
+- 主节点：graph 构图时用 traced_node 包装节点函数，成为 trace 下的 span；
+- 子智能体：适配层调用被 wrap_subagent 包住，发 subagent 级 span；
 - LLM 调用本身：llm_client 在启用时改用 langfuse.openai 官方插桩客户端，
   每次调用自动上报 generation（输入输出、token 用量、耗时、成本），
   并嵌套在所属节点 span 之下，由此定位到运行单元。
