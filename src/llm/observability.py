@@ -153,6 +153,18 @@ def traced_node(unit: str, fn: Any) -> Any:
     return wrapper
 
 
+def update_current_span_metadata(metadata: dict[str, Any]) -> None:
+    """把诊断元数据合入当前观测 span（如子智能体 span）；未启用时零开销直通。
+
+    子智能体真实现在 run 内调用本函数，把引擎回带的全量诊断计数/耗时
+    挂到 wrap_subagent 已开的 ``subagent:<unit>`` span 上。
+    """
+    client = _get_client()
+    if client is None:
+        return
+    client.update_current_span(metadata=metadata)
+
+
 def wrap_subagent(subagent: "Subagent") -> "Subagent":
     """把子智能体适配层包进单元 span；未启用时原样返回。"""
     if not langfuse_enabled():

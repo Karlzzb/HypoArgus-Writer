@@ -17,10 +17,27 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 
-class SearchAgentRuntimeSeam(Protocol):
-    """引擎运行时边界协议：引擎公开入参 dict 进、公开出参 dict 出。"""
+EngineEventHook = Callable[[str, dict[str, Any]], None]
+"""引擎事件回调：(引擎事件名, 已消毒载荷)；SafeTraceEmitter 按可调用分派。
 
-    async def retrieve(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+进度事件带 ``progress.`` 前缀，其余为引擎诊断事件（pair.consistency、
+parallel.finalize 等）；翻译与过滤是适配层桥的职责，运行时只负责透传。
+"""
+
+
+class SearchAgentRuntimeSeam(Protocol):
+    """引擎运行时边界协议：引擎公开入参 dict 进，（公开出参, 诊断出参）出。
+
+    诊断出参与引擎批处理诊断同形（含 ``flow_metrics`` 键），只在运行时
+    边界内传出供可观测接入，不进入检索结果契约。
+    """
+
+    async def retrieve(
+        self,
+        payload: dict[str, Any],
+        *,
+        on_engine_event: EngineEventHook | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
 
 
 def ambient_callbacks() -> list[Any]:
@@ -36,7 +53,7 @@ def ambient_callbacks() -> list[Any]:
 
 async def _invoke_engine_once(
     payload: dict[str, Any], callbacks: list[Any]
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """构建一次性引擎运行时并调用：编图 → 调用 → 关闭，任何失败向上抛。
 
     显式传入回调列表（含空列表）即宿主管理模式：引擎不再自动挂载
@@ -46,7 +63,7 @@ async def _invoke_engine_once(
 
     runtime = SearchAgentRuntime.from_env(callbacks=callbacks)
     try:
-        return await runtime.ainvoke(payload)
+        return await runtime.ainvoke_with_diagnostics(payload)
     finally:
         await runtime.aclose()
 
@@ -60,20 +77,32 @@ class EngineRuntime:
     def __init__(
         self,
         invoke: Callable[
-            [dict[str, Any], list[Any]], Awaitable[dict[str, Any]]
+            [dict[str, Any], list[Any]],
+            Awaitable[tuple[dict[str, Any], dict[str, Any]]],
         ] = _invoke_engine_once,
     ) -> None:
         self._invoke = invoke
 
-    async def retrieve(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def retrieve(
+        self,
+        payload: dict[str, Any],
+        *,
+        on_engine_event: EngineEventHook | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         from langchain_core.runnables.config import var_child_runnable_config
 
         callbacks = ambient_callbacks()
+        # 引擎事件回调不是 LangChain handler：追加进引擎回调清单（引擎的
+        # SafeTraceEmitter 按可调用分派、载荷先消毒），但不进 contextvar
+        # 环境配置，避免 LangChain 运行把它当 handler 调用。
+        engine_callbacks = (
+            [*callbacks, on_engine_event] if on_engine_event is not None else callbacks
+        )
         # 收窄环境配置：检索图经 contextvar 只能看到回调，父图的
         # configurable（thread_id / checkpoint_ns / checkpointer）一律不透传。
         token = var_child_runnable_config.set({"callbacks": callbacks})
         try:
-            return await self._invoke(payload, callbacks)
+            return await self._invoke(payload, engine_callbacks)
         finally:
             var_child_runnable_config.reset(token)
 
@@ -85,6 +114,8 @@ class FakeSearchAgentRuntime:
     E2E（issue #37）使用：latency_seconds 模拟外部检索耗时，side_effect
     （同步或异步可调用，入参为载荷）模拟计数、崩溃注入等副作用，
     output_builder 缺省用 fake_engine_output 产出确定性合法出参。
+    注入 on_engine_event 时按真实引擎的事件形状回放逐项进度事件
+    （fake_engine_progress_events），并回带 fake_engine_diagnostics 假诊断。
     """
 
     def __init__(
@@ -99,7 +130,12 @@ class FakeSearchAgentRuntime:
         self._latency_seconds = latency_seconds
         self._side_effect = side_effect
 
-    async def retrieve(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def retrieve(
+        self,
+        payload: dict[str, Any],
+        *,
+        on_engine_event: EngineEventHook | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         self.payloads.append(payload)
         if self._latency_seconds > 0:
             await asyncio.sleep(self._latency_seconds)
@@ -107,10 +143,88 @@ class FakeSearchAgentRuntime:
             result = self._side_effect(payload)
             if inspect.isawaitable(result):
                 await result
-        return self._output_builder(payload)
+        if on_engine_event is not None:
+            for event, event_payload in fake_engine_progress_events(payload):
+                on_engine_event(event, event_payload)
+        return self._output_builder(payload), fake_engine_diagnostics(payload)
 
 
 _FAKE_SOURCE_TYPES = ("WEB", "KNOWLEDGE_BASE", "STRUCTURED_DATA")
+
+
+def _lined_items(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """引擎入参的（线别, 检索项）平铺清单：正向在前、反向在后。"""
+    paragraph = payload["paragraph"]
+    return [("forward", item) for item in paragraph.get("forward_items", [])] + [
+        ("reverse", item) for item in paragraph.get("reverse_items", [])
+    ]
+
+
+def fake_engine_progress_events(
+    payload: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    """确定性回放引擎进度事件：与真实引擎同名同形，供离线事件断言。
+
+    每个检索项回放任务开始 / 检索完成 / 裁决完成三条 ``progress.`` 事件，
+    整批一条裁决批次事件；末尾附一条非进度诊断事件（parallel.finalize），
+    供适配层桥的前缀过滤离线验证。载荷只含元数据，不含任何正文字段。
+    """
+    request_id = payload["request_id"]
+    events: list[tuple[str, dict[str, Any]]] = []
+    for line, item in _lined_items(payload):
+        base = {
+            "request_id": request_id,
+            "task_id": f"task-{item['item_id']}",
+            "item_id": item["item_id"],
+            "line_type": line,
+        }
+        events.append(("progress.task.start", dict(base)))
+        events.append(("progress.task.retrieved", {**base, "candidate_count": 1}))
+        events.append(
+            (
+                "progress.verdict.done",
+                {**base, "verdict": "SUPPORTED" if line == "forward" else "REFUTED"},
+            )
+        )
+    events.append(
+        (
+            "progress.judge.batches_done",
+            {"request_id": request_id, "batch_count": 1},
+        )
+    )
+    events.append(
+        (
+            "parallel.finalize",
+            {"request_id": request_id, "flow_mode": "parallel_sources"},
+        )
+    )
+    return events
+
+
+def fake_engine_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    """确定性构造引擎诊断出参：与真实批处理诊断同形（含 flow_metrics）。
+
+    只放摘要提取会消费的计数与耗时键，供离线测试与中断续跑复用。
+    """
+    item_count = len(_lined_items(payload))
+    return {
+        "request_id": payload["request_id"],
+        "flow_metrics": {
+            "total_elapsed_ms": 12,
+            "deadline_reached": False,
+            "call_counts": {"web_search": item_count, "web_fetch": item_count},
+            "gap_retrieval": {
+                "triggered_count": 0,
+                "resolved_task_count": 0,
+                "unresolved_task_count": 0,
+            },
+            "judge_integrity": {
+                "judge_input_candidate_count": item_count,
+                "judge_returned_candidate_count": item_count,
+                "judge_missing_candidate_count": 0,
+            },
+        },
+    }
 
 
 def fake_engine_output(payload: dict[str, Any]) -> dict[str, Any]:
@@ -122,9 +236,7 @@ def fake_engine_output(payload: dict[str, Any]) -> dict[str, Any]:
     保证适配层消费的字段齐全。
     """
     paragraph = payload["paragraph"]
-    lined_items = [("forward", item) for item in paragraph.get("forward_items", [])] + [
-        ("reverse", item) for item in paragraph.get("reverse_items", [])
-    ]
+    lined_items = _lined_items(payload)
     results: list[dict[str, Any]] = []
     citations: list[dict[str, Any]] = []
     for line, item in lined_items:

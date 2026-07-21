@@ -57,9 +57,27 @@ def test_未配置时全部入口零侵入():
 
     agent = _Agent()
     assert observability.wrap_subagent(agent) is agent
+    # 更新当前 span 元数据同样零侵入：不建客户端、不抛错。
+    observability.update_current_span_metadata({"total_elapsed_ms": 1})
 
-    with observability.run_span(thread_id="t", session_id="s", trace_id="x"):
-        pass
+
+def test_启用时把诊断元数据转交当前span():
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.metadata_updates: list[dict] = []
+
+        def update_current_span(self, *, metadata: dict) -> None:
+            self.metadata_updates.append(metadata)
+
+    client = _RecordingClient()
+    observability.use_client(client)  # type: ignore[arg-type]
+
+    observability.update_current_span_metadata(
+        {"search_agent_flow_metrics": {"total_elapsed_ms": 12}}
+    )
+    assert client.metadata_updates == [
+        {"search_agent_flow_metrics": {"total_elapsed_ms": 12}}
+    ]
 
 
 def test_配置公私钥后选用Langfuse插桩客户端(monkeypatch):

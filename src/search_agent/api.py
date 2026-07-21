@@ -205,6 +205,19 @@ class SearchAgentRuntime:
         Input: search-agent-input/v1 (dict or SearchAgentInputState).
         Output: search-agent-output/v1 (JSON-serializable dict).
         """
+        output, _diagnostic = await self.ainvoke_with_diagnostics(payload)
+        return output
+
+    async def ainvoke_with_diagnostics(
+        self, payload: Mapping[str, Any] | Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Invoke the SearchAgent graph and also return the diagnostic output.
+
+        The public output contract is identical to ``ainvoke``; the second
+        element is the wrapper graph's ``diagnostic_output`` (batch diagnostic
+        dict with ``flow_metrics``), for host observability only. It must never
+        be mixed into citations or decisions.
+        """
         if self._closed:
             raise SearchAgentClosedError("SearchAgentRuntime has been closed. Create a new instance.")
 
@@ -220,6 +233,7 @@ class SearchAgentRuntime:
 
         state = await self._graph.ainvoke({"input": input_state.model_dump(mode="json")})
 
+        diagnostic = state.get("diagnostic_output")
         raw_output = state.get("public_output") or state
         if isinstance(raw_output, Mapping) and "public_output" in raw_output:
             raw_output = raw_output["public_output"]
@@ -240,7 +254,10 @@ class SearchAgentRuntime:
                 f"paragraph_id mismatch: input={input_state.paragraph.paragraph_id} output={output.paragraph_id}"
             )
 
-        return output.model_dump(mode="json")
+        return (
+            output.model_dump(mode="json"),
+            diagnostic if isinstance(diagnostic, dict) else {},
+        )
 
     async def ainvoke_batch(self, payloads: list[Mapping[str, Any] | Any]) -> dict[str, Any]:
         """Invoke all active paragraphs in one request-level retrieval graph.

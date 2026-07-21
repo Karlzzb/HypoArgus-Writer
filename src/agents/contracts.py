@@ -151,8 +151,21 @@ class Subagent(Protocol):
     async def run(self, task: dict[str, Any]) -> dict[str, Any]: ...
 
 
+DIAGNOSTICS_SUMMARY_KEY = "_diagnostics_summary"
+"""结果 dict 中的诊断摘要保留键：适配层弹出并入结束事件载荷，不进对外契约。
+
+真实现 run 把本次调用的诊断摘要子集（计数、耗时等元数据）放在此键下，
+SubagentAdapter 在发结束事件前弹出，作为 ``diagnostics`` 字段随
+SUBAGENT_END 上报；返回给编排方的结果不含此键，各结果契约保持不变。
+"""
+
+
 class SubagentAdapter:
-    """黑盒适配层：包装异步可调用，调用前后发出子智能体启动/结束事件。"""
+    """黑盒适配层：包装异步可调用，调用前后发出子智能体启动/结束事件。
+
+    结果 dict 若携带 ``DIAGNOSTICS_SUMMARY_KEY`` 保留键，弹出后并入
+    结束事件载荷（详见该常量 docstring）。
+    """
 
     def __init__(
         self,
@@ -168,7 +181,11 @@ class SubagentAdapter:
         context = self._event_context(task)
         self._event_hook(SUBAGENT_START, {"unit": self.unit, **context})
         result = await self._run_impl(task)
-        self._event_hook(SUBAGENT_END, {"unit": self.unit, **context})
+        summary = result.pop(DIAGNOSTICS_SUMMARY_KEY, None)
+        end_payload = {"unit": self.unit, **context}
+        if isinstance(summary, dict) and summary:
+            end_payload["diagnostics"] = summary
+        self._event_hook(SUBAGENT_END, end_payload)
         return result
 
     @staticmethod

@@ -6,7 +6,7 @@
 import asyncio
 from typing import Any
 
-from agents.contracts import SubagentAdapter
+from agents.contracts import DIAGNOSTICS_SUMMARY_KEY, SubagentAdapter
 from domain.events import SUBAGENT_END, SUBAGENT_START
 
 
@@ -52,6 +52,30 @@ def test_适配层_检索任务包_载荷带顶层章节id且mode为None() -> No
     assert [event_type for event_type, _ in events] == [SUBAGENT_START, SUBAGENT_END]
     for _, payload in events:
         assert payload == {"unit": "search_agent", "chapter_id": "ch-1", "mode": None}
+
+
+def test_适配层_结果携带诊断摘要保留键时_弹出并入结束事件载荷() -> None:
+    events, record_hook = _make_recorder()
+
+    async def impl_with_summary(task: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "materials": [],
+            DIAGNOSTICS_SUMMARY_KEY: {"total_elapsed_ms": 12, "deadline_reached": False},
+        }
+
+    adapter = SubagentAdapter("search_agent", impl_with_summary, record_hook)
+    result = asyncio.run(adapter.run({"chapter_id": "ch-1"}))
+
+    # 保留键从结果里弹出，不进入对外契约。
+    assert result == {"materials": []}
+    assert [event_type for event_type, _ in events] == [SUBAGENT_START, SUBAGENT_END]
+    start_payload = events[0][1]
+    end_payload = events[1][1]
+    assert "diagnostics" not in start_payload
+    assert end_payload["diagnostics"] == {
+        "total_elapsed_ms": 12,
+        "deadline_reached": False,
+    }
 
 
 def test_适配层_改写任务包_载荷带章节骨架id与mode() -> None:

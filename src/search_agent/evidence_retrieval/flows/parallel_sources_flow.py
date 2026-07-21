@@ -1870,6 +1870,18 @@ class ParallelSourcesFlow:
             return candidates, [], self.structured_status_by_task[task.task_id]
         return [], [], "no_structured_query"
 
+    def _emit_task_progress(self, event: str, task: RetrievalTask, **extra: Any) -> None:
+        """Queue one host-facing progress event (stable `progress.` prefix).
+
+        Payload carries task identity plus metadata-only extras; queued via
+        emit_nowait so it never extends the retrieval deadline.
+        """
+        self.trace.emit_nowait(event, {
+            "request_id": task.request_id, "task_id": task.task_id,
+            "item_id": task.item_id, "line_type": task.line_type.value,
+            **extra,
+        })
+
     async def _retrieve_task(self, task: RetrievalTask, scenarios: dict[str, Any]):
         self.task_deadlines[task.task_id] = min(self.deadline, time.monotonic() + self.config.task_hard_timeout_ms / 1000)
         metadata = {
@@ -1884,6 +1896,7 @@ class ParallelSourcesFlow:
         # Keep this one Task observation open through retrieval, merge, shared
         # Judge wait and Verification. Later children use its explicit ID.
         self.trace.register_task_span(task.task_id, task_span.get("_child_id"))
+        self._emit_task_progress("progress.task.start", task)
         context_token = self.trace.activate_span(task_span)
         try:
             task_metrics = TaskMetricsCollector(self.collector, task.task_id)
@@ -1935,6 +1948,14 @@ class ParallelSourcesFlow:
                 measured("selected_kb", self._kb(task, task.selected_knowledge_ids, "upstream_selected")),
                 measured("structured", self._structured(task, scenarios)),
             )
+            for channel, channel_rows in (
+                ("web", web[0]), ("public_kb", public[0]),
+                ("selected_kb", selected[0]), ("structured", structured[0]),
+            ):
+                self._emit_task_progress(
+                    "progress.channel.done", task,
+                    channel=channel, candidate_count=len(channel_rows),
+                )
             usage.public_kb_calls = 1 if self.config.public_knowledge_ids else 0
             usage.selected_kb_calls = 1 if task.selected_knowledge_ids else 0
             usage.structured_calls = 1 if structured[2] == "matched" else 0
@@ -1978,6 +1999,9 @@ class ParallelSourcesFlow:
                     if error.code != ErrorCode.WEB_NO_RESULT.value
                 ]
             selected_ok = not task.selected_knowledge_ids or not selected[1]
+            self._emit_task_progress(
+                "progress.task.retrieved", task, candidate_count=len(candidates),
+            )
             return task, query, candidates, errors, usage, selected_ok, structured[2], task_metrics, task_span
         except BaseException as exc:
             await self.trace.end_span(task_span, error=exc)
@@ -2166,6 +2190,9 @@ class ParallelSourcesFlow:
                     "judge_candidate_total": 0,
                     "candidate_passthrough_count": len(evidence),
                 },
+            )
+            self._emit_task_progress(
+                "progress.verdict.done", task, verdict=verification.verdict.value,
             )
 
         self.metrics["stage_timings_ms"]["verification"] += int(
@@ -2425,6 +2452,10 @@ class ParallelSourcesFlow:
 
             batch_records = await asyncio.gather(*(run_batch(batch) for batch in plan.batches))
             self.metrics["judge_batches"] = sorted(batch_records, key=lambda row: row["batch_id"])
+            self.trace.emit_nowait("progress.judge.batches_done", {
+                "request_id": retrieved[0][0].request_id if retrieved else "",
+                "batch_count": len(batch_records),
+            })
 
         integrity["judge_missing_candidate_count"] = max(
             0,
@@ -2705,6 +2736,9 @@ class ParallelSourcesFlow:
                     "judge_candidate_failed": judge_candidate_failed,
                 },
             )
+            self._emit_task_progress(
+                "progress.verdict.done", task, verdict=verification.verdict.value,
+            )
         # Evidence gaps trigger one real, deterministic second round.  Keep
         # this after the shared first Judge so the gap round only handles the
         # small set of unresolved tasks and cannot duplicate first-round work.
@@ -2779,6 +2813,9 @@ class ParallelSourcesFlow:
         if not plan.triggered or remaining_ms <= 1:
             return result
         self.metrics["gap_retrieval"]["triggered_count"] += 1
+        self._emit_task_progress(
+            "progress.gap.round", task, round=1, query_count=len(plan.queries),
+        )
         reason = str(result.evidence_gap or "UNKNOWN")
         reasons = self.metrics["gap_retrieval"].setdefault("reasons", [])
         if reason not in reasons:
