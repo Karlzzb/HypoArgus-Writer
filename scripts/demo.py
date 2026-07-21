@@ -48,13 +48,15 @@ MIXED_FEEDBACK = "引言口吻克制些；第二章补充行业数据佐证"
 # 档案缺省落盘目录（相对仓库根，已在 .gitignore 中忽略）。
 ARCHIVE_DIR = REPO_ROOT / "var" / "demo_archive"
 
-# 回归基准输入（issue #19 固化）：创建任务的唯一输入来源，保证复跑一致。
+# 回归基准输入（issue #19 固化）：创建任务的缺省输入来源，保证复跑一致。
+# 人培（汇报）基准保留原路径零改动；其他文种的验收基准按文种分目录固化在
+# scripts/baselines/<文种>/ 下（issue #28），经 --task 指定驱动对应文种的真实 E2E。
 BASELINE_TASK_PATH = REPO_ROOT / "scripts" / "demo_task.baseline.json"
 
 
-def load_baseline_task() -> dict[str, str]:
-    """读取回归基准输入的任务载荷（user_intent / user_identity / session_id）。"""
-    payload = json.loads(BASELINE_TASK_PATH.read_text(encoding="utf-8"))
+def load_baseline_task(path: Path = BASELINE_TASK_PATH) -> dict[str, str]:
+    """读取基准输入的任务载荷（user_intent / user_identity / session_id）。"""
+    payload = json.loads(path.read_text(encoding="utf-8"))
     return payload["task"]
 
 # 防御性脱敏：模型配置摘要中含这些子串的键一律不写入档案。
@@ -588,9 +590,11 @@ async def _snapshot_round(
         print(f"  [档案] 第 {round_no} 轮渲染快照抓取失败（不影响主流程）：{exc}")
 
 
-async def _drive(client: httpx.AsyncClient, recorder: ArchiveRecorder) -> None:
+async def _drive(
+    client: httpx.AsyncClient, recorder: ArchiveRecorder, task_path: Path
+) -> None:
     """驱动一遍完整闭环并渲染书目。"""
-    response = await client.post("/tasks", json=load_baseline_task())
+    response = await client.post("/tasks", json=load_baseline_task(task_path))
     response.raise_for_status()
     thread_id = response.json()["thread_id"]
     recorder.thread_id = thread_id
@@ -647,7 +651,7 @@ async def _drive(client: httpx.AsyncClient, recorder: ArchiveRecorder) -> None:
             print(entry["text"])
 
 
-async def _main(real: bool, archive_path: str | None) -> None:
+async def _main(real: bool, archive_path: str | None, task_path: Path) -> None:
     recorder = ArchiveRecorder(real, archive_path)
     app = _build_app(real)
     config = uvicorn.Config(
@@ -669,7 +673,7 @@ async def _main(real: bool, archive_path: str | None) -> None:
             # 靠 _consume_business 的整体超时兜底。
             timeout=httpx.Timeout(100.0, read=None),
         ) as client:
-            await _drive(client, recorder)
+            await _drive(client, recorder, task_path)
     finally:
         server.should_exit = True
         thread.join(timeout=100)
@@ -696,5 +700,12 @@ if __name__ == "__main__":
         default=None,
         help="构建过程档案落盘路径（缺省 var/demo_archive/<thread_id>.md）",
     )
+    parser.add_argument(
+        "--task",
+        metavar="PATH",
+        type=Path,
+        default=BASELINE_TASK_PATH,
+        help="任务基准输入路径（缺省人培汇报基准；其他文种见 scripts/baselines/<文种>/）",
+    )
     args = parser.parse_args()
-    asyncio.run(_main(args.real, args.archive))
+    asyncio.run(_main(args.real, args.archive, args.task))

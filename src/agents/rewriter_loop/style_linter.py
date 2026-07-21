@@ -1384,6 +1384,21 @@ def word_count_prompt_block(
     return "\n".join(lines)
 
 
+def resolve_chapter_type(
+    normalized_text: str,
+    cfg: dict[str, Any],
+    chapter_type: str | None = None,
+) -> str | None:
+    """章型解析统一入口（ADR-0005）：State 携带的章型优先，未传回落标题解析。
+
+    生成期由 State 大纲随章携带章型（骨架事实，不从位置或标题反推）；
+    自由结构/旧链路/成品后验缺省回落从正文首个 ``## `` 标题反推。
+    """
+    if chapter_type is not None:
+        return chapter_type
+    return detect_chapter_template(normalized_text, cfg)
+
+
 def lint(
     text: str,
     doc_type: str,
@@ -1422,11 +1437,7 @@ def lint(
         text=normalized,
         cfg=cfg,
         variant=tier_from_variant(doc_variant),
-        template=(
-            chapter_type
-            if chapter_type is not None
-            else detect_chapter_template(normalized, cfg)
-        ),
+        template=resolve_chapter_type(normalized, cfg, chapter_type),
         domain=domain,
         references=references,
         materials=materials,
