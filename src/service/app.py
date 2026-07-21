@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, asynccontextmanager
 from typing import Any, Literal
@@ -23,11 +24,17 @@ from assembly.assembler_config import AssemblerConfig
 from service.event_broker import EventHub
 from service.event_envelope import GRAPH_EVENT_TYPES, EventEnvelope
 from graph import build_graph, postgres_checkpointer
+from llm import observability
 from llm.llm_client import LLMFactory, default_llm_factory
-from agents.contracts import Subagent
+from agents.contracts import HypothesisPayload, MaterialPayload, SearchTask, Subagent
 from agents.rewriter_loop import make_rewriter_loop
 from agents.search_agent import make_search_agent
-from domain.events import EventHook
+from domain.events import SUBAGENT_END, EventHook
+from search_agent.api import (
+    SearchAgentConfigurationError,
+    SearchAgentContractError,
+)
+from service.graph_event_stream import make_standalone_subagent_hook
 from service.task_service import (
     InvalidReview,
     SubagentHookDispatcher,
@@ -117,11 +124,74 @@ class RollbackRequest(BaseModel):
     checkpoint_id: str
 
 
+class RetrievalHypothesis(BaseModel):
+    """独立检索请求中的假说条目：契约 HypothesisPayload 的校验形态。"""
+
+    id: str
+    text: str
+    refute_condition: str
+
+    @field_validator("id", "text")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        """假说 id 与本文不允许为空白（空白反驳条件合法：不产生反向检索项）。"""
+        if not value.strip():
+            raise ValueError("假说 id 与 text 不允许为空白")
+        return value
+
+
+class RetrievalRequest(BaseModel):
+    """独立检索请求体：字段即 SearchTask 契约，genre 与既有素材摘要可选带默认值。
+
+    session_id 由调用方透传（与创建任务一致，本系统不鉴权），
+    进度事件按其入信封供 /graph_events 过滤订阅。
+    """
+
+    chapter_id: str
+    hypotheses: list[RetrievalHypothesis]
+    genre: str = ""
+    existing_materials_digest: str = ""
+    session_id: str = ""
+
+    @field_validator("chapter_id")
+    @classmethod
+    def _chapter_not_blank(cls, value: str) -> str:
+        """章节 id 不允许为空白。"""
+        if not value.strip():
+            raise ValueError("chapter_id 不允许为空白")
+        return value
+
+    @field_validator("hypotheses")
+    @classmethod
+    def _hypotheses_not_empty(
+        cls, value: list[RetrievalHypothesis]
+    ) -> list[RetrievalHypothesis]:
+        """假说列表不允许为空：空章无检索语义。"""
+        if not value:
+            raise ValueError("hypotheses 不允许为空")
+        return value
+
+
+class RetrievalResponse(BaseModel):
+    """独立检索响应体：SearchResult 素材列表 + 本次调用的诊断摘要块。
+
+    diagnostics 与 subagent_end 事件携带的诊断摘要同源（打桩等无诊断
+    实现下为空对象），供无 Langfuse 权限的调用方观察本次检索运行细节。
+    """
+
+    materials: list[MaterialPayload]
+    diagnostics: dict[str, Any]
+
+
 # 领域异常 → HTTP 状态码：应用启动时逐类注册为全局异常处理器。
 _DOMAIN_ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (TaskNotFound, 404),
     (TaskConflict, 409),
     (InvalidReview, 422),
+    # 检索引擎域异常（独立检索接口同步抛出）：契约违约按不可处理实体、
+    # 通道/LLM 配置缺失按服务不可用。
+    (SearchAgentContractError, 422),
+    (SearchAgentConfigurationError, 503),
 )
 
 
@@ -173,12 +243,15 @@ def create_app(
                 else checkpointer
             )
             hook_dispatcher = SubagentHookDispatcher()
+            # 独立检索接口与主流程复用同一 search_agent 实例（同一信号量、
+            # 同一运行时），故在传入 build_graph 前先解析并挂到应用状态。
+            resolved_search_agent = _resolve_subagent(
+                search_agent, make_search_agent, hook_dispatcher
+            )
             graph = build_graph(
                 llm_factory=llm_factory,
                 checkpointer=saver,
-                search_agent=_resolve_subagent(
-                    search_agent, make_search_agent, hook_dispatcher
-                ),
+                search_agent=resolved_search_agent,
                 rewriter_loop=_resolve_subagent(
                     rewriter_loop,
                     lambda hook: make_rewriter_loop(llm_factory, hook),
@@ -189,6 +262,10 @@ def create_app(
             )
             graph_hub = EventHub(loop)
             app.state.graph_hub = graph_hub
+            app.state.search_agent = observability.wrap_subagent(
+                resolved_search_agent
+            )
+            app.state.hook_dispatcher = hook_dispatcher
             app.state.manager = TaskManager(
                 graph=graph,
                 graph_hub=graph_hub,
@@ -214,6 +291,56 @@ def create_app(
             request.user_intent, request.user_identity, request.session_id
         )
         return CreateTaskResponse(thread_id=thread_id, execution_trace_id=trace_id)
+
+    @app.post("/retrieval", response_model=RetrievalResponse)
+    async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:
+        """独立阻塞式检索：一章假说列表同步换素材与诊断，不启动写作任务。
+
+        与主流程同一套任务包/结果契约、同一 search_agent 实例（lifespan
+        构建）；进度事件带调用方 session_id 经全局 /graph_events 通道流出，
+        subagent_start 即本次调用的根事件。诊断摘要从 subagent_end 事件
+        载荷截获进响应 diagnostics 块；事件与诊断依赖内部分发器路由
+        （工厂/缺省注入形态），实例形态注入时调用方自管事件钩子、
+        diagnostics 为空对象。
+        """
+        agent: Subagent = app.state.search_agent
+        dispatcher: SubagentHookDispatcher = app.state.hook_dispatcher
+        envelope_hook = make_standalone_subagent_hook(
+            publish=app.state.graph_hub.publish,
+            trace_id=uuid.uuid4().hex,
+            session_id=request.session_id,
+        )
+        diagnostics: dict[str, Any] = {}
+
+        def hook(event_type: str, payload: dict[str, Any]) -> None:
+            summary = payload.get("diagnostics")
+            if event_type == SUBAGENT_END and isinstance(summary, dict):
+                diagnostics.update(summary)
+            envelope_hook(event_type, payload)
+
+        task = SearchTask(
+            chapter_id=request.chapter_id,
+            hypotheses=[
+                HypothesisPayload(
+                    id=hypothesis.id,
+                    text=hypothesis.text,
+                    refute_condition=hypothesis.refute_condition,
+                )
+                for hypothesis in request.hypotheses
+            ],
+            genre=request.genre,
+            existing_materials_digest=request.existing_materials_digest,
+        )
+        # contextvars 按请求隔离：钩子登记只在本请求上下文内生效，
+        # 与并发请求及图运行的工作线程互不串扰。
+        dispatcher.set_hook(hook)
+        try:
+            result = await agent.run(dict(task))
+        finally:
+            dispatcher.clear_hook()
+        return RetrievalResponse(
+            materials=result["materials"], diagnostics=diagnostics
+        )
 
     @app.get("/tasks/{thread_id}")
     async def get_task_status(thread_id: str) -> dict[str, Any]:

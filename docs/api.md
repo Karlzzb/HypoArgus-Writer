@@ -54,7 +54,8 @@ Java 端                                  HypoArgus-Writer
 | 400 | 参数非法（书目格式未注册、事件类型过滤值非法） |
 | 404 | 任务 / 检查点不存在 |
 | 409 | 当前状态不允许该操作（任务运行中、未停在中断点、尚无正文） |
-| 422 | 请求体不符合契约（含 FastAPI 标准校验错误与 `revise` 缺 feedback） |
+| 422 | 请求体不符合契约（含 FastAPI 标准校验错误、`revise` 缺 feedback、检索任务违反引擎入参契约） |
+| 503 | 检索通道 / LLM 配置缺失，独立检索暂不可用 |
 
 ## 2. REST 接口
 
@@ -220,6 +221,65 @@ Java 端                                  HypoArgus-Writer
 错误：格式未注册 → 400；尚无章节正文（框架 / 检索阶段）→ 409。
 
 说明：`finalized` SSE 事件中的正文保留原始素材 id 角标；本接口返回按出现顺序重编号后的正文与配套书目，是推荐的最终产物获取方式。
+
+### 2.8 独立检索
+
+`POST /retrieval` → `200 OK`
+
+阻塞式独立检索：提交一章假说列表，同步等待检索完成并返回素材与诊断，不启动写作任务。
+与写作主流程使用同一套任务包/结果契约与同一 search_agent 实例，两处调用行为一致。
+
+请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `chapter_id` | string | 是 | 章节标识，不允许空白，进事件上下文与素材 id |
+| `hypotheses` | array | 是 | 假说列表，不允许为空；条目为 `{id, text, refute_condition}`，`id` 与 `text` 不允许空白，`refute_condition` 非空白时驱动反向检索 |
+| `genre` | string | 否 | 品类（检索范围提示），缺省 `""` |
+| `existing_materials_digest` | string | 否 | 既有素材摘要（供引擎规避重复素材），缺省 `""` |
+| `session_id` | string | 否 | 调用方会话标识，缺省 `""`，进度事件按其入信封供 `/graph_events` 过滤订阅 |
+
+```json
+{
+  "chapter_id": "ch1",
+  "hypotheses": [
+    { "id": "h1", "text": "国产数据库在核心交易场景已具备替代能力", "refute_condition": "近两年存在因性能问题回迁的公开案例" }
+  ],
+  "session_id": "sess-abc"
+}
+```
+
+响应体：
+
+```json
+{
+  "materials": [
+    {
+      "id": "m-ch1-h1-cit-1",
+      "hypothesis_id": "h1",
+      "source": "来源名称",
+      "url": "https://example.com/evidence",
+      "source_kind": "web",
+      "excerpt": "证据摘录……",
+      "relevance_score": 0.9,
+      "verdict": "pass"
+    }
+  ],
+  "diagnostics": { "total_elapsed_ms": 1234, "call_counts": { "web_search": 2 } }
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `materials[].hypothesis_id` | 素材回链的假说 id |
+| `materials[].url` | 来源链接；仅联网来源必带，知识库与结构化来源可为 `null` |
+| `materials[].source_kind` | 来源通道三值：`web` / `knowledge_base` / `structured_data` |
+| `materials[].verdict` | `pass`（可作支撑证据）/ `fail`（反驳或不支撑，供筛选审计） |
+| `diagnostics` | 本次检索的诊断摘要（计数与耗时），与 `subagent_end` 事件携带的诊断同源 |
+
+进度事件：调用期间以请求中的 `session_id` 在 `/graph_events` 通道发布 `subagent_start` → `progress`（多条）→ `subagent_end` 事件链，`subagent_start` 为本次调用的根事件（`thread_id` 为空串）。
+
+错误：请求体校验失败 → 422；检索任务违反引擎入参契约 → 422；检索通道 / LLM 配置缺失 → 503。
 
 ## 3. SSE 通道
 

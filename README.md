@@ -90,6 +90,7 @@ uvicorn --app-dir src --factory service.app:create_app --host 0.0.0.0 --port 800
 | `POST /tasks/{thread_id}/rollback` | 回滚到指定历史检查点 |
 | `GET /tasks/{thread_id}/checkpoints` | 检查点元数据清单 |
 | `GET /tasks/{thread_id}/bibliography?format=` | 按书目格式渲染最终交付（`gbt7714` / `apa` / `markdown`） |
+| `POST /retrieval` | 独立阻塞式检索：一章假说列表同步换素材与诊断，不启动写作任务 |
 | `GET /tasks/{thread_id}/stream` | 业务数据 SSE 通道 |
 | `GET /graph_events` | `graph_event` 可视化 SSE 通道，支持 `thread_id` / `session_id` / `types` 过滤 |
 

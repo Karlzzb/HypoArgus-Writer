@@ -14,6 +14,8 @@ dependencies = [
     "uvicorn>=0.30",
     "langfuse>=4.14,<5",
     "pyyaml>=6.0.3",
+    # 子智能体契约 TypedDict 取 typing_extensions 版本（Pydantic 3.12 前的要求）
+    "typing-extensions>=4.12",
     # search_agent 检索引擎（自源项目一次性 fork）运行时依赖
     "langchain-core>=1.3",
     "httpx[http2]>=0.27",

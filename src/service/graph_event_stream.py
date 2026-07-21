@@ -52,6 +52,54 @@ _BRANCH_RULES: dict[str, dict[WorkflowStatus, tuple[str, str]]] = {
 }
 
 
+def make_standalone_subagent_hook(
+    *,
+    publish: Callable[[EventEnvelope], None],
+    trace_id: str,
+    session_id: str,
+    thread_id: str = "",
+) -> EventHook:
+    """独立子智能体调用（不经图运行）的事件钩子：成对事件入信封、进度挂 start 之下。
+
+    供独立检索接口使用：没有图任务块，不代发 node_start，subagent_start
+    即本次调用的根事件（parent_id 为 None）。thread_id 缺省空串——独立调用
+    不隶属任何写作任务线程，订阅方按 session_id 过滤。
+    引擎事件可能从其他线程分派，配对状态在锁内维护。
+    """
+    lock = threading.Lock()
+    start_ids: dict[tuple[str, str | None], str] = {}
+
+    def emit(
+        type: str, unit: str, payload: dict[str, Any], parent_id: str | None
+    ) -> EventEnvelope:
+        envelope = new_envelope(
+            type=type,
+            unit=unit,
+            payload=payload,
+            trace_id=trace_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            parent_id=parent_id,
+        )
+        publish(envelope)
+        return envelope
+
+    def hook(event_type: str, payload: dict[str, Any]) -> None:
+        unit = str(payload.get("unit", "subagent"))
+        chapter_id = payload.get("chapter_id")
+        key = (unit, chapter_id if isinstance(chapter_id, str) else None)
+        with lock:
+            if event_type == SUBAGENT_START:
+                envelope = emit("subagent_start", unit, dict(payload), None)
+                start_ids[key] = envelope.event_id
+            elif event_type == SUBAGENT_PROGRESS:
+                emit("progress", unit, dict(payload), start_ids.get(key))
+            elif event_type == SUBAGENT_END:
+                emit("subagent_end", unit, dict(payload), start_ids.pop(key, None))
+
+    return hook
+
+
 class GraphRunEmitter:
     """一次图运行（首跑或恢复续跑）的事件翻译器：把 LangGraph 流块翻译为事件信封并发布。"""
 

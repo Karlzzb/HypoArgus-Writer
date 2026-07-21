@@ -9,11 +9,13 @@ from collections.abc import Awaitable, Callable
 from typing import (
     Any,
     Literal,
-    NotRequired,
     Protocol,
-    TypedDict,
     runtime_checkable,
 )
+
+# TypedDict 取 typing_extensions 版本：Python 3.12 前 Pydantic 不接受
+# typing.TypedDict（独立检索接口的响应模型直接复用 MaterialPayload）。
+from typing_extensions import NotRequired, TypedDict
 
 from domain.events import SUBAGENT_END, SUBAGENT_START, EventHook, noop_hook
 from domain.state import Material, SourceKind
