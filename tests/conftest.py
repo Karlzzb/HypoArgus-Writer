@@ -18,5 +18,6 @@ def _strip_langfuse_env() -> None:
         "LANGFUSE_SECRET_KEY",
         "LANGFUSE_BASE_URL",
         "LANGFUSE_TIMEOUT",
+        "LANGFUSE_TRACING_ENABLED",
     ):
         os.environ.pop(name, None)

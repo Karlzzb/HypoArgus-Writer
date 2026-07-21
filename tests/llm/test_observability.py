@@ -26,7 +26,12 @@ STUB_COMPLETION = "插桩应答"
 @pytest.fixture(autouse=True)
 def _clean_langfuse_env(monkeypatch):
     """默认清空 Langfuse 环境变量与客户端注入，保证测试相互隔离。"""
-    for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
+    for name in (
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL",
+        "LANGFUSE_TRACING_ENABLED",
+    ):
         monkeypatch.delenv(name, raising=False)
     yield
     observability.use_client(None)
@@ -63,6 +68,31 @@ def test_配置公私钥后选用Langfuse插桩客户端(monkeypatch):
 
     assert observability.langfuse_enabled() is True
     assert observability.openai_client_class() is LangfuseOpenAI
+
+
+def test_官方总开关设false时全部入口回到直通实现(monkeypatch):
+    from openai import OpenAI
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.setenv("LANGFUSE_TRACING_ENABLED", "False")
+
+    assert observability.langfuse_enabled() is False
+    assert observability.openai_client_class() is OpenAI
+
+    def node_fn(state):
+        return state
+
+    assert observability.traced_node("framework_orchestrator", node_fn) is node_fn
+
+
+def test_官方总开关非false取值不改变启用行为(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    # 与 SDK 同口径：只有字面 "false"（忽略大小写）才关，其他取值一律开。
+    for value in ("true", "1", "0", "no", "anything"):
+        monkeypatch.setenv("LANGFUSE_TRACING_ENABLED", value)
+        assert observability.langfuse_enabled() is True, value
 
 
 def test_启用后一次完整运行span覆盖全部运行单元(captured_spans):

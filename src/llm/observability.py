@@ -1,6 +1,7 @@
 """Langfuse 可观测接入层：全链路 LLM 调用与运行单元 trace 上报。
 
-启用条件：环境变量 LANGFUSE_PUBLIC_KEY 与 LANGFUSE_SECRET_KEY 均非空
+启用条件：环境变量 LANGFUSE_PUBLIC_KEY 与 LANGFUSE_SECRET_KEY 均非空，
+且官方总开关 LANGFUSE_TRACING_ENABLED 未设为 false
 （接口地址取 LANGFUSE_BASE_URL，自建实例必填）。
 未启用时本模块所有入口都是直通实现：不建客户端、不发网络请求、
 不改变任何行为，测试与本地开发无需 Langfuse 设施。
@@ -38,9 +39,15 @@ _client_override: "Langfuse | None" = None
 
 
 def langfuse_enabled() -> bool:
-    """是否启用 Langfuse 上报：公私钥环境变量齐备即启用。"""
+    """是否启用 Langfuse 上报：公私钥齐备且官方总开关未关即启用。
+
+    LANGFUSE_TRACING_ENABLED 的解析口径与 SDK 完全一致
+    （非 "false" 即开），关闭时全部入口走直通实现、零包装开销。
+    """
     if _client_override is not None:
         return True
+    if os.environ.get("LANGFUSE_TRACING_ENABLED", "true").lower() == "false":
+        return False
     return bool(
         os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
         and os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
