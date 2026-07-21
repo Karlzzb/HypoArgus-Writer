@@ -1,0 +1,37 @@
+# 场景：查询某专业学生实习岗位分布
+# 域：实习管理 + 岗位数据（跨库 JOIN，gxy_streaming 与 gxy_dw 同集群）
+# 桥接：gxy_students.student_id = gxy_report.student_id，gxy_report.job_id = dwd_job_detail.id
+name: 查询某专业学生实习岗位分布
+description: 按专业名称统计学生在岗实习的岗位分布（岗位名称、企业、人数）
+
+sql: |
+  SELECT
+    j.job_name AS job_name,
+    j.company_name AS company_name,
+    COUNT(DISTINCT s.student_id) AS student_count
+  FROM
+    gxy_streaming.gxy_students s
+    INNER JOIN gxy_streaming.gxy_report r ON s.student_id = r.student_id
+    INNER JOIN gxy_dw.dwd_job_detail j ON r.job_id = j.id
+  WHERE
+    s.major_name LIKE :major_name
+  GROUP BY
+    j.job_name, j.company_name
+  ORDER BY
+    student_count DESC
+
+params:
+  major_name:
+    type: string
+    required: true
+    description: 专业名称（对应 gxy_students.major_name），支持模糊匹配，如“计算机”
+    wildcard: like
+
+return:
+  columns:
+    - {name: job_name,      description: 岗位名称（对应 dwd_job_detail.job_name）}
+    - {name: company_name,  description: 招聘企业名称}
+    - {name: student_count, description: 该岗位上在岗实习的学生人数}
+
+limit: 50
+

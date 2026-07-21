@@ -1,0 +1,68 @@
+# 场景：查询某专业下的学生近年人数增长率
+# 域：实习管理（关联教学管理域获取专业名称）
+name: 按学年统计某专业下的学生人数，并计算同比增长率
+description: 按学年统计某专业下的学生人数，并计算同比增长率（通过专业名称过滤）
+
+sql: |
+  WITH yearly_stats AS (
+    SELECT
+      s.grade AS academic_year,
+      COUNT(DISTINCT s.student_id) AS student_count
+    FROM
+      gxy_streaming.gxy_students s
+      INNER JOIN gxy_streaming.gxy_major m ON s.major_id = m.major_id   -- 关联专业表获取名称
+    WHERE
+      m.major_name LIKE :major_name
+      AND s.grade IS NOT NULL
+      AND s.grade != ''
+    GROUP BY
+      s.grade
+    ORDER BY
+      s.grade
+  ),
+  growth_calc AS (
+    SELECT
+      academic_year,
+      student_count,
+      LAG(student_count, 1) OVER (ORDER BY academic_year) AS prev_year_count,
+      ROUND(
+        CAST(student_count - LAG(student_count, 1) OVER (ORDER BY academic_year) AS DOUBLE)
+        / NULLIF(LAG(student_count, 1) OVER (ORDER BY academic_year), 0) * 100,
+        2
+      ) AS growth_rate_percent
+    FROM yearly_stats
+  )
+  SELECT
+    academic_year,
+    student_count,
+    prev_year_count,
+    growth_rate_percent
+  FROM growth_calc
+  WHERE
+    academic_year BETWEEN :start_year AND :end_year
+  ORDER BY
+    academic_year
+
+params:
+  major_name:
+    type: string
+    required: true
+    description: 专业名称（对应 gxy_major.major_name），支持模糊匹配，如“计算机”
+    wildcard: like
+  start_year:
+    type: string
+    required: true
+    description: 起始学年，格式如 '2020级' 或 '2020'
+  end_year:
+    type: string
+    required: true
+    description: 结束学年，格式如 '2024级' 或 '2024'
+
+return:
+  columns:
+    - {name: academic_year,         description: 学年（年级）}
+    - {name: student_count,         description: 该学年学生总人数}
+    - {name: prev_year_count,       description: 上一学年学生人数（用于对比）}
+    - {name: growth_rate_percent,   description: 同比增长率（百分比），例如 5.20 表示增长5.20%}
+
+limit: 20

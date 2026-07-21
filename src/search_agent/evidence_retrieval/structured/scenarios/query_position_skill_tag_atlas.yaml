@@ -1,0 +1,58 @@
+# 场景7：特定岗位类型的技能标签图谱分析
+# 域：岗位数据（gxy_dw）
+# 原文提到 dwd_job_detail_entity（不在 registry），泛化为 dwd_job_detail
+# 桥接：dwd_job_detail.id = dwd_job_feature_rel.id（岗位ID）
+# 输出：按岗位类型过滤后，标签频次排行 + 标签分类；可选附 dwd_feature_atlas 的技能关联关系
+name: 特定岗位类型技能标签图谱分析
+description: 按岗位类型筛选岗位，提取关联技能标签并按频次排序，输出技能词云与共现分析底表
+
+sql: |
+  WITH job_filter AS (
+    SELECT
+      j.id,
+      j.job_name,
+      j.position_name_level2
+    FROM gxy_dw.dwd_job_detail j
+    WHERE
+      (:position_name = '' OR j.position_name_level2 LIKE :position_name
+                        OR j.job_name LIKE :position_name)
+      AND j.publish_time >= :start_date
+      AND j.publish_time <  :end_date
+  )
+  SELECT
+    f.feature_name,
+    f.feature_category,
+    COUNT(DISTINCT j.id) AS job_count
+  FROM
+    job_filter j
+    INNER JOIN gxy_dw.dwd_job_feature_rel f ON j.id = f.id
+  WHERE
+    f.feature_name IS NOT NULL AND f.feature_name != ''
+  GROUP BY
+    f.feature_name, f.feature_category
+  ORDER BY
+    job_count DESC
+
+params:
+  position_name:
+    type: string
+    required: true
+    description: 岗位类型关键词，支持模糊匹配（同时匹配 dwd_job_detail.position_name_level2 与 job_name），如"前端开发"
+    wildcard: like
+  start_date:
+    type: string
+    required: true
+    description: 岗位发布起始日期，格式 'YYYY-MM-DD'
+  end_date:
+    type: string
+    required: true
+    description: 岗位发布结束日期（左开区间）
+
+return:
+  columns:
+    - {name: feature_name,     description: 技能/标签名称}
+    - {name: feature_category, description: 标签类别}
+    - {name: job_count,        description: 命中该标签的岗位数}
+
+limit: 100
+

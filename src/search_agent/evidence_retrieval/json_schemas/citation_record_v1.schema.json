@@ -1,0 +1,318 @@
+{
+  "$defs": {
+    "CitationJudgment": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "directness": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Directness",
+          "type": "number"
+        },
+        "quote_match_mode": {
+          "enum": [
+            "EXACT",
+            "NORMALIZED",
+            "SNIPPET",
+            "STRUCTURED_ROW"
+          ],
+          "title": "Quote Match Mode",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "refuted_claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Refuted Claim Ids",
+          "type": "array"
+        },
+        "scope_compatible": {
+          "title": "Scope Compatible",
+          "type": "boolean"
+        },
+        "scope_mismatch_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scope Mismatch Reasons",
+          "type": "array"
+        },
+        "supported_claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Claim Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "confidence",
+        "directness",
+        "reason",
+        "scope_compatible",
+        "quote_match_mode"
+      ],
+      "title": "CitationJudgment",
+      "type": "object"
+    },
+    "CitationProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "content_fingerprint": {
+          "title": "Content Fingerprint",
+          "type": "string"
+        },
+        "dataset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Id"
+        },
+        "published_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Published At"
+        },
+        "query_execution_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Query Execution Id"
+        },
+        "query_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Query Ids",
+          "type": "array"
+        },
+        "retrieved_at": {
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "scenario_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scenario Key"
+        },
+        "source_evidence_fingerprint": {
+          "title": "Source Evidence Fingerprint",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Call Id"
+        }
+      },
+      "required": [
+        "retrieved_at",
+        "content_fingerprint",
+        "source_evidence_fingerprint"
+      ],
+      "title": "CitationProvenance",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "chunk_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chunk Id"
+    },
+    "citation_id": {
+      "title": "Citation Id",
+      "type": "string"
+    },
+    "content": {
+      "minLength": 1,
+      "title": "Content",
+      "type": "string"
+    },
+    "document_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Document Id"
+    },
+    "file_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "File Id"
+    },
+    "judgment": {
+      "$ref": "#/$defs/CitationJudgment"
+    },
+    "knowledge_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Knowledge Id"
+    },
+    "page": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Page"
+    },
+    "provenance": {
+      "$ref": "#/$defs/CitationProvenance"
+    },
+    "relation": {
+      "enum": [
+        "SUPPORT",
+        "REFUTE",
+        "SUPPLEMENT"
+      ],
+      "title": "Relation",
+      "type": "string"
+    },
+    "source_name": {
+      "title": "Source Name",
+      "type": "string"
+    },
+    "source_type": {
+      "enum": [
+        "WEB",
+        "KNOWLEDGE_BASE",
+        "STRUCTURED_DATA"
+      ],
+      "title": "Source Type",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "ACCEPTED",
+        "DEGRADED"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "task_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Task Ids",
+      "type": "array"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Url"
+    }
+  },
+  "required": [
+    "citation_id",
+    "task_ids",
+    "content",
+    "summary",
+    "source_type",
+    "source_name",
+    "relation",
+    "status",
+    "judgment",
+    "provenance"
+  ],
+  "title": "CitationRecord",
+  "type": "object"
+}

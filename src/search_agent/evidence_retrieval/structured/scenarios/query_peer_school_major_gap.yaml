@@ -1,0 +1,68 @@
+# 场景4：对标院校专业设置缺口分析
+# 域：教学管理（gxy_streaming）
+# 桥接：gxy_school.school_id = gxy_major.school_id
+# 逻辑：本校专业集合 vs 同类型院校（按 level/is_double 匹配）专业集合，求差集并按开设院校数排序
+# 泛化：本校 school_id 与"同类型"匹配条件参数化；推荐结合 gxy_major_dict 标准化专业名称
+name: 对标院校专业设置缺口分析
+description: 找出同类型院校已开设但本校尚未设置的专业，按开设院校数排序，输出缺口专业推荐列表
+
+sql: |
+  WITH my_majors AS (
+    -- 本校专业集合（按 major_name 去重，避免同名异写干扰）
+    SELECT DISTINCT major_name
+    FROM gxy_streaming.gxy_major
+    WHERE school_id = :my_school_id AND is_deleted = 0
+  ),
+  peer_schools AS (
+    -- 同类型院校：按学校 level 与 is_double 双高校标记匹配（可参数化）
+    SELECT school_id, school_name
+    FROM gxy_streaming.gxy_school
+    WHERE school_id != :my_school_id
+      AND (:peer_level = '' OR level = :peer_level)
+      AND (:peer_double = '' OR is_double = :peer_double)
+  ),
+  peer_majors AS (
+    -- 同类型院校开设的专业（已排除本校）
+    SELECT DISTINCT
+      m.major_name,
+      ps.school_id,
+      ps.school_name
+    FROM gxy_streaming.gxy_major m
+      INNER JOIN peer_schools ps ON m.school_id = ps.school_id
+    WHERE m.is_deleted = 0
+      AND m.major_name IS NOT NULL AND m.major_name != ''
+  )
+  SELECT
+    pm.major_name                              AS gap_major_name,
+    COUNT(DISTINCT pm.school_id)               AS peer_school_count,
+    GROUP_CONCAT(DISTINCT pm.school_name)      AS peer_school_examples
+  FROM peer_majors pm
+  LEFT JOIN my_majors mm ON pm.major_name = mm.major_name
+  WHERE mm.major_name IS NULL
+  GROUP BY pm.major_name
+  ORDER BY peer_school_count DESC
+
+params:
+  my_school_id:
+    type: string
+    required: true
+    description: 本校 school_id（gxy_school.school_id）
+  peer_level:
+    type: string
+    required: false
+    description: 对标院校层次过滤（gxy_school.level），留空表示不限层次
+    default: ''
+  peer_double:
+    type: string
+    required: false
+    description: 对标院校是否双高校（0/1），留空表示不限
+    default: ''
+
+return:
+  columns:
+    - {name: gap_major_name,    description: 本校缺失的专业名称}
+    - {name: peer_school_count, description: 开设该专业的同类型院校数量}
+    - {name: peer_school_examples, description: 开设该专业的院校示例（逗号分隔）}
+
+limit: 100
+

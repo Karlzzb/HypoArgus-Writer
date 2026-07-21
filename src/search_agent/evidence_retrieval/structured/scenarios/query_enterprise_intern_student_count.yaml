@@ -1,0 +1,66 @@
+# 场景9：某企业接收本校实习生人数查询
+# 域：企业基础数据（core_db）+ 实习管理（gxy_streaming）
+# 桥接：enterprise.uncid = gxy_job.company_code（社会信用代码）；gxy_job.student_id = gxy_students.student_id
+# 维度：按学年批次（gxy_batch.batch_name）分组，输出每批人数与专业分布
+# 泛化：企业名称模糊匹配；可按本校 school_id 过滤
+name: 统计某企业接收本校实习生人数查询
+description: 统计指定企业按学年批次接收本校实习生的人数及涉及专业分布
+
+sql: |
+  WITH base AS (
+    SELECT
+      e.ent_name AS enterprise_name,
+      s.student_id,
+      b.batch_name AS academic_year,
+      s.major_name
+    FROM
+      core_db.enterprise e
+      INNER JOIN gxy_streaming.gxy_job j ON e.uncid = j.company_code
+      INNER JOIN gxy_streaming.gxy_students s ON j.student_id = s.student_id
+      LEFT JOIN gxy_streaming.gxy_batch b ON j.plan_id = b.batch_id
+    WHERE
+      e.ent_name LIKE :enterprise_name
+      AND j.is_deleted = 0
+      AND (:school_id = '' OR s.school_id = :school_id)
+      AND s.grade IS NOT NULL AND s.grade != ''
+  ),
+  agg AS (
+    SELECT
+      enterprise_name,
+      academic_year,
+      COUNT(DISTINCT student_id) AS intern_count,
+      COUNT(DISTINCT major_name) AS major_count,
+      GROUP_CONCAT(DISTINCT major_name) AS major_distribution
+    FROM base
+    GROUP BY enterprise_name, academic_year
+  )
+  SELECT
+    enterprise_name,
+    academic_year,
+    intern_count,
+    major_count,
+    major_distribution
+  FROM agg
+  ORDER BY academic_year
+
+params:
+  enterprise_name:
+    type: string
+    required: true
+    description: 企业名称（enterprise.ent_name），支持模糊匹配
+    wildcard: like
+  school_id:
+    type: string
+    required: false
+    description: 本校 school_id 过滤；留空表示不限学校（全平台统计）
+    default: ''
+
+return:
+  columns:
+    - {name: enterprise_name,     description: 企业名称}
+    - {name: academic_year,       description: 学年批次（来自 gxy_batch.batch_name）}
+    - {name: intern_count,        description: 该批次实习人数}
+    - {name: major_count,         description: 涉及专业数量}
+    - {name: major_distribution,  description: 涉及专业分布（逗号分隔）}
+
+limit: 100

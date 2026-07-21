@@ -17,6 +17,7 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 | `src/llm/` | 统一 LLM 封装：按运行单元前缀配置 + 全局回落（`llm_config.py`）、OpenAI 兼容客户端与 FakeLLM、Langfuse 可观测 |
 | `src/assembly/` | 上下文装配：`assemble(state, unit)` 统一入口与压缩阈值配置 |
 | `src/agents/` | 子智能体：任务包契约（`contracts.py`）、`rewriter_loop/` 真实实现子包（编排、写作 LLM 注入点、真实适配器、风格校验器、随包风格指南；打桩同包共存、可显式注入）、search_agent 打桩实现 |
+| `src/search_agent/` | 检索引擎包：自源项目一次性 fork 的 SearchAgent V12（火山联网 / Bisheng 知识库 / Doris 结构化三通道），归本项目所有、可自由改造；当前尚未接入主流程，主流程仍走 `src/agents/` 的 search_agent 打桩 |
 | `src/nodes/` | 6 个主节点：framework_orchestrator → reference_orchestrator → chapter_drafter（首写并行扇出）→ writing_orchestrator（修订与回退串行自环）→ citation_validator → human_review_gate |
 | `src/graph.py` | 图接线、条件路由、Postgres 检查点保存器（含 `checkpoint_serializer` 类型注册） |
 | `src/service/` | 对外服务：FastAPI 应用（`app.py`）、任务生命周期（`task_service.py`）、事件枢纽与事件信封 |

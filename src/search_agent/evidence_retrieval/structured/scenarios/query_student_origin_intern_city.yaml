@@ -1,0 +1,83 @@
+# 场景6：学生生源地与实习城市分布及就业基地建设指导
+# 域：实习管理（gxy_streaming）
+# 桥接：gxy_students.student_id = gxy_job.student_id（gxy_job 直接含学生实习企业所在城市）
+# 生源地维度：gxy_students.family_address（家庭详细地址）
+# 实习城市维度：gxy_job.city（实习企业所在市）
+# 回流率：实习城市名出现在生源地地址中的学生占比（近似匹配）
+# 泛化：可按学校、年级、专业过滤；输出 TOP10 生源地/实习城市 + 总体回流率
+# 说明：改用 gxy_job 直接桥接，比原来绕 dwd_job_detail 少一跳，且 j.city 直接是学生实习企业所在市
+name: 学生生源地与实习城市分布及就业基地指导
+description: 统计学生生源地 TOP10、实习城市 TOP10 及生源地回流率，辅助就业基地布局决策
+
+sql: |
+  WITH student_job_city AS (
+    SELECT DISTINCT
+      s.student_id,
+      s.family_address,
+      j.city AS intern_city
+    FROM
+      gxy_streaming.gxy_students s
+      INNER JOIN gxy_streaming.gxy_job j ON s.student_id = j.student_id
+    WHERE
+      j.is_deleted = 0
+      AND s.family_address IS NOT NULL AND s.family_address != ''
+      AND j.city IS NOT NULL AND j.city != ''
+      AND (:school_id = '' OR s.school_id = :school_id)
+      AND (:grade     = '' OR s.grade     = :grade)
+      AND (:major_name = '' OR s.major_name LIKE :major_name)
+  ),
+  origin_top AS (
+    SELECT family_address AS origin, COUNT(*) AS cnt
+    FROM student_job_city
+    GROUP BY family_address
+    ORDER BY cnt DESC
+    LIMIT 10
+  ),
+  city_top AS (
+    SELECT intern_city AS city, COUNT(*) AS cnt
+    FROM student_job_city
+    GROUP BY intern_city
+    ORDER BY cnt DESC
+    LIMIT 10
+  ),
+  overall AS (
+    SELECT
+      COUNT(*) AS total_students,
+      SUM(CASE WHEN LOCATE(intern_city, family_address) > 0 THEN 1 ELSE 0 END) AS return_students
+    FROM student_job_city
+  )
+  SELECT '生源地TOP10'  AS metric_type, origin  AS dim_value, cnt FROM origin_top
+  UNION ALL
+  SELECT '实习城市TOP10' AS metric_type, city    AS dim_value, cnt FROM city_top
+  UNION ALL
+  SELECT '回流率统计'   AS metric_type,
+         CONCAT(total_students, ' 总人 / ', return_students, ' 回流') AS dim_value,
+         ROUND(return_students * 100.0 / NULLIF(total_students, 0), 2) AS cnt
+  FROM overall
+
+params:
+  school_id:
+    type: string
+    required: false
+    description: 学校 school_id 过滤；留空表示不限学校
+    default: ''
+  grade:
+    type: string
+    required: false
+    description: 年级过滤；留空表示不限
+    default: ''
+  major_name:
+    type: string
+    required: false
+    description: 专业名称过滤，支持模糊匹配；留空表示不限
+    wildcard: like
+    default: ''
+
+return:
+  columns:
+    - {name: metric_type, description: 指标类型（生源地TOP10 / 实习城市TOP10 / 回流率统计）}
+    - {name: dim_value,  description: 维度值（生源地地址/实习城市/总体统计描述）}
+    - {name: cnt,        description: 计数（生源地/实习城市人数；回流率统计行为百分比）}
+
+limit: 50
+

@@ -1,0 +1,81 @@
+# 场景11：区域×行业薪资热力指数
+# 域：岗位数据（gxy_dw）
+# 原文提到 dim_major_position（不在 registry），泛化为只用 dwd_job_detail + dim_industry
+# 输出：城市 × 行业大类二维网格的薪资中位数（稳健性优于均值）
+# 泛化：可加省/市过滤、日期范围；附加基准值参数计算相对指数
+name: 区域行业薪资热力指数
+description: 构建城市×行业二维薪资指数，输出各网格薪资中位数及相对基准的指数，支持省/市和日期过滤
+
+sql: |
+  WITH salary_grid AS (
+    SELECT
+      j.city                          AS city,
+      j.trade_value_level1            AS industry_level1,
+      (j.salary_start + j.salary_end) / 2 AS salary_mid
+    FROM gxy_dw.dwd_job_detail j
+    WHERE
+      j.salary_start > 0 AND j.salary_end > 0
+      AND j.city IS NOT NULL AND j.city != ''
+      AND j.trade_value_level1 IS NOT NULL AND j.trade_value_level1 != ''
+      AND (:province = '' OR j.province = :province)
+      AND (:city     = '' OR j.city     = :city)
+      AND j.publish_time >= :start_date
+      AND j.publish_time <  :end_date
+  ),
+  baseline AS (
+    SELECT PERCENTILE_APPROX(salary_mid, 0.50) AS global_median
+    FROM salary_grid
+  )
+  SELECT
+    g.city,
+    g.industry_level1,
+    COUNT(*)                                       AS sample_count,
+    ROUND(PERCENTILE_APPROX(g.salary_mid, 0.50), 2) AS median_salary,
+    ROUND(
+      PERCENTILE_APPROX(g.salary_mid, 0.50) / NULLIF(b.global_median, 0),
+      3
+    ) AS salary_index
+  FROM
+    salary_grid g
+    CROSS JOIN baseline b
+  GROUP BY
+    g.city, g.industry_level1, b.global_median
+  HAVING sample_count >= :min_sample
+  ORDER BY
+    salary_index DESC
+
+params:
+  start_date:
+    type: string
+    required: true
+    description: 岗位发布起始日期，格式 'YYYY-MM-DD'
+  end_date:
+    type: string
+    required: true
+    description: 岗位发布结束日期（左开区间）
+  province:
+    type: string
+    required: false
+    description: 省份过滤；留空表示不限
+    default: ''
+  city:
+    type: string
+    required: false
+    description: 城市过滤；留空表示不限
+    default: ''
+  min_sample:
+    type: number
+    required: false
+    description: 网格最小样本数阈值，样本过少不输出；默认 5
+    default: 5
+
+return:
+  columns:
+    - {name: city,             description: 岗位所在市}
+    - {name: industry_level1, description: 国标一级行业}
+    - {name: sample_count,    description: 该网格样本数}
+    - {name: median_salary,   description: 该网格薪资中位数（P50）}
+    - {name: salary_index,    description: 相对指数（= 网格中位数 / 全局中位数，>1 高于基准）}
+
+limit: 500
+

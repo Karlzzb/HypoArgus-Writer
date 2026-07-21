@@ -1,0 +1,79 @@
+{
+  "schema_version": "search-agent-output/v1",
+  "request_id": "request_001",
+  "document_id": "document_001",
+  "paragraph_id": "paragraph_001",
+  "run_status": {
+    "status": "SUCCESS",
+    "completed_task_count": 1,
+    "partial_task_count": 0,
+    "error_task_count": 0,
+    "message": null
+  },
+  "results": [
+    {
+      "task_id": "request_001:task:1",
+      "item_id": "forward_001",
+      "node_id": "node_001",
+      "hypothesis_id": null,
+      "line_type": "forward",
+      "target_text": "2025年全球人形机器人出货量约1.8万台。",
+      "run_status": "SUCCESS",
+      "verdict": "SUPPORTED",
+      "confidence": 0.91,
+      "conclusion_summary": "引用直接给出目标年份和出货量。",
+      "citation_ids": ["cit_001"],
+      "supporting_citation_ids": ["cit_001"],
+      "refuting_citation_ids": [],
+      "supplementary_citation_ids": [],
+      "atomic_claim_results": [],
+      "evidence_gap": null,
+      "warnings": []
+    }
+  ],
+  "citations": [
+    {
+      "citation_id": "cit_001",
+      "task_ids": ["request_001:task:1"],
+      "content": "2025年全球人形机器人出货量接近1.8万台。",
+      "summary": "来源给出了2025年全球人形机器人出货量。",
+      "title": "报告标题",
+      "source_type": "WEB",
+      "source_name": "volcano_global_search",
+      "url": "https://example.com/report",
+      "document_id": null,
+      "knowledge_id": null,
+      "file_id": null,
+      "chunk_id": null,
+      "page": null,
+      "relation": "SUPPORT",
+      "status": "ACCEPTED",
+      "judgment": {
+        "confidence": 0.92,
+        "directness": 0.95,
+        "supported_claim_ids": ["a1"],
+        "refuted_claim_ids": [],
+        "reason": "引用直接给出目标年份和出货量。",
+        "scope_compatible": true,
+        "scope_mismatch_reasons": [],
+        "quote_match_mode": "EXACT"
+      },
+      "provenance": {
+        "query_ids": ["q1"],
+        "tool_call_id": null,
+        "scenario_key": null,
+        "dataset_id": null,
+        "query_execution_id": null,
+        "retrieved_at": "2026-07-14T00:00:00Z",
+        "published_at": "2026-02-26T00:00:00Z",
+        "content_fingerprint": "example-content-fingerprint",
+        "source_evidence_fingerprint": "example-source-fingerprint"
+      }
+    }
+  ],
+  "warnings": [],
+  "trace": {
+    "trace_id": "trace_example",
+    "trace_url": null
+  }
+}

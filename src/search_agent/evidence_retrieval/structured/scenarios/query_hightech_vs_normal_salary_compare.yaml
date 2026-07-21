@@ -1,0 +1,81 @@
+# 场景5：高新技术企业 vs 其他企业实习薪资差异分析
+# 域：企业基础数据（core_db）+ 岗位数据（gxy_dw）
+# 桥接：enterprise.company_id = enterprise_label.company_id；enterprise.uncid = dwd_job_detail.company_code
+# 分组：A 组=命中"高新技术企业"标签的企业岗位；B 组=未命中该标签的企业岗位
+# 泛化：标签类型可参数化；薪资统计含均值/中位数/样本量/分位数
+name: 高新技术企业与其他企业实习薪资差异分析
+description: 对比命中指定企业标签（默认"高新技术企业"）与未命中企业发布的实习岗位薪资分布，输出双组薪资统计
+
+sql: |
+  WITH ent_group AS (
+    SELECT
+      e.company_id,
+      e.uncid,
+      e.ent_name,
+      MAX(
+        CASE
+          WHEN l.type = CASE :label_type
+            WHEN '产教融合型企业'     THEN 0
+            WHEN '专精特新中小企业'   THEN 1
+            WHEN '专精特新小巨人企业' THEN 2
+            WHEN '500强'              THEN 3
+            WHEN '上市企业'           THEN 4
+            WHEN '科技型中小企业'     THEN 5
+            WHEN '创新型中小企业'     THEN 6
+            WHEN '高新技术企业'       THEN 7
+          END THEN 1
+          ELSE 0
+        END
+      ) AS is_target_group
+    FROM
+      core_db.enterprise e
+      LEFT JOIN core_db.enterprise_label l
+        ON e.company_id = l.company_id AND l.is_deleted = 0
+    GROUP BY e.company_id, e.uncid, e.ent_name
+  ),
+  job_salary AS (
+    SELECT
+      j.company_code,
+      (j.salary_start + j.salary_end) / 2 AS salary_mid
+    FROM gxy_dw.dwd_job_detail j
+    WHERE j.salary_start > 0 AND j.salary_end > 0
+      AND j.job_property = 3
+      AND j.company_code IS NOT NULL AND j.company_code != ''
+  )
+  SELECT
+    CASE WHEN g.is_target_group = 1 THEN 'A_目标组' ELSE 'B_对照组' END AS group_label,
+    COUNT(*)                                  AS sample_count,
+    COUNT(DISTINCT g.ent_name)               AS company_count,
+    ROUND(AVG(js.salary_mid), 2)              AS avg_salary,
+    ROUND(PERCENTILE_APPROX(js.salary_mid, 0.50), 2) AS median_salary,
+    ROUND(PERCENTILE_APPROX(js.salary_mid, 0.25), 2) AS p25_salary,
+    ROUND(PERCENTILE_APPROX(js.salary_mid, 0.75), 2) AS p75_salary,
+    MAX(js.salary_mid)                        AS max_salary,
+    MIN(js.salary_mid)                        AS min_salary
+  FROM
+    job_salary js
+    INNER JOIN ent_group g ON js.company_code = g.uncid
+  GROUP BY g.is_target_group
+  ORDER BY group_label
+
+params:
+  label_type:
+    type: string
+    required: false
+    description: 目标组企业标签类型，须与 enterprise_label 中文标签名一致，如"高新技术企业"
+    default: '高新技术企业'
+
+return:
+  columns:
+    - {name: group_label,    description: 分组标识（A_目标组 / B_对照组）}
+    - {name: sample_count,  description: 该组岗位样本数}
+    - {name: company_count, description: 该组企业数量}
+    - {name: avg_salary,    description: 平均薪资（薪资中值）}
+    - {name: median_salary, description: 薪资中位数（P50）}
+    - {name: p25_salary,    description: 薪资 25 分位数}
+    - {name: p75_salary,    description: 薪资 75 分位数}
+    - {name: max_salary,    description: 最高薪资}
+    - {name: min_salary,    description: 最低薪资}
+
+limit: 10
+

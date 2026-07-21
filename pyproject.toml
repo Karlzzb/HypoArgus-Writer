@@ -14,13 +14,18 @@ dependencies = [
     "uvicorn>=0.30",
     "langfuse>=4.14,<5",
     "pyyaml>=6.0.3",
+    # search_agent 检索引擎（自源项目一次性 fork）运行时依赖
+    "langchain-core>=1.3",
+    "httpx[http2]>=0.27",
+    "sqlalchemy>=2.0,<3",
+    "pymysql>=1.1,<2",
+    "pypdf>=4",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3",
     "mypy>=1.13",
-    "httpx>=0.27",
     "types-pyyaml>=6.0.12.20260518",
 ]
 # ulmen 压缩 serde 实验专用：实验结论为「不启用」（见 tests/e2e/test_ulmen_serde_experiment.py），
@@ -41,3 +46,12 @@ testpaths = ["tests"]
 mypy_path = "src"
 python_version = "3.11"
 check_untyped_defs = true
+
+# search_agent 为一次性 fork 的检索引擎，拷入初期整体豁免类型检查，后续随改造逐步收紧。
+[[tool.mypy.overrides]]
+module = "search_agent.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "pymysql.*"
+ignore_missing_imports = true

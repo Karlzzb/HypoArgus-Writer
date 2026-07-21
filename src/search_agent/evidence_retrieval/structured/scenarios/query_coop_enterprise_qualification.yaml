@@ -1,0 +1,109 @@
+# 场景3：校企合作企业资质背景审查
+# 域：企业基础数据（core_db）
+# 桥接：
+#   1) 先在 enterprise 表按 uncid 分组，取 update_time 最新的一条记录；
+#   2) 再通过 enterprise.uncid = enterprise_label.company_code 关联企业标签。
+# 泛化：标签类型可参数化过滤；输出企业聚合标签清单 + 成立年限
+# 说明：red_flag 依据企业最新登记状态确定；正常经营状态为 0，其余异常/未知状态为 1。
+name: 校企合作企业资质背景审查
+description: 按标签类型筛选合作企业，输出企业名称、统一社会信用代码、登记状态、标签清单、成立年限及经营异常红牌标记
+
+sql: |
+  WITH latest_enterprise AS (
+      SELECT
+          company_id,
+          ent_name,
+          uncid,
+          ent_status,
+          es_date,
+          ent_type_value,
+          ent_size,
+          province_name,
+          city,
+          update_time,
+          ROW_NUMBER() OVER (PARTITION BY uncid ORDER BY update_time DESC) AS rn
+      FROM core_db.enterprise
+  )
+  SELECT
+      e.ent_name,
+      e.uncid AS credit_code,
+      e.ent_status,
+      e.ent_type_value,
+      e.ent_size,
+      e.province_name,
+      e.city,
+      GROUP_CONCAT(DISTINCT
+          CASE l.type
+              WHEN 0 THEN '产教融合型企业'
+              WHEN 1 THEN '专精特新中小企业'
+              WHEN 2 THEN '专精特新小巨人企业'
+              WHEN 3 THEN '500强'
+              WHEN 4 THEN '上市企业'
+              WHEN 5 THEN '科技型中小企业'
+              WHEN 6 THEN '创新型中小企业'
+              WHEN 7 THEN '高新技术企业'
+          END
+          SEPARATOR ','
+      ) AS label_list,
+      e.es_date,
+      TIMESTAMPDIFF(YEAR, e.es_date, CURRENT_DATE()) AS established_years,
+      CASE
+          WHEN e.ent_status IN ('存续', '在业', '开业', '正常', '正常经营') THEN 0
+          ELSE 1
+      END AS red_flag
+  FROM latest_enterprise e
+  INNER JOIN core_db.enterprise_label l
+      ON e.uncid = l.company_code
+  WHERE
+      e.rn = 1
+      AND l.is_deleted = 0
+      AND (
+          :label_type = ''
+          OR l.type = CASE :label_type
+              WHEN '产教融合型企业'     THEN 0
+              WHEN '专精特新中小企业'   THEN 1
+              WHEN '专精特新小巨人企业' THEN 2
+              WHEN '500强'              THEN 3
+              WHEN '上市企业'           THEN 4
+              WHEN '科技型中小企业'     THEN 5
+              WHEN '创新型中小企业'     THEN 6
+              WHEN '高新技术企业'       THEN 7
+          END
+      )
+  GROUP BY
+      e.company_id,
+      e.ent_name,
+      e.uncid,
+      e.ent_status,
+      e.es_date,
+      e.ent_type_value,
+      e.ent_size,
+      e.province_name,
+      e.city,
+      e.update_time
+  ORDER BY
+      established_years DESC;
+
+params:
+  label_type:
+    type: string
+    required: false
+    description: 企业标签类型过滤，如"产教融合型企业"/"上市企业"/"高新技术企业"；留空表示返回所有带标签企业
+    default: ''
+
+return:
+  columns:
+    - {name: ent_name,           description: 企业名称}
+    - {name: credit_code,        description: 统一社会信用代码（uncid）}
+    - {name: ent_status,         description: 企业登记状态}
+    - {name: ent_type_value,     description: 企业性质值}
+    - {name: ent_size,           description: 企业规模}
+    - {name: province_name,      description: 注册省份}
+    - {name: city,               description: 注册城市}
+    - {name: label_list,         description: 企业标签清单（逗号分隔的中文标签名）}
+    - {name: es_date,            description: 企业成立时间}
+    - {name: established_years,  description: 成立年限}
+    - {name: red_flag,          description: 经营异常红牌标记（正常登记状态为0，其余为1）}
+
+limit: 50
+

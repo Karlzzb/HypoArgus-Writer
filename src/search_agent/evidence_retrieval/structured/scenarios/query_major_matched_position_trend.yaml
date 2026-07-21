@@ -1,0 +1,62 @@
+# 场景8：某专业对口岗位类型及近12个月招聘趋势
+# 域：教学管理（gxy_streaming）+ 岗位数据（gxy_dw）
+# 桥接：gxy_major_dict.major_dict_value（专业字典）→ recommended_jobs 字段（岗位名串）→ dwd_job_detail.job_name LIKE 匹配
+# 输出：按月聚合对口岗位的招聘发布数 + 平均薪资
+# 泛化：专业名称模糊匹配；窗口可参数化（默认近 12 个月）
+# 匹配策略：用 LOCATE 匹配专业名，用 REGEXP 多词匹配 recommended_jobs（岗位名命中串中任一词即算对口）
+name: 某专业对口岗位近N个月招聘趋势
+description: 根据专业名称定位推荐对口岗位，按月统计招聘发布数与平均薪资，输出月度趋势
+
+sql: |
+  WITH major_jobs AS (
+    SELECT DISTINCT
+      md.major_dict_value,
+      md.recommended_jobs
+    FROM gxy_streaming.gxy_major_dict md
+    WHERE md.is_deleted = 0
+      AND md.major_dict_value LIKE :major_name
+      AND md.recommended_jobs IS NOT NULL AND md.recommended_jobs != ''
+  )
+  SELECT
+    LEFT(jd.publish_time, 7) AS publish_month,
+    jd.job_name,
+    COUNT(*)                                AS job_publish_count,
+    ROUND(AVG((jd.salary_start + jd.salary_end) / 2), 2) AS avg_salary
+  FROM
+    gxy_dw.dwd_job_detail jd
+    INNER JOIN major_jobs m
+      ON LOCATE(m.major_dict_value, jd.job_name) > 0
+      OR jd.job_name REGEXP REPLACE(m.recommended_jobs, ',', '|')
+  WHERE
+    jd.publish_time IS NOT NULL
+    AND jd.publish_time >= :start_date
+    AND jd.publish_time <  :end_date
+  GROUP BY
+    publish_month, jd.job_name
+  ORDER BY
+    publish_month, job_publish_count DESC
+
+params:
+  major_name:
+    type: string
+    required: true
+    description: 专业名称（gxy_major_dict.major_dict_value），支持模糊匹配，如"软件技术"
+    wildcard: like
+  start_date:
+    type: string
+    required: true
+    description: 趋势起始日期，格式 'YYYY-MM-DD'（建议为近 12 个月起点）
+  end_date:
+    type: string
+    required: true
+    description: 趋势结束日期（左开区间）
+
+return:
+  columns:
+    - {name: publish_month,       description: 岗位发布月份（YYYY-MM）}
+    - {name: job_name,            description: 对口岗位名称}
+    - {name: job_publish_count,   description: 该月该岗位发布数}
+    - {name: avg_salary,         description: 该月该岗位平均薪资（薪资中值）}
+
+limit: 300
+

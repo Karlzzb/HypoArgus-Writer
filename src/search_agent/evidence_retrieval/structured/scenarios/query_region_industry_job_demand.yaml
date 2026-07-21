@@ -1,0 +1,57 @@
+# 场景2：区域产业人才需求热力图
+# 域：岗位数据（gxy_dw）
+# 泛化：把"城市 × 行业大类"作为可参数化维度，可选省/市与日期范围过滤，输出岗位发布数量
+# 行业维度取国标一级行业（trade_value_level1），可与 dim_industry 对齐但 dwd_job_detail 内已含该字段，避免冗余 JOIN
+name: 区域产业人才需求热力图
+description: 按城市×行业大类统计岗位发布数量，支持按省/市和发布日期范围过滤，输出热力矩阵数据
+
+sql: |
+  SELECT
+    j.province                     AS province,
+    j.city                         AS city,
+    j.trade_value_level1           AS industry_level1,
+    COUNT(*)                       AS job_publish_count,
+    COUNT(DISTINCT j.company_name) AS company_count
+  FROM
+    gxy_dw.dwd_job_detail j
+  WHERE
+    j.publish_time IS NOT NULL
+    AND j.publish_time >= :start_date
+    AND j.publish_time <  :end_date
+    AND (:province = '' OR j.province = :province)
+    AND (:city     = '' OR j.city     = :city)
+  GROUP BY
+    j.province, j.city, j.trade_value_level1
+  ORDER BY
+    job_publish_count DESC
+
+params:
+  start_date:
+    type: string
+    required: true
+    description: 岗位发布起始日期，格式 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS'
+  end_date:
+    type: string
+    required: true
+    description: 岗位发布结束日期（左开区间），格式同上
+  province:
+    type: string
+    required: false
+    description: 省份过滤；留空表示不限
+    default: ''
+  city:
+    type: string
+    required: false
+    description: 城市过滤；留空表示不限
+    default: ''
+
+return:
+  columns:
+    - {name: province,          description: 岗位所在省}
+    - {name: city,              description: 岗位所在市}
+    - {name: industry_level1,  description: 国标一级行业名称}
+    - {name: job_publish_count, description: 该网格岗位发布数}
+    - {name: company_count,     description: 该网格发布岗位的企业数}
+
+limit: 500
+

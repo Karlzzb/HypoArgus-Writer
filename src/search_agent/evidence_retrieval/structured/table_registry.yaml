@@ -1,0 +1,40 @@
+# 表名 → 库名 权威映射（单一真相源）
+# 派生自「职业教育智能体数据查询能力.md」
+# 已修正笔误：gxy_sreaming → gxy_streaming（3 处）；gxy_student → gxy_students（复数）
+# 加载场景 YAML 时，_validate_table_refs 会据此校验 SQL 中 FROM/JOIN 后的引用。
+tables:
+  # ===== 实习管理（gxy_streaming） =====
+  gxy_students: gxy_streaming
+  gxy_attendance: gxy_streaming
+  gxy_guide: gxy_streaming
+  gxy_guide_student: gxy_streaming
+  gxy_report: gxy_streaming
+  gxy_report_detail: gxy_streaming
+  gxy_job: gxy_streaming
+
+  # ===== 教学管理（gxy_streaming） =====
+  gxy_school: gxy_streaming
+  gxy_batch: gxy_streaming
+  gxy_classes: gxy_streaming
+  gxy_department: gxy_streaming
+  gxy_major: gxy_streaming
+  gxy_major_dict: gxy_streaming
+  gxy_teacher: gxy_streaming
+
+  # ===== 教师信息（gxy_streaming） =====
+  # gxy_teacher 已列于教学管理
+
+  # ===== 岗位数据（gxy_dw） =====
+  dwd_job_detail: gxy_dw
+  dwd_job_feature_rel: gxy_dw
+  dwd_feature_atlas: gxy_dw
+  dim_job_position: gxy_dw
+  dim_industry: gxy_dw
+
+  # ===== 智联类别（gxy_streaming） =====
+  mogu_zl_position: gxy_streaming
+
+  # ===== 企业基础数据（core_db） =====
+  enterprise: core_db
+  enterprise_label: core_db
+

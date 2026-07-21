@@ -1,0 +1,373 @@
+{
+  "$defs": {
+    "ArgumentContext": {
+      "additionalProperties": false,
+      "properties": {
+        "argument_path": {
+          "items": {
+            "$ref": "#/$defs/ArgumentPathItem"
+          },
+          "title": "Argument Path",
+          "type": "array"
+        },
+        "boundary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Boundary"
+        },
+        "max_depth": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Max Depth",
+          "type": "integer"
+        }
+      },
+      "title": "ArgumentContext",
+      "type": "object"
+    },
+    "ArgumentPathItem": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "minimum": 1,
+          "title": "Level",
+          "type": "integer"
+        },
+        "node_id": {
+          "minLength": 1,
+          "title": "Node Id",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "node_id",
+        "text"
+      ],
+      "title": "ArgumentPathItem",
+      "type": "object"
+    },
+    "ForwardItem": {
+      "additionalProperties": false,
+      "properties": {
+        "existing_evidence_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Existing Evidence Text"
+        },
+        "item_id": {
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "item_type": {
+          "default": "claim",
+          "enum": [
+            "claim",
+            "evidence"
+          ],
+          "title": "Item Type",
+          "type": "string"
+        },
+        "required_slots": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Slots",
+          "type": "array"
+        },
+        "source_refs": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "target_text": {
+          "minLength": 1,
+          "title": "Target Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "target_text"
+      ],
+      "title": "ForwardItem",
+      "type": "object"
+    },
+    "KnowledgeContext": {
+      "additionalProperties": false,
+      "properties": {
+        "selected_knowledge_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Selected Knowledge Ids",
+          "type": "array"
+        }
+      },
+      "title": "KnowledgeContext",
+      "type": "object"
+    },
+    "OrganizationContext": {
+      "additionalProperties": false,
+      "description": "Tenant boundary supplied by the upstream orchestration graph.",
+      "properties": {
+        "school_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "School Id"
+        },
+        "tenant_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tenant Id"
+        }
+      },
+      "title": "OrganizationContext",
+      "type": "object"
+    },
+    "ParagraphInput": {
+      "additionalProperties": false,
+      "description": "Single-paragraph boundary used by the production SearchAgent graph.",
+      "properties": {
+        "argument_context": {
+          "$ref": "#/$defs/ArgumentContext"
+        },
+        "forward_items": {
+          "items": {
+            "$ref": "#/$defs/ForwardItem"
+          },
+          "title": "Forward Items",
+          "type": "array"
+        },
+        "paragraph_id": {
+          "minLength": 1,
+          "title": "Paragraph Id",
+          "type": "string"
+        },
+        "paragraph_text": {
+          "title": "Paragraph Text",
+          "type": "string"
+        },
+        "reverse_items": {
+          "items": {
+            "$ref": "#/$defs/ReverseItem"
+          },
+          "title": "Reverse Items",
+          "type": "array"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "paragraph_id",
+        "paragraph_text"
+      ],
+      "title": "ParagraphInput",
+      "type": "object"
+    },
+    "ReverseItem": {
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "relation_to_original": {
+          "default": "oppose",
+          "enum": [
+            "oppose",
+            "advance",
+            "expand"
+          ],
+          "title": "Relation To Original",
+          "type": "string"
+        },
+        "required_slots": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Slots",
+          "type": "array"
+        },
+        "target_text": {
+          "minLength": 1,
+          "title": "Target Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "target_text"
+      ],
+      "title": "ReverseItem",
+      "type": "object"
+    },
+    "SourceRange": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_end": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Byte End",
+          "type": "integer"
+        },
+        "byte_start": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Byte Start",
+          "type": "integer"
+        },
+        "raw_store_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Store Id"
+        }
+      },
+      "title": "SourceRange",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "document_id": {
+      "minLength": 1,
+      "title": "Document Id",
+      "type": "string"
+    },
+    "knowledge_context": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KnowledgeContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "organization_context": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OrganizationContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "paragraph": {
+      "$ref": "#/$defs/ParagraphInput"
+    },
+    "request_id": {
+      "minLength": 1,
+      "title": "Request Id",
+      "type": "string"
+    },
+    "retrieval_policy": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retrieval Policy"
+    },
+    "schema_version": {
+      "const": "search-agent-input/v1",
+      "default": "search-agent-input/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "trace_context": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Trace Context"
+    },
+    "user_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "User Id"
+    }
+  },
+  "required": [
+    "request_id",
+    "document_id",
+    "paragraph"
+  ],
+  "title": "SearchAgentInputState",
+  "type": "object"
+}

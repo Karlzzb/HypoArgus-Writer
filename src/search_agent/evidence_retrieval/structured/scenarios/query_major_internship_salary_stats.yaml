@@ -1,0 +1,90 @@
+# 场景1：各专业毕业生实习薪资等属性质量评估
+# 域：实习管理（gxy_streaming）+ 岗位数据（gxy_dw）
+# 桥接：gxy_students.student_id = gxy_report.student_id；gxy_report.job_id = dwd_job_detail.id
+# 泛化：把"专业 + 学年"作为可过滤维度，薪资异常值剔除阈值参数化
+name: 各专业毕业生实习薪资质量评估
+description: 按专业、学年统计毕业生实习岗位薪资水平，分析不同专业市场就业价值。
+             统计指标包括平均薪资、最高薪资、最低薪资、中位数(P50)、P25、P75分位数。
+             自动剔除薪资为空、薪资为0以及明显异常高薪记录。
+
+sql: |
+  WITH salary_source AS (
+      SELECT
+          s.major_name,
+          s.grade AS academic_year,
+          s.student_id,
+          j.salary_start,
+          j.salary_end,
+          -- 岗位薪资中间值
+          (j.salary_start + j.salary_end) / 2.0 AS salary_mid
+      FROM
+          gxy_streaming.gxy_students s
+      INNER JOIN
+          gxy_streaming.gxy_job sj
+      ON
+          s.student_id = sj.student_id
+      INNER JOIN
+          gxy_dw.dwd_job_detail j
+      ON
+          sj.job_id = j.id
+      WHERE
+          -- 专业过滤
+          s.major_name LIKE :major_name
+          -- 学年范围
+          AND s.grade BETWEEN :start_year AND :end_year
+          -- 排除无效薪资
+          AND j.salary_start > 0
+          AND j.salary_end > 0
+          -- 排除异常薪资
+          AND j.salary_end <= :salary_upper_bound
+  )
+  SELECT
+      major_name,
+      academic_year,
+      COUNT(*) AS sample_count,
+      ROUND(AVG(salary_mid), 2) AS avg_salary,
+      MAX(salary_mid) AS max_salary,
+      MIN(salary_mid) AS min_salary,
+      ROUND(PERCENTILE_APPROX(salary_mid, 0.50), 2) AS median_salary,
+      ROUND(PERCENTILE_APPROX(salary_mid, 0.25), 2) AS p25_salary,
+      ROUND(PERCENTILE_APPROX(salary_mid, 0.75), 2) AS p75_salary
+  FROM salary_source
+  GROUP BY
+      major_name,
+      academic_year
+  ORDER BY
+      academic_year ASC,
+      avg_salary DESC
+
+params:
+  major_name:
+    type: string
+    required: true
+    description: 专业名称（gxy_students.major_name），支持模糊匹配，如"计算机"
+    wildcard: like
+  start_year:
+    type: string
+    required: true
+    description: 起始学年（年级），如 '2020级' 或 '2020'
+  end_year:
+    type: string
+    required: true
+    description: 结束学年（年级），如 '2024级' 或 '2024'
+  salary_upper_bound:
+    type: number
+    required: false
+    description: 薪资上限阈值，用于剔除异常高薪记录；默认 100000
+    default: 100000
+return:
+  columns:
+    - {name: major_name,     description: 专业名称}
+    - {name: academic_year,  description: 学年（年级）}
+    - {name: sample_count,   description: 有效学生数量}
+    - {name: avg_salary,     description: 平均实习薪资（岗位薪资中值）}
+    - {name: max_salary,     description: 最高实习薪资}
+    - {name: min_salary,     description: 最低实习薪资}
+    - {name: median_salary,  description: 薪资中位数（P50）}
+    - {name: p25_salary,     description: 薪资 25 分位数}
+    - {name: p75_salary,     description: 薪资 75 分位数}
+
+limit: 200
