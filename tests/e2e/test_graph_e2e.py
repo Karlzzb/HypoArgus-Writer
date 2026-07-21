@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from agents.rewriter_loop import make_stub_rewriter_loop
+from agents.search_agent import make_stub_search_agent
 from domain.citation_reconciler import MARKER_PATTERN
 from domain.units import MAIN_NODES
 from graph import build_graph, checkpoint_serializer, postgres_checkpointer
@@ -60,6 +61,7 @@ def _build(responses: list[str], **kwargs):
     """
     fake = FakeLLM(list(responses), keyed_responses=FRAMEWORK_KEYED_RESPONSES)
     kwargs.setdefault("rewriter_loop", make_stub_rewriter_loop())
+    kwargs.setdefault("search_agent", make_stub_search_agent())
     graph = build_graph(
         llm_factory=lambda unit: fake, checkpointer=InMemorySaver(serde=checkpoint_serializer()), **kwargs
     )
@@ -436,6 +438,7 @@ def test_写作自环中断恢复_已完成章节零重复调用且产物与不�
         graph = build_graph(
             llm_factory=lambda unit: fake,
             checkpointer=saver,
+            search_agent=make_stub_search_agent(),
             rewriter_loop=make_rewriter_loop(
                 lambda unit: crashing, _recorder(events_before)
             ),
@@ -469,6 +472,7 @@ def test_写作自环中断恢复_已完成章节零重复调用且产物与不�
         graph2 = build_graph(
             llm_factory=lambda unit: fake2,
             checkpointer=saver,
+            search_agent=make_stub_search_agent(),
             rewriter_loop=make_rewriter_loop(
                 lambda unit: fake2, _recorder(events_after)
             ),
@@ -522,7 +526,9 @@ def test_写作自环中断恢复_已完成章节零重复调用且产物与不�
             },
         )
         baseline_graph = build_graph(
-            llm_factory=lambda unit: baseline_fake, checkpointer=InMemorySaver(serde=checkpoint_serializer())
+            llm_factory=lambda unit: baseline_fake,
+            checkpointer=InMemorySaver(serde=checkpoint_serializer()),
+            search_agent=make_stub_search_agent(),
         )
         baseline_config: RunnableConfig = {
             "configurable": {"thread_id": f"e2e-crash-base-{uuid.uuid4()}"}
@@ -775,6 +781,7 @@ def test_LLM调用次数与单元归属():
     graph = build_graph(
         llm_factory=factory,
         checkpointer=InMemorySaver(serde=checkpoint_serializer()),
+        search_agent=make_stub_search_agent(),
         rewriter_loop=make_stub_rewriter_loop(),
     )
     config: RunnableConfig = {"configurable": {"thread_id": "e2e-llm-count"}}
@@ -805,6 +812,7 @@ def test_状态经Postgres存档器持久化():
         graph = build_graph(
             llm_factory=lambda unit: fake,
             checkpointer=saver,
+            search_agent=make_stub_search_agent(),
             rewriter_loop=make_stub_rewriter_loop(),
         )
         result = graph.invoke(

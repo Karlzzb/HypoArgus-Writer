@@ -1,7 +1,8 @@
-"""search_agent 子智能体：按章节批量检索假说证据。
+"""search_agent 子智能体打桩：按章节批量生成确定性模拟素材。
 
-本期为打桩实现；真实现落地时按 contracts.SearchTask/SearchResult
-同一接口规范替换，工厂签名不变。
+真实现（agents.search_agent.agent.make_search_agent）已按
+contracts.SearchTask/SearchResult 同一接口规范落地并成为缺省装配；
+打桩同包共存，供空转链路与测试显式注入（工厂签名与真实现一致）。
 """
 
 from typing import Any

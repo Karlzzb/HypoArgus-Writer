@@ -124,12 +124,15 @@ class SearchAgentRuntime:
             "SEARCH_AGENT_EVIDENCE_JUDGE_LLM_ENABLED",
         )
         if structured_intent_enabled or evidence_judge_enabled:
-            llm = OpenAICompatibleChatClient.from_env(
-                model=config.judge_model,
-                timeout_seconds=config.parallel_batch_judge_timeout_ms / 1000,
-                max_connections=config.judge_batch_concurrency,
-            )
-            if llm is None:
+            # LLM 配置走宿主项目统一解析（SEARCH_AGENT_LLM_* 回落全局 LLM_*），
+            # 引擎不再自读裸环境变量；JUDGE_MODEL 仍可单独覆盖裁决模型。
+            try:
+                llm = OpenAICompatibleChatClient.from_project_llm_config(
+                    judge_model=config.judge_model,
+                    timeout_seconds=config.parallel_batch_judge_timeout_ms / 1000,
+                    max_connections=config.judge_batch_concurrency,
+                )
+            except ValueError as exc:
                 capabilities = ", ".join(
                     name
                     for name, enabled in (
@@ -139,9 +142,8 @@ class SearchAgentRuntime:
                     if enabled
                 )
                 raise SearchAgentConfigurationError(
-                    f"{capabilities} requires the shared SearchAgent LLM client, but "
-                    "LLM_KEY / LLM_BASE_URL / LLM_MODEL is not configured."
-                )
+                    f"{capabilities} requires the shared SearchAgent LLM client: {exc}"
+                ) from exc
             dependencies = EvidenceRetrievalDependencies.with_capabilities(
                 config,
                 llm,

@@ -501,8 +501,11 @@ def _build_app(real: bool):
         WRITER_KEYED_RESPONSES,
     )
 
+    from agents.search_agent import make_stub_search_agent
+
     # 空转也走 rewriter_loop 真实现链路（真编排 + 真校验器 + 真解析）：
     # 写作与自审调用按 WRITER_KEYED_RESPONSES 键控分派，仅最底层模型调用是假的。
+    # 检索注入打桩：真实现会调外部检索通道，空转模式不触网。
     fake = FakeLLM(
         list(TRUNK_RESPONSES),
         keyed_responses={**FRAMEWORK_KEYED_RESPONSES, **WRITER_KEYED_RESPONSES},
@@ -510,6 +513,7 @@ def _build_app(real: bool):
     return create_app(
         llm_factory=lambda unit: fake,
         checkpointer=InMemorySaver(serde=checkpoint_serializer()),
+        search_agent=make_stub_search_agent,
     )
 
 

@@ -2,8 +2,10 @@
 
 包导入时自动加载包级 ``.env``（见 ``__init__``），支持的配置项：
 
-    LLM_KEY / LLM_BASE_URL / LLM_MODEL   -> 引擎内 OpenAI 兼容 LLM 客户端
     LANGFUSE_PUBLIC_KEY / _SECRET_KEY / _BASE_URL -> Langfuse 追踪
+
+引擎 LLM 配置不再走裸环境变量，统一由宿主项目 llm.llm_config 解析
+（SEARCH_AGENT_LLM_* 回落全局 LLM_*）。
 
 加载只能通过删除 ``.env`` 关闭，绝不覆盖进程环境中已存在的变量；
 读取的是与本包同目录的 ``.env``，与调用方工作目录无关。

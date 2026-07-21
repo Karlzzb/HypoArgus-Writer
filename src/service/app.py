@@ -26,7 +26,8 @@ from graph import build_graph, postgres_checkpointer
 from llm.llm_client import LLMFactory, default_llm_factory
 from agents.contracts import Subagent
 from agents.rewriter_loop import make_rewriter_loop
-from agents.search_agent import make_stub_search_agent
+from agents.search_agent import make_search_agent
+from domain.events import EventHook
 from service.task_service import (
     InvalidReview,
     SubagentHookDispatcher,
@@ -36,6 +37,26 @@ from service.task_service import (
 )
 
 _SSE_HEADERS = {"Cache-Control": "no-cache"}
+
+SubagentFactory = Callable[[EventHook], Subagent]
+"""子智能体工厂形态：以应用内部事件分发器实例化（工厂签名与打桩/真实现一致）。"""
+
+
+def _resolve_subagent(
+    injected: Subagent | SubagentFactory | None,
+    default_factory: SubagentFactory,
+    event_hook: EventHook,
+) -> Subagent:
+    """解析注入的子智能体：实例直用，工厂以内部事件分发器实例化，None 走缺省工厂。
+
+    工厂形态供测试注入打桩/假运行时的同时保留事件旁路（进度事件仍经
+    dispatcher → emitter → SSE 流出）；实例形态调用方自管事件钩子。
+    """
+    if injected is None:
+        return default_factory(event_hook)
+    if isinstance(injected, Subagent):
+        return injected
+    return injected(event_hook)
 
 
 class CreateTaskRequest(BaseModel):
@@ -128,17 +149,18 @@ def create_app(
     *,
     llm_factory: LLMFactory = default_llm_factory,
     checkpointer: BaseCheckpointSaver | None = None,
-    search_agent: Subagent | None = None,
-    rewriter_loop: Subagent | None = None,
+    search_agent: Subagent | SubagentFactory | None = None,
+    rewriter_loop: Subagent | SubagentFactory | None = None,
     citation_max_retries: int | None = None,
     assembler_config: AssemblerConfig | None = None,
 ) -> FastAPI:
     """构建 FastAPI 应用：全部依赖在 lifespan 里装配。
 
     checkpointer 为 None 时走生产路径（Postgres 存档器，按环境变量连接）；
-    测试注入 InMemorySaver。search_agent 未注入时使用打桩适配器，
-    rewriter_loop 未注入时使用真实现工厂（make_rewriter_loop），事件钩子
-    经线程本地分发器按运行动态路由。
+    测试注入 InMemorySaver。search_agent 与 rewriter_loop 未注入时均使用
+    真实现工厂（make_search_agent / make_rewriter_loop），事件钩子
+    经线程本地分发器按运行动态路由；注入工厂形态时同样以内部分发器实例化
+    （保留事件旁路），注入实例形态时调用方自管事件钩子。
     """
 
     @asynccontextmanager
@@ -154,10 +176,14 @@ def create_app(
             graph = build_graph(
                 llm_factory=llm_factory,
                 checkpointer=saver,
-                search_agent=search_agent
-                or make_stub_search_agent(hook_dispatcher),
-                rewriter_loop=rewriter_loop
-                or make_rewriter_loop(llm_factory, hook_dispatcher),
+                search_agent=_resolve_subagent(
+                    search_agent, make_search_agent, hook_dispatcher
+                ),
+                rewriter_loop=_resolve_subagent(
+                    rewriter_loop,
+                    lambda hook: make_rewriter_loop(llm_factory, hook),
+                    hook_dispatcher,
+                ),
                 citation_max_retries=citation_max_retries,
                 assembler_config=assembler_config,
             )

@@ -15,7 +15,8 @@ framework_orchestrator → reference_orchestrator → chapter_drafter → writin
 检索与首写两段均经 `Send` 并行扇出：reference_orchestrator 每个待检索章节一个分支、只回写单章素材，引文库经合并 reducer 汇入并跨章按 URL 去重；chapter_drafter 每个未写章节一个分支，各分支承接前章规划摘要链、只回写单章草稿；修订与终审回退仍由 writing_orchestrator 串行自环处理。
 
 - 论证体系三层结构：章节 1—n 论点，论点 1—N 假说；假说可证伪、可检索验证，是检索任务的直接驱动源。
-- 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入；rewriter_loop 已为真实实现（写作、风格校验、自审、修一次），search_agent 仍为打桩。
+- 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入，均为真实实现且是缺省装配。
+search_agent 经薄适配层调用 fork 进本项目的 SearchAgent V12 检索引擎（火山联网 / Bisheng 知识库 / Doris 结构化三通道），打桩同包保留供测试注入。
 - 引用采用「正文角标 + 结构化引文库」分离方案；最终交付可按任意书目格式渲染，格式与内容解耦。
 - human_review_gate 是全流程唯一安全汇点：任何机器环节失败若干次后都塌缩到这里，系统永不卡死。
 - 全流程状态经 LangGraph 官方 Postgres 检查点保存器（checkpointer）持久化，支持断点续跑与历史版本回滚。

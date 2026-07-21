@@ -27,6 +27,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 
 from agents.rewriter_loop import make_stub_rewriter_loop
+from agents.search_agent import make_stub_search_agent
 from service.app import create_app
 from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
@@ -65,6 +66,8 @@ def _make_app(
     subagent_kwargs: dict[str, Any] = (
         {"rewriter_loop": make_stub_rewriter_loop()} if rewriter_stub else {}
     )
+    # 检索一律注入打桩工厂（以应用内部事件分发器实例化，保留事件旁路）。
+    subagent_kwargs["search_agent"] = make_stub_search_agent
     return create_app(
         llm_factory=lambda unit: fake,
         checkpointer=checkpointer if checkpointer is not None else InMemorySaver(serde=checkpoint_serializer()),
@@ -558,6 +561,7 @@ def test_断点续跑_图运行中途死亡后resume续跑至中断点():
     graph = build_graph(
         llm_factory=lambda unit: fake,
         checkpointer=saver,
+        search_agent=make_stub_search_agent(),
         rewriter_loop=make_stub_rewriter_loop(),
     )
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
@@ -613,6 +617,7 @@ def test_崩溃后免resume_直接查状态检查点并回滚到中断点():
     graph = build_graph(
         llm_factory=lambda unit: fake,
         checkpointer=saver,
+        search_agent=make_stub_search_agent(),
         rewriter_loop=make_stub_rewriter_loop(),
     )
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}

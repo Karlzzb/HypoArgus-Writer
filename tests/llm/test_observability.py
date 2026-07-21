@@ -12,6 +12,7 @@ from langgraph.types import Command
 
 from llm import observability
 from agents.rewriter_loop import make_stub_rewriter_loop
+from agents.search_agent import make_stub_search_agent
 from domain.units import MAIN_NODES
 from graph import build_graph, checkpoint_serializer
 from llm.llm_client import FakeLLM, OpenAICompatibleLLM
@@ -213,7 +214,8 @@ def captured_spans():
         graph = build_graph(
             llm_factory=lambda unit: fake,
             checkpointer=InMemorySaver(serde=checkpoint_serializer()),
-            # 本测试验收 span 覆盖而非写作真实现：显式注入打桩改写器。
+            # 本测试验收 span 覆盖而非子智能体真实现：显式注入两个打桩。
+            search_agent=make_stub_search_agent(),
             rewriter_loop=make_stub_rewriter_loop(),
         )
         config: RunnableConfig = {"configurable": {"thread_id": "obs-test"}}

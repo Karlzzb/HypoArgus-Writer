@@ -6,7 +6,14 @@
 """
 
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, NotRequired, Protocol, TypedDict
+from typing import (
+    Any,
+    Literal,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    runtime_checkable,
+)
 
 from domain.events import SUBAGENT_END, SUBAGENT_START, EventHook, noop_hook
 from domain.state import Material, SourceKind
@@ -128,8 +135,13 @@ class RewriteResult(TypedDict):
     """回带任务包携带的变体，语义同 doc_type。"""
 
 
+@runtime_checkable
 class Subagent(Protocol):
-    """子智能体黑盒调用协议：编排节点只依赖此协议，不关心真实现或打桩。"""
+    """子智能体黑盒调用协议：编排节点只依赖此协议，不关心真实现或打桩。
+
+    runtime_checkable 供装配层区分实例与工厂形态的注入（结构性判定：
+    有 run 与 unit 属性即视为实例）。
+    """
 
     @property
     def unit(self) -> str:

@@ -14,8 +14,6 @@ from typing import Any
 
 import httpx
 
-from ...env import env_str
-
 
 def _chat_completions_url(base_url: str) -> str:
     value = base_url.strip().rstrip("/")
@@ -68,21 +66,25 @@ class OpenAICompatibleChatClient:
         )
 
     @classmethod
-    def from_env(
+    def from_project_llm_config(
         cls,
         *,
-        model: str | None,
+        judge_model: str | None,
         timeout_seconds: float = 35.0,
         max_connections: int = 4,
-    ):
-        api_key = env_str("LLM_KEY")
-        base_url = env_str("LLM_BASE_URL")
-        if not api_key or not base_url:
-            return None
+    ) -> "OpenAICompatibleChatClient":
+        """按宿主项目统一解析构建共享客户端（SEARCH_AGENT_LLM_* 回落全局 LLM_*）。
+
+        JUDGE_MODEL（经 config.judge_model 传入）可单独覆盖裁决模型；
+        单元配置缺失时向上抛 ValueError，是否致命由调用方裁决。
+        """
+        from llm.llm_config import load_llm_config
+
+        llm_config = load_llm_config("search_agent")
         return cls(
-            endpoint=base_url,
-            api_key=api_key,
-            model=model or env_str("LLM_MODEL") or "qwen-turbo",
+            endpoint=llm_config.base_url,
+            api_key=llm_config.api_key,
+            model=judge_model or llm_config.model,
             timeout_seconds=timeout_seconds,
             max_connections=max_connections,
         )

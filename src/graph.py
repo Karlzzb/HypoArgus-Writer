@@ -42,7 +42,7 @@ from pydantic import BaseModel
 
 from agents.contracts import Subagent
 from agents.rewriter_loop import make_rewriter_loop
-from agents.search_agent import make_stub_search_agent
+from agents.search_agent import make_search_agent
 from assembly.assembler_config import AssemblerConfig
 from domain import state as domain_state
 from domain.state import WorkflowStatus, WritingAgentState
@@ -176,16 +176,17 @@ def build_graph(
     """构建并编译迭代闭环图。
 
     llm_factory 是确定性假 LLM 的测试注入点；
-    search_agent 未注入时使用本期打桩适配器；rewriter_loop 未注入时使用
-    真实现工厂（make_rewriter_loop：构图时读取一次写作环境配置并按单元名
-    取 LLM），打桩仅在显式注入处使用；
+    search_agent 未注入时使用真实现工厂（make_search_agent：检索引擎
+    无状态一次性调用，构造零环境依赖、首次检索才触碰引擎配置）；
+    rewriter_loop 未注入时使用真实现工厂（make_rewriter_loop：构图时读取
+    一次写作环境配置并按单元名取 LLM）；打桩仅在显式注入处使用；
     citation_max_retries 未注入时按环境变量 CITATION_MAX_RETRIES（缺省 2）；
     assembler_config 未注入时各节点执行期按环境变量读取装配配置。
     人工中断点依赖存档器恢复，生产运行必须传入 checkpointer。
     Langfuse 启用时节点函数与子智能体适配层被包进运行单元 span。
     """
     effective_search_agent = observability.wrap_subagent(
-        search_agent or make_stub_search_agent()
+        search_agent or make_search_agent()
     )
     effective_rewriter_loop = observability.wrap_subagent(
         rewriter_loop or make_rewriter_loop(llm_factory)

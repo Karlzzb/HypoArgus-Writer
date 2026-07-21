@@ -44,11 +44,16 @@ def build_evidence_retrieval_graph(
         # callers did not inject dependencies explicitly.
         from .providers.openai_compatible_chat import OpenAICompatibleChatClient
 
-        llm = OpenAICompatibleChatClient.from_env(
-            model=config.judge_model,
-            timeout_seconds=config.parallel_batch_judge_timeout_ms / 1000,
-            max_connections=config.judge_batch_concurrency,
-        )
+        # LLM 配置走宿主项目统一解析（SEARCH_AGENT_LLM_* 回落全局 LLM_*）；
+        # 单元配置缺失时与历史行为一致：回落无 LLM 能力的缺省依赖。
+        try:
+            llm = OpenAICompatibleChatClient.from_project_llm_config(
+                judge_model=config.judge_model,
+                timeout_seconds=config.parallel_batch_judge_timeout_ms / 1000,
+                max_connections=config.judge_batch_concurrency,
+            )
+        except ValueError:
+            llm = None
         deps = (
             EvidenceRetrievalDependencies.with_capabilities(
                 config,
