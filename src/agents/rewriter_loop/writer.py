@@ -121,7 +121,12 @@ def make_writer_run(
             （没有真实调用），但仍发 audit_done（issues=0）保证步骤流完整可观测。
             """
             found = lint(
-                text, doc_type, doc_variant, materials=materials, hypotheses=spec["hypotheses"]
+                text,
+                doc_type,
+                doc_variant,
+                chapter_type=spec.get("chapter_type"),
+                materials=materials,
+                hypotheses=spec["hypotheses"],
             )
             progress("lint_done", violations=len(found))
             if materials:
@@ -148,6 +153,7 @@ def make_writer_run(
                 task.get("current_text", ""),
                 doc_type,
                 doc_variant,
+                chapter_type=spec.get("chapter_type"),
                 materials=materials,
                 hypotheses=spec["hypotheses"],
             )

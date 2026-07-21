@@ -233,7 +233,9 @@ def test_真实适配器_draft字数目标_叙述章型注入中上限提示(dra
 
 def test_真实适配器_draft字数目标_表章注入中下限且不得凑段(draft_task: dict[str, Any]) -> None:
     # 职业面向章为 table_required → 表章 → 字数目标块含「中下限」「不得表外堆砌」。
+    # 章型经任务包携带并优先于标题解析（ADR-0005），须与标题一并同步。
     draft_task["chapter_spec"]["title"] = "五、职业面向"
+    draft_task["chapter_spec"]["chapter_type"] = "职业面向"
     llm = FakeLLM(responses=[_writer_json("正文。")])
     _make_client(llm).draft(draft_task, _STYLE_PROSE)
 

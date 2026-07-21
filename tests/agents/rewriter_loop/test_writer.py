@@ -456,3 +456,30 @@ def test_写作编排_修后复检仍违规_如实折入issues(draft_task: dict[
     assert any("word_count" in issue and "不足下限" in issue for issue in issues)
     assert result["self_check"]["citations_ok"] is True
 
+
+def test_写作编排_任务包章型进lint_维度章观点标题无表触发修一次(
+    draft_task: dict[str, Any],
+) -> None:
+    # ADR-0005：章型经任务包携带、lint 直接消费——维度章的自由观点标题
+    # 无法从标题反推，仅当章型透传进 lint 时表章规则才会命中。
+    draft_task["doc_type"] = "调研报告"
+    draft_task["doc_variant"] = None
+    draft_task["chapter_spec"]["title"] = "空间下沉：精准破局「基层人才荒」"
+    draft_task["chapter_spec"]["chapter_type"] = "维度章"
+    draft_task["materials"] = []
+    no_table_text = "## 二、空间下沉：精准破局「基层人才荒」\n\n数据显示基层就业占比上升。"
+    fake = FakeWriterLlmClient(
+        draft_script=[_envelope(no_table_text), _envelope(no_table_text)],
+        audit_script=[],
+    )
+    run = make_writer_run(fake)
+    result = asyncio.run(run(draft_task))
+
+    # 首稿命中 table_missing → 触发恰一次修订，违规清单携带章型规则结论。
+    assert len(fake.draft_calls) == 2
+    _, fix = fake.draft_calls[1]
+    assert fix is not None
+    assert any(violation.rule == "table_missing" for violation in fix)
+    # 修后仍无表 → 终态如实折入 issues（章型「维度章」经 State 携带识别）。
+    assert any("table_missing" in issue for issue in result["self_check"]["issues"])
+

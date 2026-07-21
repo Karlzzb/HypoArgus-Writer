@@ -119,7 +119,9 @@ def _build_context_block(task: dict[str, Any]) -> str:
     tier = tier_from_variant(doc_variant)
     spec = task["chapter_spec"]
     points = "\n".join(f"- {p['text']}" for p in spec["points"]) or "（无）"
-    word_count_block = word_count_prompt_block(spec["title"], doc_type)
+    word_count_block = word_count_prompt_block(
+        spec["title"], doc_type, chapter_type=spec.get("chapter_type")
+    )
     prev = (
         f"上一章摘要（本章开头须公文风格承上启下衔接）：{task['prev_chapter_summary']}"
         if task["prev_chapter_summary"]

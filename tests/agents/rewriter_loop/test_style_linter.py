@@ -996,3 +996,240 @@ def test_散文加载_两层拼接_通用在前文种在后(tmp_path: Path) -> N
     prose = load_prose("自定义文种", style_guides_dir=tmp_path)
     assert prose.index("通用指南散文") < prose.index("文种指南散文")
     assert "ssot-config-begin" not in prose
+
+
+# ---------- 调研报告文种层：加载合并 / 章型经 State 携带 / 必含禁用 / 情绪词 / 明责任定时限 ----------
+
+
+def test_调研报告指南_两层合并正确加载_四章型注册且通用层并入() -> None:
+    cfg = load_config("调研报告")
+    # 四章型全部注册（键为骨架章标题原文，与 docs_templates/调研报告模版.md 一致）。
+    for chapter_type in ["监测概述与数据说明", "维度章", "主要发现与问题诊断", "结论与对策建议"]:
+        assert chapter_type in cfg["chapter_templates"]
+    # 通用层列表并入（口语黑名单）、标量被文种层覆盖（字数区间「待实证」初值）。
+    assert "我们" in cfg["oral_blacklist"]
+    assert cfg["word_count"]["chapter"] == {"min": 1200, "max": 4000}
+    # 散文侧两层拼接可供提示词注入。
+    prose = load_prose("调研报告")
+    assert "实证分析" in prose
+    assert "ssot-config-begin" not in prose
+
+
+def _survey_lint(text: str, chapter_type: str | None) -> set[str]:
+    """按调研报告文种（无变体）跑 lint，返回规则名集合；章型经参数显式携带。"""
+    return _rules(lint(text, "调研报告", None, chapter_type=chapter_type))
+
+
+def test_调研报告_维度章观点标题_经章型携带识别_无表命中() -> None:
+    text = "## 二、空间下沉：精准破局「基层人才荒」\n\n数据显示基层就业占比上升。"
+    assert "table_missing" in _survey_lint(text, "维度章")
+
+
+def test_调研报告_维度章观点标题_含表通过() -> None:
+    text = (
+        "## 二、空间下沉：精准破局「基层人才荒」\n\n数据显示基层就业占比上升。\n\n"
+        "| 指标 | 数值 |\n| ---- | ---- |\n| 占比 | 41 |\n"
+    )
+    assert "table_missing" not in _survey_lint(text, "维度章")
+
+
+def test_调研报告_维度章_未携带章型_标题反推不识别观点标题() -> None:
+    # ADR-0005：维度章观点标题无法靠标题匹配识别——不传章型则章型规则不触发。
+    text = "## 二、空间下沉：精准破局「基层人才荒」\n\n数据显示基层就业占比上升。"
+    rules = _survey_lint(text, None)
+    assert "table_missing" not in rules
+    assert "required_terms" not in rules
+
+
+def test_调研报告_维度章_表章豁免字数下限() -> None:
+    # 散文远低于章下限（1200），但维度章标 table_required 享既有表章豁免，仅保上限。
+    text = (
+        "## 二、空间下沉：精准破局「基层人才荒」\n\n数据显示基层就业占比上升。\n\n"
+        "| 指标 | 数值 |\n| ---- | ---- |\n| 占比 | 41 |\n"
+    )
+    assert "word_count" not in _survey_lint(text, "维度章")
+
+
+def test_调研报告_监测概述_缺数据来源与样本_必含词命中() -> None:
+    text = "## 一、监测概述与数据说明\n\n### （一）监测背景\n\n围绕政策要求开展监测。"
+    violations = lint(text, "调研报告", None, chapter_type="监测概述与数据说明")
+    messages = [v.message for v in violations if v.rule == "required_terms"]
+    assert any("数据来源" in m for m in messages)
+    assert any("样本" in m for m in messages)
+
+
+def test_调研报告_监测概述_必含词齐备通过() -> None:
+    text = (
+        "## 一、监测概述与数据说明\n\n### （二）数据来源与可靠性\n\n"
+        "数据来源为工学云平台，有效样本量覆盖率达标。"
+    )
+    assert "required_terms" not in _survey_lint(text, "监测概述与数据说明")
+
+
+def test_调研报告_监测概述_前置对策建议_禁用词命中() -> None:
+    text = "## 一、监测概述与数据说明\n\n数据来源与样本齐备，并先给出对策建议若干。"
+    assert "forbidden_terms" in _survey_lint(text, "监测概述与数据说明")
+
+
+def test_调研报告_维度章_混入对策建议_禁用词命中() -> None:
+    text = (
+        "## 二、空间下沉：精准破局「基层人才荒」\n\n数据显示占比上升，对策建议先行给出。\n\n"
+        "| 指标 | 数值 |\n| ---- | ---- |\n| 占比 | 41 |\n"
+    )
+    assert "forbidden_terms" in _survey_lint(text, "维度章")
+
+
+def test_调研报告_维度章_缺数据支撑_必含词命中() -> None:
+    text = (
+        "## 二、空间下沉：精准破局「基层人才荒」\n\n基层就业占比呈上升态势。\n\n"
+        "| 指标 | 占比 |\n| ---- | ---- |\n| 县域就业 | 41% |\n"
+    )
+    violations = lint(text, "调研报告", None, chapter_type="维度章")
+    assert any("数据" in v.message for v in violations if v.rule == "required_terms")
+
+
+def test_调研报告_结论章_缺核心结论与对策建议节_必含词命中() -> None:
+    text = "## 四、总结\n\n全篇工作至此收束。"
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "required_terms"]
+    assert any("核心结论" in m for m in messages)
+    assert any("对策建议" in m for m in messages)
+
+
+def test_调研报告_结论章_必含词齐备通过() -> None:
+    text = _conclusion_chapter(_ACCOUNTABLE_ITEM)
+    assert "required_terms" not in _survey_lint(text, "结论与对策建议")
+
+
+def test_调研报告_发现诊断_缺归因_必含词命中() -> None:
+    text = "## 三、主要发现与问题诊断\n\n### （一）领先优势总结\n\n优势明显，短板客观呈现。"
+    violations = lint(text, "调研报告", None, chapter_type="主要发现与问题诊断")
+    messages = [v.message for v in violations if v.rule == "required_terms"]
+    assert any("归因" in m for m in messages)
+    assert not any("优势" in m for m in messages)
+
+
+def test_调研报告_情绪词黑名单_令人振奋与深感担忧命中() -> None:
+    text = "## 二、维度分析\n\n监测数据令人振奋，个别指标走弱令人深感担忧。"
+    violations = lint(text, "调研报告", None)
+    hits = [v.message for v in violations if v.rule == "oral_blacklist"]
+    assert any("令人振奋" in m for m in hits)
+    assert any("深感担忧" in m for m in hits)
+
+
+def test_调研报告_情绪词黑名单_中性实证表述通过() -> None:
+    text = "## 二、维度分析\n\n数据显示毕业去向落实率为百分之九十六，比去年下降二个百分点。"
+    assert "oral_blacklist" not in _survey_lint(text, None)
+
+
+def test_调研报告_情绪词属文种层_通用公文不命中() -> None:
+    text = "## 二、维度分析\n\n监测数据令人振奋。"
+    assert "oral_blacklist" not in _rules(lint(text, "通用公文"))
+
+
+def test_调研报告_学术断言句式_文种层各持一份命中() -> None:
+    # ADR-0005：学术断言禁令下沉文种层，人培与调研报告各持一份。
+    text = "## 二、维度分析\n\n实践能力是就业竞争力的必要条件。"
+    assert "oral_blacklist" in _survey_lint(text, None)
+
+
+_ACCOUNTABLE_ITEM = "1. 深化县域订单式培养，教务处牵头，各二级学院落实，2026年9月前启动。"
+
+
+def _conclusion_chapter(*items: str) -> str:
+    """构造「结论与对策建议」章：核心结论节 + 对策建议节（条目由参数给定）。"""
+    body = "\n".join(items)
+    return (
+        "## 四、结论与对策建议\n\n### （一）核心结论\n\n"
+        "学校人才培养在空间维度呈现下沉特征。\n\n### （二）对策建议\n\n" + body + "\n"
+    )
+
+
+def test_调研报告_对策建议_明责任定时限齐备通过() -> None:
+    text = _conclusion_chapter(
+        _ACCOUNTABLE_ITEM,
+        "2. 建设县域实训基地，实训中心负责，一年内完成布点。",
+    )
+    assert "accountability" not in _survey_lint(text, "结论与对策建议")
+
+
+def test_调研报告_对策建议_缺牵头责任命中() -> None:
+    text = _conclusion_chapter("1. 深化县域订单式培养，2026年9月前启动。")
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "accountability"]
+    assert len(messages) == 1
+    assert "牵头责任" in messages[0]
+    assert "完成时限" not in messages[0]
+
+
+def test_调研报告_对策建议_缺完成时限命中() -> None:
+    text = _conclusion_chapter("1. 深化县域订单式培养，教务处牵头推进。")
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "accountability"]
+    assert len(messages) == 1
+    assert "完成时限" in messages[0]
+
+
+def test_调研报告_对策建议_裸年份数据引用不算时限() -> None:
+    # 「较2024年下降」是数据引用不是完成时限：须 年+月 / 年+底前内 / 期限式。
+    text = _conclusion_chapter("1. 优化培养结构，教务处牵头，覆盖面较2024年提升五个百分点。")
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "accountability"]
+    assert len(messages) == 1
+    assert "完成时限" in messages[0]
+
+
+def test_调研报告_对策建议_泛化落实表述不算牵头责任() -> None:
+    # 「落实立德树人」是泛化表述不是责任主体：须「牵头/负责/责任部门」或「XX单位落实」。
+    text = _conclusion_chapter("1. 落实立德树人要求，深化订单式培养，2026年9月前启动。")
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "accountability"]
+    assert len(messages) == 1
+    assert "牵头责任" in messages[0]
+
+
+def test_调研报告_对策建议_逐条判定_仅缺项条目计违规() -> None:
+    text = _conclusion_chapter(_ACCOUNTABLE_ITEM, "2. 扩大校企合作范围。")
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "accountability"]
+    assert len(messages) == 1
+    assert "扩大校企合作范围" in messages[0]
+
+
+def test_调研报告_对策建议_四级子项形式同样判定() -> None:
+    text = (
+        "## 四、结论与对策建议\n\n### （一）核心结论\n\n结论一句话。\n\n"
+        "### （二）对策建议\n\n#### 1. 深化订单式培养\n\n教务处牵头，2026年9月前启动。\n\n"
+        "#### 2. 建设实训基地\n\n扩大布点范围。\n"
+    )
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "accountability"]
+    assert len(messages) == 1
+    assert "建设实训基地" in messages[0]
+
+
+def test_调研报告_对策建议节缺失_明责任定时限规则报缺() -> None:
+    # 节被裁（首尾章被 LLM 裁剪的留白场景）：章标题含「对策建议」子串使必含词兜不住，
+    # 由 accountability 规则直接报节级缺失。
+    text = "## 四、结论与对策建议\n\n### （一）核心结论\n\n结论一句话。"
+    violations = lint(text, "调研报告", None, chapter_type="结论与对策建议")
+    messages = [v.message for v in violations if v.rule == "accountability"]
+    assert len(messages) == 1
+    assert "未检出" in messages[0]
+
+
+def test_调研报告_字数目标块_维度章经章型取表型章口径() -> None:
+    block = word_count_prompt_block(
+        "二、空间下沉：精准破局「基层人才荒」", "调研报告", chapter_type="维度章"
+    )
+    assert "1200～4000" in block
+    assert "表型章" in block
+
+
+def test_调研报告_无变体_人培变体分键词表不受列表形式影响() -> None:
+    # 回归护栏：人培 dict[变体→词表] 形式在列表形式支持加入后语义不变。
+    text = "## 五、学制学位\n\n标准学制四年，授予工学学士学位。"
+    assert "required_terms" not in _rules(lint(text, "人才培养方案", "本科"))
+    assert "forbidden_terms" in _rules(
+        lint("## 五、学制学位\n\n基本修业年限三年。", "人才培养方案", "本科")
+    )

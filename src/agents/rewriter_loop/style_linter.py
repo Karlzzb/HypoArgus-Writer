@@ -93,6 +93,8 @@ class _LintContext:
     ``variant`` 是变体键解析结果（``tier_from_variant``），供变体分键规则
     （required_terms / forbidden_terms 等 dict[变体→词表]）取值；变体概念仅存活于
     人培方案文种内部——其他文种的合并配置不含变体分键规则，该值对其天然惰性。
+    ``template`` 是章型标题：调用方传入 State 携带的章型（ADR-0005，骨架事实）
+    时直接采用；未传（自由结构/旧链路）才回落从正文首个 ``## `` 标题反推。
     """
 
     text: str
@@ -321,13 +323,27 @@ def _rule_numbering(ctx: _LintContext) -> list[Violation]:
     return out
 
 
+def _template_terms(tmpl: dict[str, Any], key: str, variant: str) -> list[str]:
+    """取章型词表：无变体文种直接写列表（如调研报告），变体分键文种写 dict[变体→词表]。
+
+    两种形态由各文种 ssot-config 自声明；dict 形态按解析后的变体键取值，
+    列表形态对全部变体一体生效（无变体文种的词表不强制套变体分键结构）。
+    """
+    value = tmpl.get(key)
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return value.get(variant) or []
+    return []
+
+
 @register
 def _rule_required_terms(ctx: _LintContext) -> list[Violation]:
-    """术语必含词：按章型 + tier 的必含词须出现于正文。"""
+    """术语必含词：按章型（+ 变体，如有分键）的必含词须出现于正文。"""
     tmpl = resolve_template(ctx.cfg, ctx.template)
     if not tmpl:
         return []
-    required = (tmpl.get("required_terms") or {}).get(ctx.variant, [])
+    required = _template_terms(tmpl, "required_terms", ctx.variant)
     out: list[Violation] = []
     for term in required:
         if term not in ctx.text:
@@ -350,7 +366,7 @@ def _rule_forbidden_terms(ctx: _LintContext) -> list[Violation]:
     tmpl = resolve_template(ctx.cfg, ctx.template)
     if not tmpl:
         return []
-    forbidden = (tmpl.get("forbidden_terms") or {}).get(ctx.variant, [])
+    forbidden = _template_terms(tmpl, "forbidden_terms", ctx.variant)
     out: list[Violation] = []
     for term in forbidden:
         if term in ctx.text:
@@ -395,7 +411,7 @@ def _rule_forbidden_subsection(ctx: _LintContext) -> list[Violation]:
     tmpl = resolve_template(ctx.cfg, ctx.template)
     if not tmpl:
         return []
-    forbidden = (tmpl.get("forbidden_subsection_terms") or {}).get(ctx.variant, [])
+    forbidden = _template_terms(tmpl, "forbidden_subsection_terms", ctx.variant)
     if not forbidden:
         return []
     out: list[Violation] = []
@@ -411,6 +427,87 @@ def _rule_forbidden_subsection(ctx: _LintContext) -> list[Violation]:
                         ),
                     )
                 )
+    return out
+
+
+# 建议条目起手：`（一）` / `1.` / `1)` / `建议一：`——对策建议节无 #### 子项时按此逐行切条。
+_ACCOUNTABILITY_ITEM_LINE = re.compile(
+    r"^\s*(?:[（(][一二三四五六七八九十]+[）)]|[0-9]+[.、)]|建议[一二三四五六七八九十]+[：:、])"
+)
+
+
+def _accountability_items(section_text: str) -> list[str]:
+    """把对策建议节切成逐条建议：优先 ``####`` 子项块，退而按编号条目行，再退整节为一条。
+
+    范式（规范源）：「建议一：…（教务处牵头，各二级学院落实，2026年9月前启动）」——
+    单条建议通常一行/一块内自含责任与时限，故按块/按行判定即够；
+    整节散文无条目结构时整节作一条判定，保证规则不因排版形态而失效。
+    """
+    blocks = [text for _title, text in _split_level_blocks(section_text, "#### ", "### ")]
+    if blocks:
+        return blocks
+    lines = [line for line in section_text.splitlines() if _ACCOUNTABILITY_ITEM_LINE.match(line)]
+    if lines:
+        return lines
+    return [section_text]
+
+
+@register
+def _rule_accountability(ctx: _LintContext) -> list[Violation]:
+    """对策建议「明责任、定时限」：每条建议须同句/同条给出牵头责任与完成时限。
+
+    配置挂在章型上（``chapter_templates.<tmpl>.accountability``，目前仅调研报告
+    「结论与对策建议」章声明）：``section`` 定位章内目标节（``### `` 级标题含该词），
+    ``responsibility_pattern`` 查牵头责任（牵头/责任部门等），``deadline_pattern``
+    查完成时限（年月/期限）。目标节整体缺失（被裁）同样在此报——
+    必含词是全文子串匹配，章标题本身含「对策建议」即满足，兜不住节级缺失。
+    """
+    tmpl = resolve_template(ctx.cfg, ctx.template)
+    acc = (tmpl or {}).get("accountability")
+    if not acc:
+        return []
+    section_name = acc.get("section")
+    resp_pat = acc.get("responsibility_pattern")
+    ddl_pat = acc.get("deadline_pattern")
+    if not (section_name and resp_pat and ddl_pat):
+        return []
+    # 去编号前缀后与节标题精确匹配（「### （二）对策建议」→「对策建议」）：
+    # 含词式匹配会被「持续改进方向」等其他含该词的节标题误定位。
+    section_text: str | None = None
+    for sec_title, sec_text in _split_level_blocks(ctx.text, "### ", "## "):
+        if _SUBSECTION_NUMERAL_PREFIX.sub("", sec_title).strip() == section_name:
+            section_text = sec_text
+            break
+    if section_text is None:
+        return [
+            Violation(
+                rule="accountability",
+                message=(
+                    f"章型「{ctx.template}」未检出「{section_name}」节（### 级），"
+                    "对策建议节不可裁剪，每条建议须明责任、定时限。"
+                ),
+            )
+        ]
+    out: list[Violation] = []
+    for item in _accountability_items(section_text):
+        missing = []
+        if not re.search(resp_pat, item):
+            missing.append("牵头责任")
+        if not re.search(ddl_pat, item):
+            missing.append("完成时限")
+        if missing:
+            snippet = next(
+                (line.strip() for line in item.splitlines() if line.strip()), ""
+            )[:40]
+            out.append(
+                Violation(
+                    rule="accountability",
+                    message=(
+                        f"对策建议条目「{snippet}」缺{('与'.join(missing))}，"
+                        "每条建议须明责任（牵头/落实部门）、定时限（完成年月或期限）。"
+                    ),
+                )
+            )
     return out
 
 
@@ -1033,12 +1130,16 @@ def _shrunk_range(
     return min(lower, upper), upper
 
 
-def check_word_count(text: str, cfg: dict[str, Any]) -> list[Violation]:
+def check_word_count(
+    text: str, cfg: dict[str, Any], *, template_title: str | None = None
+) -> list[Violation]:
     """字数管控核心校验（纯函数）：三级区间 + 动态收缩 + 节级同级差异 + 表章豁免。
 
     经 lint 注册规则消费（修一次后的复检直接复用全量 lint，同一口径零漂移）。
     ``cfg`` 无 ``word_count`` 节、或正文无 ``## `` 章标题（非标准章结构）时不校验。
     表章（``table_required`` 章型）豁免各级散文下限与节级同级差异比对，仅保各级上限。
+    ``template_title`` 显式指定章型标题（State 携带的章型，如观点标题的维度章）；
+    未指定则回落用正文标题反推的章型解析豁免。
     """
     wc = cfg.get("word_count")
     if not wc:
@@ -1046,7 +1147,7 @@ def check_word_count(text: str, cfg: dict[str, Any]) -> list[Violation]:
     title = detect_chapter_template(text, cfg)
     if title is None:
         return []
-    tmpl = resolve_template(cfg, title)
+    tmpl = resolve_template(cfg, template_title if template_title is not None else title)
     table_exempt = bool(tmpl and tmpl.get("table_required"))
     ch_min = float(wc["chapter"]["min"])
     ch_max = float(wc["chapter"]["max"])
@@ -1170,25 +1271,32 @@ def _rule_word_count(ctx: _LintContext) -> list[Violation]:
 
     校验逻辑收敛于 ``check_word_count``（与「修一次后复检」双消费零漂移）；
     区间配置来自 SSoT ``word_count`` 节，未配置或非标准章结构不校验。
+    章型取 ``ctx.template``（State 携带优先），使观点标题的维度章也享表章豁免。
     """
-    return check_word_count(ctx.text, ctx.cfg)
+    return check_word_count(ctx.text, ctx.cfg, template_title=ctx.template)
 
 
 def word_count_prompt_block(
-    title: str, doc_type: str, *, style_guides_dir: str | Path | None = None
+    title: str,
+    doc_type: str,
+    *,
+    style_guides_dir: str | Path | None = None,
+    chapter_type: str | None = None,
 ) -> str:
     """按章标题生成写作提示词的目标字数区间块；SSoT 无 ``word_count`` 配置时返回空串。
 
     区间与章型模板取自该文种的两层合并配置（``load_config``）——
     表章（``table_required`` 章型）提示取中下限且不得表外堆砌；
     叙述章型提示取中上限。区间数值全部取自 SSoT，提示词与校验器零漂移。
+    ``chapter_type`` 是 State 携带的章型（ADR-0005），传入时优先据其解析章型模板
+    （观点标题的维度章无法靠标题匹配）；未传回落标题解析。
     """
     cfg = load_config(doc_type, style_guides_dir=style_guides_dir)
     wc = cfg.get("word_count")
     if not wc:
         return ""
     normalized_title = _CHINESE_NUMERAL_PREFIX.sub("", title).strip()
-    tmpl = resolve_template(cfg, normalized_title)
+    tmpl = resolve_template(cfg, chapter_type if chapter_type is not None else normalized_title)
     table_chapter = bool(tmpl and tmpl.get("table_required"))
     ch, sec, sub = wc["chapter"], wc["section"], wc["subsection"]
     lines = [
@@ -1219,6 +1327,7 @@ def lint(
     doc_variant: str | None = None,
     *,
     style_guides_dir: str | Path | None = None,
+    chapter_type: str | None = None,
     domain: str | None = None,
     references: list[Fact] | None = None,
     materials: list[MaterialPayload] | None = None,
@@ -1232,6 +1341,10 @@ def lint(
     合并配置不含变体分键规则，该参数对其天然惰性。
     ``style_guides_dir`` 缺省用随包 ``style_guides/`` 目录（不依赖工作目录）；
     显式传目录便于测试与替换指南。
+    ``chapter_type`` 是 State 大纲随章携带的章型（ADR-0005，骨架事实）：传入时
+    章型规则直接据其匹配 ``chapter_templates``，不从位置或标题反推——
+    维度章的自由观点标题唯有经此参数才能命中章型规则；
+    未传（自由结构/旧链路）回落从正文首个 ``## `` 标题反推。
     ``domain`` 标注被校验文本所属领域（如「金融」；通用为 None），
     供意识形态 (A) 的领域专属政治语双向校验（规则级条件标签，非加载参数）。
     ``references`` 为本章调用方传入的事实依据（``Fact`` 列表），供「引用事实在位 +
@@ -1246,7 +1359,11 @@ def lint(
         text=normalized,
         cfg=cfg,
         variant=tier_from_variant(doc_variant),
-        template=detect_chapter_template(normalized, cfg),
+        template=(
+            chapter_type
+            if chapter_type is not None
+            else detect_chapter_template(normalized, cfg)
+        ),
         domain=domain,
         references=references,
         materials=materials,
