@@ -6,11 +6,12 @@
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 from search_agent.evidence_retrieval.claim_logic import AtomicClaim, ClaimLogicOperator
 from search_agent.evidence_retrieval.config import EvidenceRetrievalConfig
 from search_agent.evidence_retrieval.dependencies import EvidenceRetrievalDependencies
+from search_agent.evidence_retrieval.evidence_judge import EvidenceJudge
 from search_agent.evidence_retrieval.flows.parallel_sources_flow import (
     ParallelSourcesFlow,
 )
@@ -69,7 +70,8 @@ def _run_flow_and_collect() -> list[tuple[str, dict[str, Any]]]:
         web_fetcher=object(),
         kb_client=object(),
         structured_client=object(),
-        judge=object(),
+        # candidate_passthrough 不触碰裁决器：占位对象一旦被调用立即暴露。
+        judge=cast(EvidenceJudge, object()),
         batch_judge=object(),
     )
     trace = SafeTraceEmitter(config, [collect])

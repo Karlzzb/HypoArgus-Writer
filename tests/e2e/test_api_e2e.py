@@ -27,7 +27,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 
 from agents.rewriter_loop import make_stub_rewriter_loop
-from agents.search_agent import make_stub_search_agent
+from agents.search_agent import (
+    FakeSearchAgentRuntime,
+    make_search_agent,
+    make_stub_search_agent,
+)
+from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
 from service.app import create_app
 from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
@@ -51,6 +56,7 @@ def _make_app(
     keyed: dict[str, list[str]] | None = None,
     *,
     rewriter_stub: bool = True,
+    search_agent: Any = make_stub_search_agent,
 ) -> FastAPI:
     """带 FakeLLM 与 InMemorySaver 构建应用。
 
@@ -58,6 +64,8 @@ def _make_app(
     与事件通道，不依赖写作真实现（其契约在 tests/agents/rewriter_loop/ 覆盖）。
     置 False 走 create_app 缺省的真实现链路（事件钩子接内部分发器），
     调用方须在 keyed 里给足写作与自审应答。
+    search_agent 缺省注入打桩工厂（以应用内部事件分发器实例化，保留事件
+    旁路）；中断续跑用例注入真适配层工厂 + 假引擎运行时。
     """
     fake = FakeLLM(
         list(responses),
@@ -66,8 +74,7 @@ def _make_app(
     subagent_kwargs: dict[str, Any] = (
         {"rewriter_loop": make_stub_rewriter_loop()} if rewriter_stub else {}
     )
-    # 检索一律注入打桩工厂（以应用内部事件分发器实例化，保留事件旁路）。
-    subagent_kwargs["search_agent"] = make_stub_search_agent
+    subagent_kwargs["search_agent"] = search_agent
     return create_app(
         llm_factory=lambda unit: fake,
         checkpointer=checkpointer if checkpointer is not None else InMemorySaver(serde=checkpoint_serializer()),
@@ -605,6 +612,181 @@ def test_断点续跑_图运行中途死亡后resume续跑至中断点():
             assert status["awaiting_review"] is True
 
     asyncio.run(main())
+
+
+def test_检索中断续跑_已完成章节零重复检索且事件配对产物与不中断路径等价():
+    """检索中断续跑 E2E（issue #37，ADR-0001 约束 4 的检索真适配层版）。
+
+    链路口径：真适配层（make_search_agent：契约映射、信号量限流、进度桥、
+    诊断摘要）+ 引擎运行时边界的假实现（FakeSearchAgentRuntime，模拟时延与
+    副作用）——仅在桩上通过的验收不算通过（约束 4）。
+    故障注入：ch2 检索的副作用回调先让位并行的 ch1 分支完成，再抛致命异常，
+    图调用在检索超步内崩溃并向外抛出，等价于「一章完成、下一章进行中」时
+    进程被 kill；已完成 ch1 分支的写入作为 pending write 被 checkpoint 保留。
+    新「进程」（HTTP 应用 + 同一存档器 + 健康假运行时）resume 续跑到人工
+    中断点。断言：已完成章节零重复检索（两个假运行时的载荷记录为证）、
+    钩子与信封两层事件成对且父子链正确（含中断分支的残链）、
+    最终产物与不中断路径完全等价。
+    """
+    saver = InMemorySaver(serde=checkpoint_serializer())
+    thread_id = "retrieval-crash-resume"
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+
+    async def _crash_on_ch2(payload: dict[str, Any]) -> None:
+        if payload["paragraph"]["paragraph_id"] == "ch2":
+            # 让位并行的 ch1 分支先完成，使「一章完成、另一章进行中」
+            # 的死亡现场确定性成立（同 test_graph_e2e 的检索中断用例）。
+            await asyncio.sleep(0.3)
+            raise RuntimeError("故障注入：进程死于 ch2 检索")
+
+    # 第一个「进程」：手工驱动同款图（真适配层 + 崩溃注入假运行时 +
+    # 共享存档器）。节点内部用 asyncio.run 调子智能体，须在事件循环之外。
+    crash_runtime = FakeSearchAgentRuntime(
+        latency_seconds=0.05, side_effect=_crash_on_ch2
+    )
+    events_before: list[tuple[str, dict]] = []
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
+    graph = build_graph(
+        llm_factory=lambda unit: fake,
+        checkpointer=saver,
+        search_agent=make_search_agent(
+            lambda etype, payload: events_before.append((etype, payload)),
+            runtime=crash_runtime,
+        ),
+        rewriter_loop=make_stub_rewriter_loop(),
+    )
+    with pytest.raises(RuntimeError, match="故障注入：进程死于 ch2 检索"):
+        graph.invoke(
+            initial_state("写一篇人才培养方案", "专业撰稿人", "trace-ref-resume"),
+            config,
+        )
+    # 死亡现场：两章检索均已发起，已完成的 ch1 分支素材作为 pending write
+    # 被 checkpoint 保留，待执行任务只剩失败的 ch2 检索分支。
+    assert sorted(
+        p["paragraph"]["paragraph_id"] for p in crash_runtime.payloads
+    ) == ["ch1", "ch2"]
+    snapshot = graph.get_state(config)
+    assert snapshot.next == ("reference_orchestrator",)
+    assert {
+        material.chapter_id for material in snapshot.values["citation_library"]
+    } == {"ch1"}
+
+    # 钩子层事件链（崩溃进程）：ch1 成对完整、progress 全落在区间内且
+    # 步骤序与假引擎回放一致（1 假说 = 正反 2 检索项）；结束事件带诊断摘要。
+    ch1_events = [(t, p) for t, p in events_before if p["chapter_id"] == "ch1"]
+    ch2_events = [(t, p) for t, p in events_before if p["chapter_id"] == "ch2"]
+    ch1_types = [t for t, _ in ch1_events]
+    assert ch1_types[0] == SUBAGENT_START and ch1_types[-1] == SUBAGENT_END
+    assert all(t == SUBAGENT_PROGRESS for t in ch1_types[1:-1])
+    assert all(p["unit"] == "search_agent" for _, p in ch1_events)
+    assert [p["step"] for _, p in ch1_events[1:-1]] == [
+        "engine_call_start",
+        "task.start",
+        "task.retrieved",
+        "verdict.done",
+        "task.start",
+        "task.retrieved",
+        "verdict.done",
+        "judge.batches_done",
+        "engine_call_end",
+    ]
+    verdict_events = [p for _, p in ch1_events if p.get("step") == "verdict.done"]
+    assert [
+        (p["done_count"], p["item_total"]) for p in verdict_events
+    ] == [(1, 2), (2, 2)]
+    assert ch1_events[-1][1]["diagnostics"]["call_counts"] == {
+        "web_search": 2,
+        "web_fetch": 2,
+    }
+    # 中断分支残链：有 start 无 end，死于引擎调用中途，事件流如实反映现场。
+    assert [t for t, _ in ch2_events] == [SUBAGENT_START, SUBAGENT_PROGRESS]
+    assert ch2_events[1][1]["step"] == "engine_call_start"
+
+    # 第二个「进程」：HTTP 应用 + 同一存档器 + 健康假运行时 resume 续跑，
+    # 只备剩余阶段应答（2 章语义核查；首写走打桩改写器不调 LLM）。
+    healthy_runtime = FakeSearchAgentRuntime(latency_seconds=0.05)
+
+    async def main() -> None:
+        app = _make_app(
+            [SEMANTIC_PASS, SEMANTIC_PASS],
+            checkpointer=saver,
+            search_agent=lambda hook: make_search_agent(
+                hook, runtime=healthy_runtime
+            ),
+        )
+        async with _client(app) as client:
+            response = await client.post(
+                f"/tasks/{thread_id}/resume", json={"session_id": "sess-ref-resume"}
+            )
+            assert response.status_code == 200
+            assert response.json()["status"] == "REFERENCE_FETCHING"
+
+            # 续跑走完剩余节点到人工中断点：两章齐全。
+            business, _ = await _read_sse(
+                client, f"/tasks/{thread_id}/stream", _stop_on_review_count(1)
+            )
+            review = next(f for f in business if f["event"] == "review_required")
+            assert review["data"]["data"]["chapter_ids"] == ["ch1", "ch2"]
+
+            # 信封层事件链（恢复进程）：只有 ch2 分支的检索活动，
+            # progress 与 subagent_end 全部挂在本次 subagent_start 之下，
+            # subagent_start 挂在检索分支的 node_start 之下。
+            frames, _ = await _read_sse(
+                client,
+                f"/graph_events?thread_id={thread_id}",
+                _stop_on_types({"gate_blocked"}),
+            )
+            envelopes = [f["data"] for f in frames]
+            search_events = [e for e in envelopes if e["unit"] == "search_agent"]
+            starts = [e for e in search_events if e["type"] == "subagent_start"]
+            ends = [e for e in search_events if e["type"] == "subagent_end"]
+            progresses = [e for e in search_events if e["type"] == "progress"]
+            assert [e["payload"]["chapter_id"] for e in starts] == ["ch2"]
+            assert [e["payload"]["chapter_id"] for e in ends] == ["ch2"]
+            assert progresses
+            assert all(e["payload"]["chapter_id"] == "ch2" for e in progresses)
+            start_id = starts[0]["event_id"]
+            assert all(e["parent_id"] == start_id for e in progresses)
+            assert ends[0]["parent_id"] == start_id
+            assert progresses[0]["payload"]["step"] == "engine_call_start"
+            assert progresses[-1]["payload"]["step"] == "engine_call_end"
+            reference_start_ids = {
+                e["event_id"]
+                for e in envelopes
+                if e["type"] == "node_start"
+                and e["unit"] == "reference_orchestrator"
+            }
+            assert starts[0]["parent_id"] in reference_start_ids
+
+    asyncio.run(main())
+
+    # 已完成章节零重复检索：恢复进程的运行时只见过失败的 ch2 分支，
+    # ch1 的外部检索与 LLM 成本零重复支付。
+    assert [
+        p["paragraph"]["paragraph_id"] for p in healthy_runtime.payloads
+    ] == ["ch2"]
+
+    # 最终产物与不中断路径完全等价：同一确定性假运行时与应答计划保证
+    # 引文库、章节草稿与引文核查报告可逐字段比对。
+    resumed = graph.get_state(config).values
+    baseline_fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
+    baseline_graph = build_graph(
+        llm_factory=lambda unit: baseline_fake,
+        checkpointer=InMemorySaver(serde=checkpoint_serializer()),
+        search_agent=make_search_agent(runtime=FakeSearchAgentRuntime()),
+        rewriter_loop=make_stub_rewriter_loop(),
+    )
+    baseline = baseline_graph.invoke(
+        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-ref-base"),
+        {"configurable": {"thread_id": "retrieval-crash-baseline"}},
+    )
+    assert resumed["citation_library"] == baseline["citation_library"]
+    assert resumed["chapter_drafts"] == baseline["chapter_drafts"]
+    assert resumed["citation_report"] == baseline["citation_report"]
 
 
 def test_崩溃后免resume_直接查状态检查点并回滚到中断点():

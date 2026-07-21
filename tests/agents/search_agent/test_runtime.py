@@ -6,8 +6,9 @@
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 
 from agents.search_agent import EngineRuntime, FakeSearchAgentRuntime
@@ -26,11 +27,11 @@ PARENT_CONFIG: dict[str, Any] = {
 }
 
 
-def _run_with_parent_config(runtime: EngineRuntime) -> dict[str, Any] | None:
+def _run_with_parent_config(runtime: EngineRuntime) -> RunnableConfig | None:
     """在带父图配置的 contextvar 环境里调用运行时，返回调用后残留的环境配置。"""
 
-    async def main() -> dict[str, Any] | None:
-        token = var_child_runnable_config.set(dict(PARENT_CONFIG))
+    async def main() -> RunnableConfig | None:
+        token = var_child_runnable_config.set(cast(RunnableConfig, dict(PARENT_CONFIG)))
         try:
             await runtime.retrieve({"request_id": "chapter-ch1"})
             return var_child_runnable_config.get()
@@ -72,8 +73,8 @@ def test_引擎抛错时环境配置同样恢复() -> None:
 
     runtime = EngineRuntime(invoke=failing_invoke)
 
-    async def main() -> dict[str, Any] | None:
-        token = var_child_runnable_config.set(dict(PARENT_CONFIG))
+    async def main() -> RunnableConfig | None:
+        token = var_child_runnable_config.set(cast(RunnableConfig, dict(PARENT_CONFIG)))
         try:
             try:
                 await runtime.retrieve({"request_id": "chapter-ch1"})
@@ -118,7 +119,7 @@ def test_引擎事件回调只进引擎回调清单_不进环境配置() -> None
     runtime = EngineRuntime(invoke=probing_invoke)
 
     async def main() -> None:
-        token = var_child_runnable_config.set(dict(PARENT_CONFIG))
+        token = var_child_runnable_config.set(cast(RunnableConfig, dict(PARENT_CONFIG)))
         try:
             await runtime.retrieve(
                 {"request_id": "chapter-ch1"}, on_engine_event=on_engine_event
