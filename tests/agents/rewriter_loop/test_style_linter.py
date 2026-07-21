@@ -1226,6 +1226,55 @@ def test_调研报告_字数目标块_维度章经章型取表型章口径() -> 
     assert "表型章" in block
 
 
+# ---------- 调研报告：数据断言强制角标（第二层，references 数值匹配不豁免） ----------
+
+
+def test_调研报告_量化断言_references含数值_不豁免_仍命中() -> None:
+    # 与人培的关键差异：references 数值有据也不放行，正文可见溯源必须同句角标。
+    violations = lint(
+        "## 二、空间下沉：精准破局「基层人才荒」\n\n基层就业占比提升30%。",
+        "调研报告",
+        None,
+        chapter_type="维度章",
+        references=[Fact(type="other", value="基层就业占比提升 ３０%")],
+    )
+    assert "fabricated_quantitative" in _rules(violations)
+
+
+def test_调研报告_量化断言_同句素材角标_通过() -> None:
+    violations = lint(
+        "## 二、空间下沉：精准破局「基层人才荒」\n\n基层就业占比提升30%[m-h-1]。",
+        "调研报告",
+        None,
+        chapter_type="维度章",
+        materials=[_material("m-h-1")],
+    )
+    assert "fabricated_quantitative" not in _rules(violations)
+
+
+def test_调研报告_量化断言_表内数字_不触发() -> None:
+    # 表内数字由表承载的既有语义在严格分支下保持不变。
+    text = (
+        "## 二、空间下沉：精准破局「基层人才荒」\n\n"
+        "| 指标 | 数值 |\n| ---- | ---- |\n| 基层就业占比提升30% | 达标 |\n"
+    )
+    violations = lint(
+        text,
+        "调研报告",
+        None,
+        chapter_type="维度章",
+        references=[Fact(type="other", value="其他依据")],
+    )
+    assert "fabricated_quantitative" not in _rules(violations)
+
+
+def test_调研报告_量化断言严格开关_经文种覆盖语义生效() -> None:
+    # 开关是标量：通用层二选一（默认豁免），调研报告文种层覆盖为不豁免。
+    assert load_config("通用公文")["fabrication"]["quantitative"]["references_exempt"] is True
+    assert load_config("调研报告")["fabrication"]["quantitative"]["references_exempt"] is False
+    assert load_config("人才培养方案")["fabrication"]["quantitative"]["references_exempt"] is True
+
+
 def test_调研报告_无变体_人培变体分键词表不受列表形式影响() -> None:
     # 回归护栏：人培 dict[变体→词表] 形式在列表形式支持加入后语义不变。
     text = "## 五、学制学位\n\n标准学制四年，授予工学学士学位。"

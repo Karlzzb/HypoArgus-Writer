@@ -916,6 +916,8 @@ def _quantitative_violations(ctx: _LintContext, fab: dict[str, Any]) -> list[Vio
     正文散文出现「提升/降低/缩短/增长/减少 + 数值单位」的量化断言时，
     须同句挂 ``[素材id]`` 角标、或断言数值（``value_pattern`` 抽取）能在任一
     reference value（数值归一化后）中找到依据，二者皆无则违规。
+    ``references_exempt: false``（严格文种经标量覆盖设定，如调研报告）时收紧为
+    必须同句角标，references 数值有据不再豁免——溯源在正文可见。
     表行（``|`` 起手）不抽取——表内数字由表承载，另有表规则管。
     """
     spec = fab.get("quantitative") or {}
@@ -923,8 +925,9 @@ def _quantitative_violations(ctx: _LintContext, fab: dict[str, Any]) -> list[Vio
     if not pat:
         return []
     value_pat = spec.get("value_pattern")
+    references_exempt = spec.get("references_exempt", True)
     backed_nums: set[str] = set()
-    if value_pat:
+    if value_pat and references_exempt:
         for fact in ctx.references or []:
             backed_nums.update(re.findall(value_pat, normalize_numeric_text(fact.value)))
     out: list[Violation] = []
@@ -935,18 +938,17 @@ def _quantitative_violations(ctx: _LintContext, fab: dict[str, Any]) -> list[Vio
             sentence = _sentence_with_trailing_markers(line, m.start(), m.end())
             if MARKER_PATTERN.search(sentence):
                 continue
-            num = re.search(value_pat, m.group(0)) if value_pat else None
+            num = re.search(value_pat, m.group(0)) if value_pat and references_exempt else None
             if num and num.group(0) in backed_nums:
                 continue
-            out.append(
-                Violation(
-                    rule="fabricated_quantitative",
-                    message=(
-                        f"量化断言「{m.group(0)}」无同句素材角标、数值亦无 references 依据，"
-                        "疑为臆造，须挂角标或改用有据数值。"
-                    ),
-                )
+            message = (
+                f"量化断言「{m.group(0)}」无同句素材角标、数值亦无 references 依据，"
+                "疑为臆造，须挂角标或改用有据数值。"
+                if references_exempt
+                else f"数据断言「{m.group(0)}」无同句素材角标，"
+                "本文种要求溯源在正文可见，须同句挂 [素材id] 角标。"
             )
+            out.append(Violation(rule="fabricated_quantitative", message=message))
     return out
 
 
