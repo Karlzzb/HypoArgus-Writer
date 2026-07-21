@@ -64,7 +64,7 @@ def test_改写真实现_draft模式_返回字段与原位角标合规(
     assert "m-h-1" in write_prompt and "m-h-2" in write_prompt
     assert "m-fail-x" not in write_prompt
     # 第二次调用是自审：真自审链路确实执行。
-    assert "【引用自审】" in joined_prompt(fake.calls[1])
+    assert "【章节自审】" in joined_prompt(fake.calls[1])
     assert len(fake.calls) == 2
 
 

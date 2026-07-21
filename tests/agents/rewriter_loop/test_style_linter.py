@@ -7,11 +7,15 @@
 
 from pathlib import Path
 
+import pytest
+
 from agents.rewriter_loop import (
     Fact,
     STYLE_GUIDES_DIR,
     Violation,
+    applicable_audit_items,
     count_prose_words,
+    load_audit_items,
     detect_chapter_template,
     lint,
     load_config,
@@ -1282,3 +1286,67 @@ def test_调研报告_无变体_人培变体分键词表不受列表形式影响
     assert "forbidden_terms" in _rules(
         lint("## 五、学制学位\n\n基本修业年限三年。", "人才培养方案", "本科")
     )
+
+
+# ---------- LLM 自审裁决项：两层合并加载 / 按文种分派 / 素材适用性过滤 ----------
+
+
+def _audit_ids(doc_type: str) -> list[str]:
+    return [item.id for item in load_audit_items(doc_type)]
+
+
+def test_裁决项加载_通用公文_仅通用层派生未标() -> None:
+    items = load_audit_items("通用公文")
+    assert [item.id for item in items] == ["unmarked_derived_content"]
+    assert items[0].label == "派生未标"
+    assert items[0].requires_materials is True
+    assert "excerpt 原文" in items[0].criteria
+
+
+def test_裁决项加载_调研报告_通用层在前文种层追加() -> None:
+    # 并集保序（与 lint 列表合并同机制）：通用层「派生未标」在前，文种层语义裁决项追加。
+    assert _audit_ids("调研报告") == [
+        "unmarked_derived_content",
+        "comparison_narrative",
+        "four_step_progression",
+    ]
+    by_id = {item.id: item for item in load_audit_items("调研报告")}
+    assert by_id["comparison_narrative"].label == "对比叙事"
+    assert by_id["comparison_narrative"].requires_materials is False
+    assert "横向比" in by_id["comparison_narrative"].criteria
+    assert by_id["four_step_progression"].label == "四步递进"
+    assert "归因分析" in by_id["four_step_progression"].criteria
+
+
+def test_裁决项加载_人培方案与汇报材料_不含调研报告语义裁决项() -> None:
+    # 按文种分派：人培方案自审不再被问对比叙事等无关裁决项；无专属指南文种回落通用层。
+    assert _audit_ids("人才培养方案") == ["unmarked_derived_content"]
+    assert _audit_ids("汇报材料") == ["unmarked_derived_content"]
+
+
+def test_裁决项适用过滤_无素材剔除依赖素材项_语义项保留() -> None:
+    survey_items = load_audit_items("调研报告")
+    remaining = applicable_audit_items(survey_items, has_materials=False)
+    assert [item.id for item in remaining] == ["comparison_narrative", "four_step_progression"]
+    assert applicable_audit_items(survey_items, has_materials=True) == survey_items
+    # 通用公文只有依赖素材的裁决项：无素材时适用集为空（编排层据此跳过自审）。
+    assert applicable_audit_items(load_audit_items("通用公文"), has_materials=False) == []
+
+
+def test_裁决项加载_条目缺id或criteria_配置错误立即抛出(tmp_path: Path) -> None:
+    (tmp_path / "通用公文.md").write_text(
+        "# 指南\n\n<!-- ssot-config-begin\n"
+        "audit_items:\n  - label: 缺id条目\n"
+        "ssot-config-end -->\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="audit_items"):
+        load_audit_items("通用公文", style_guides_dir=tmp_path)
+
+
+def test_裁决项加载_未配置audit_items_返回空列表(tmp_path: Path) -> None:
+    (tmp_path / "通用公文.md").write_text(
+        "# 指南\n\n<!-- ssot-config-begin\noral_blacklist: []\nssot-config-end -->\n",
+        encoding="utf-8",
+    )
+    assert load_audit_items("通用公文", style_guides_dir=tmp_path) == []

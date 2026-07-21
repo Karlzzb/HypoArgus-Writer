@@ -184,6 +184,67 @@ def load_config(
     return config
 
 
+@dataclass(frozen=True)
+class AuditItem:
+    """LLM 自审单条裁决项（ssot-config ``audit_items``，ADR-0005）。
+
+    裁决项与 lint 规则同源同机制：定义进各文种风格指南的 ssot-config，
+    经 ``load_config`` 按「通用 + 文种」两层并集合并；``requires_materials``
+    标记依赖素材池的裁决项（无 pass 素材时不适用，如通用层「派生未标」）。
+    """
+
+    id: str
+    label: str
+    criteria: str
+    requires_materials: bool = False
+
+
+def load_audit_items(
+    doc_type: str, *, style_guides_dir: str | Path | None = None
+) -> list[AuditItem]:
+    """按文种加载合并后的自审裁决项（通用层在前、文种层追加，同 lint 合并语义）。
+
+    条目缺 id 或 criteria 属配置错误，立即抛出——ssot-config 是随包携带的
+    单一事实源，坏配置应在加载时暴露，不做静默容错。
+    """
+    config = load_config(doc_type, style_guides_dir=style_guides_dir)
+    items: list[AuditItem] = []
+    for entry in config.get("audit_items") or []:
+        if not isinstance(entry, dict) or not entry.get("id") or not entry.get("criteria"):
+            raise ValueError(f"audit_items 条目须为含 id 与 criteria 的映射：{entry!r}")
+        items.append(
+            AuditItem(
+                id=str(entry["id"]),
+                label=str(entry.get("label") or entry["id"]),
+                criteria=str(entry["criteria"]).strip(),
+                requires_materials=bool(entry.get("requires_materials", False)),
+            )
+        )
+    return items
+
+
+def applicable_audit_items(
+    items: list[AuditItem], *, has_materials: bool
+) -> list[AuditItem]:
+    """过滤出当前任务适用的裁决项：素材池为空时剔除依赖素材的裁决项。"""
+    return [item for item in items if has_materials or not item.requires_materials]
+
+
+def audit_items_for(
+    doc_type: str, *, has_materials: bool, style_guides_dir: str | Path | None = None
+) -> list[AuditItem]:
+    """一步取当前任务适用的裁决项：按文种加载合并 + 素材适用性过滤。
+
+    编排层据此决定是否发起自审调用（适用集为空则跳过，省一次 LLM 花费），
+    适配器据此拼装自审提示词，调测脚本据此复现跳过口径——三处消费同一入口，
+    避免「问了不适用的裁决项」或口径漂移。
+    """
+    return applicable_audit_items(
+        load_audit_items(doc_type, style_guides_dir=style_guides_dir),
+        has_materials=has_materials,
+    )
+
+
 def _prose_of(path: Path) -> str:
     """读取单份指南文件的散文部分（``<!-- ssot-config-begin`` 之前）。"""
     text = path.read_text(encoding="utf-8")

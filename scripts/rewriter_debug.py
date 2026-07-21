@@ -45,6 +45,7 @@ from agents.rewriter_loop import (  # noqa: E402
     LlmWriterClient,
     Violation,
     audit_issues_to_violations,
+    audit_items_for,
     lint,
     load_prose,
     make_rewriter_loop,
@@ -118,14 +119,18 @@ def build_fake_llm(task: dict[str, Any]) -> FakeLLM:
     audit_issues: list[dict[str, str]] = []
     if materials:
         audit_issues = [
-            {"material_id": materials[0]["id"], "excerpt": clean_sentence.rstrip("。")}
+            {
+                "item": "unmarked_derived_content",
+                "material_id": materials[0]["id"],
+                "excerpt": clean_sentence.rstrip("。"),
+            }
         ]
     return FakeLLM(
         responses=[envelope_json(body, "一行公文摘要（空转样例）")],
         keyed_responses={
-            # 自审提示词固定携带【引用自审】标签；修一次提示词固定携带违规清单导语。
+            # 自审提示词固定携带【章节自审】标签；修一次提示词固定携带违规清单导语。
             # 第二条空裁决供修后复检的自审（ADR-0004）消费：复检出清、终态干净。
-            "【引用自审】": [
+            "【章节自审】": [
                 json.dumps({"issues": audit_issues}, ensure_ascii=False),
                 json.dumps({"issues": []}, ensure_ascii=False),
             ],
@@ -194,18 +199,19 @@ def run_stepwise(
     if step == "lint":
         return
 
-    # 环节三：引用自审（素材池为空则跳过，与真编排一致）。
-    if materials:
+    # 环节三：LLM 自审（适用裁决项为空则跳过，与真编排口径一致，ADR-0005 按文种分派）。
+    if audit_items_for(doc_type, has_materials=bool(materials)):
         audit = client.audit(envelope.chapter_text, task)
         print(
             f"\n=== 自审（audit）：{len(audit.issues)} 条违规"
             f"（attempts={audit.attempts} degraded={audit.degraded}）==="
         )
         for issue in audit.issues:
-            print(f"- 素材 {issue.material_id}：{issue.excerpt}")
+            source = f"素材 {issue.material_id}" if issue.material_id else (issue.label or issue.item)
+            print(f"- {source}：{issue.excerpt}")
         violations.extend(audit_issues_to_violations(audit.issues))
     else:
-        print("\n=== 自审（audit）：素材池为空，跳过（与真编排口径一致）===")
+        print("\n=== 自审（audit）：无适用裁决项，跳过（与真编排口径一致）===")
     if step == "audit":
         return
 

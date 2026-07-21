@@ -23,7 +23,12 @@ from collections.abc import Sequence
 from typing import Any
 
 from agents.contracts import MaterialPayload
-from agents.rewriter_loop.style_linter import Violation, word_count_prompt_block
+from agents.rewriter_loop.style_linter import (
+    AuditItem,
+    Violation,
+    audit_items_for,
+    word_count_prompt_block,
+)
 from agents.rewriter_loop.writer_client import (
     AuditEnvelope,
     AuditIssue,
@@ -67,21 +72,34 @@ _SYSTEM_INSTRUCTIONS = """\
 """ + JSON_ONLY_RULE
 
 
-_AUDIT_TAG = "【引用自审】"
+_AUDIT_TAG = "【章节自审】"
 
-_AUDIT_INSTRUCTIONS = """\
-你是引用质检自审员，只做一件事：判断本章正文是否存在「源自某条素材 excerpt 原文（改写）
-却未挂对应 [素材id] 角标」之处。这是改写型「派生未标」自审——照抄型已由确定性 lint
-就地拦住，不必再报照抄。
 
-判定准则：
-- 仅当正文某处确系改写自某条素材的 excerpt 原文且该处无对应 [素材id] 角标时方报违规。
-- 不报「池内某条素材未被使用」——不使用某条素材不违规。
-- 无违规时返回空数组，不要臆造违规。
+def _build_audit_system(items: Sequence[AuditItem]) -> str:
+    """按适用裁决项拼装自审 system 提示词（裁决项按 doc_type 分派，ADR-0005）。
 
-输出为一个 JSON 对象，字段如下：
-- issues：每条含 material_id（池内素材 id）与 excerpt（正文中疑似派生却未标的片段）；无违规时为空数组。
-""" + JSON_ONLY_RULE
+    裁决项判定准则来自 ssot-config ``audit_items``（与 lint 同源）；本函数只
+    负责固定框架：角色、逐项裁决口径、输出 JSON 契约与「不臆造」通用准则。
+    """
+    blocks = "\n".join(
+        f"{idx}. 【{item.label}】（item={item.id}）判定准则：\n{item.criteria}"
+        for idx, item in enumerate(items, 1)
+    )
+    material_ids = [item.id for item in items if item.requires_materials]
+    material_field_rule = (
+        f"；item 为 {'、'.join(material_ids)} 的条目另须含 material_id（池内素材 id）"
+        if material_ids
+        else ""
+    )
+    return (
+        "你是章节质检自审员，按下列裁决项逐项判断本章正文是否违规，"
+        "只裁决下列各项，不扩大范围。\n\n"
+        f"裁决项：\n{blocks}\n\n"
+        "通用准则：无违规时返回空数组，不要臆造违规。\n\n"
+        "输出为一个 JSON 对象，字段如下：\n"
+        "- issues：每条含 item（上列裁决项 id 之一）与 excerpt"
+        f"（正文中违规位置的片段或问题说明）{material_field_rule}；无违规时为空数组。\n"
+    ) + JSON_ONLY_RULE
 
 
 def _format_materials(materials: Sequence[MaterialPayload]) -> str:
@@ -198,8 +216,7 @@ def _build_revise_user(
 def _build_audit_user(chapter_text: str, task: dict[str, Any]) -> str:
     """自审 user 提示词：给素材池 + 正文，要可机器判读的违规列表。"""
     return (
-        f"{_AUDIT_TAG}判断下面本章正文是否存在改写自某条素材 excerpt 原文却未挂"
-        "对应 [素材id] 角标之处。\n"
+        f"{_AUDIT_TAG}按 system 中的裁决项逐项判断下面的本章正文。\n"
         f"素材池（仅可引用池内 id）：\n{_format_materials(pass_materials(task))}\n\n"
         f"本章正文：\n{chapter_text}\n\n"
         "判断并返回 issues（无违规时为空数组，不要臆造）。"
@@ -298,11 +315,20 @@ class LlmWriterClient:
     def audit(self, chapter_text: str, task: dict[str, Any]) -> AuditEnvelope:
         """自审裁决；``issues: []`` 合法非退化（不重试）。
 
-        异常 / 解析失败 / 结构非法 → 重试；耗尽 → 返回空裁决 ``degraded=True``
-        ——自审永不阻断主链。非法条目（缺 material_id 等）防御性丢弃。
+        裁决项按任务包文种加载并按素材池适用性过滤（与编排层跳过口径同源），
+        system 提示词逐任务拼装。异常 / 解析失败 / 结构非法 → 重试；
+        耗尽 → 返回空裁决 ``degraded=True``——自审永不阻断主链。
+        非法条目（item 不在适用裁决项内、依赖素材的裁决项缺 material_id 等）
+        防御性丢弃。
         """
+        doc_type, _ = carried_doc_facts(task)
+        items = audit_items_for(doc_type, has_materials=bool(pass_materials(task)))
+        if not items:
+            # 无适用裁决项（编排层通常已跳过）：防御性返回合法空裁决，不发无意义调用。
+            return AuditEnvelope()
+        by_id: dict[str, AuditItem] = {item.id: item for item in items}
         messages = [
-            {"role": "system", "content": _AUDIT_INSTRUCTIONS},
+            {"role": "system", "content": _build_audit_system(items)},
             {"role": "user", "content": _build_audit_user(chapter_text, task)},
         ]
         for attempt in range(1, self._max_attempts + 1):
@@ -322,15 +348,26 @@ class LlmWriterClient:
                 )
                 continue
             issues: list[AuditIssue] = []
-            for item in payload["issues"]:
-                if not isinstance(item, dict) or not isinstance(item.get("material_id"), str):
-                    # 非法条目防御性丢弃：自审是尽力而为的辅助裁决，不因单条脏数据整体退化。
-                    logger.warning("rewriter_loop[audit] 丢弃非法自审条目：%r", item)
+            for entry in payload["issues"]:
+                # 非法条目防御性丢弃：自审是尽力而为的辅助裁决，不因单条脏数据整体退化。
+                if not isinstance(entry, dict):
+                    logger.warning("rewriter_loop[audit] 丢弃非法自审条目：%r", entry)
                     continue
-                excerpt = item.get("excerpt")
+                item_id = entry.get("item")
+                spec = by_id.get(item_id) if isinstance(item_id, str) else None
+                if spec is None:
+                    logger.warning("rewriter_loop[audit] 丢弃裁决项不明的自审条目：%r", entry)
+                    continue
+                material_id = entry.get("material_id")
+                if spec.requires_materials and not isinstance(material_id, str):
+                    logger.warning("rewriter_loop[audit] 丢弃缺 material_id 的自审条目：%r", entry)
+                    continue
+                excerpt = entry.get("excerpt")
                 issues.append(
                     AuditIssue(
-                        material_id=item["material_id"],
+                        item=spec.id,
+                        label=spec.label,
+                        material_id=material_id if isinstance(material_id, str) else "",
                         excerpt=excerpt if isinstance(excerpt, str) else "",
                     )
                 )

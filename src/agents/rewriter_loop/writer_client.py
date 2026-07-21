@@ -38,9 +38,16 @@ class WriterEnvelope(BaseModel):
 
 
 class AuditIssue(BaseModel):
-    """自审单条违规：池内素材 id + 正文疑似派生却未标的片段。"""
+    """自审单条违规：命中的裁决项 + 正文违规片段。
 
-    material_id: str
+    ``item``/``label`` 对应 ssot-config ``audit_items`` 的裁决项（缺省为通用层
+    「派生未标」，即历史唯一裁决项）；``material_id`` 仅依赖素材的裁决项填写
+    （派生未标须给池内素材 id），语义级裁决项（对比叙事等）留空。
+    """
+
+    item: str = "unmarked_derived_content"
+    label: str = ""
+    material_id: str = ""
     excerpt: str = ""
 
 

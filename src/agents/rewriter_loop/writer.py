@@ -26,6 +26,7 @@ from agents.contracts import SelfCheckPayload, SubagentAdapter
 from agents.rewriter_loop.llm_adapter import LlmWriterClient
 from agents.rewriter_loop.style_linter import (
     Violation,
+    audit_items_for,
     lint,
     load_prose,
 )
@@ -40,32 +41,42 @@ from domain.doc_types import carried_doc_facts
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook
 from llm.llm_client import LLMFactory
 
-# 自审违规的规则名：与 lint 侧规则同族命名，供 self_check 折叠时归为引用类。
-_AUDIT_RULE = "self_audit_unmarked_derived_content"
+# 自审违规的规则名前缀：规则名 = 前缀 + 裁决项 id，与 lint 侧规则同族命名。
+_AUDIT_RULE_PREFIX = "self_audit_"
 
-# 引用类违规规则名：修前检出任一条则 citations_ok=False。
+# 引用类违规规则名：修前检出任一条则 citations_ok=False。自审裁决项中仅
+# 「派生未标」属引用类；语义级裁决项（对比叙事等）折入 issues 但不影响引用门禁。
 _CITATION_RULES = frozenset(
-    {"unknown_material_marker", "unmarked_derived_content", _AUDIT_RULE}
+    {
+        "unknown_material_marker",
+        "unmarked_derived_content",
+        f"{_AUDIT_RULE_PREFIX}unmarked_derived_content",
+    }
 )
 
 
 def audit_issues_to_violations(issues: Sequence[AuditIssue]) -> list[Violation]:
     """把自审条目折成 lint 同形的 ``Violation``，并入统一违规清单。
 
+    规则名按裁决项分列（``self_audit_<item>``）；带 material_id 的条目
+    （派生未标）沿用素材定位话术，语义级条目以裁决项名义描述。
     公开导出：调测脚本（scripts/rewriter_debug.py）复用同一折叠逻辑，
     保证 --step 模式的违规口径与真编排零漂移。
     """
     out: list[Violation] = []
     for issue in issues:
         snippet = (issue.excerpt or "")[:80]
+        if issue.material_id:
+            message = (
+                f"自审发现正文疑似改写自素材「{issue.material_id}」原文"
+                f"却未挂 [{issue.material_id}] 角标"
+            )
+        else:
+            message = f"自审裁决项「{issue.label or issue.item}」判定违规"
         out.append(
             Violation(
-                rule=_AUDIT_RULE,
-                message=(
-                    f"自审发现正文疑似改写自素材「{issue.material_id}」原文"
-                    f"却未挂 [{issue.material_id}] 角标"
-                    + (f"：{snippet}" if snippet else "")
-                ),
+                rule=_AUDIT_RULE_PREFIX + issue.item,
+                message=message + (f"：{snippet}" if snippet else ""),
             )
         )
     return out
@@ -89,6 +100,10 @@ def make_writer_run(
         doc_type, doc_variant = carried_doc_facts(task)
         materials = pass_materials(task)
         style_prose = load_prose(doc_type)
+        # 自审是否发起按「适用裁决项是否非空」裁决（ADR-0005 按文种分派）：
+        # 素材池为空时剔除依赖素材的裁决项（如通用层「派生未标」），语义级裁决项
+        # （如调研报告对比叙事/四步递进）不依赖素材、照常自审。
+        audit_applicable = audit_items_for(doc_type, has_materials=bool(materials))
 
         def progress(step: str, **extra: Any) -> None:
             """发进度事件：载荷统一带 unit / chapter_id / mode / step，只放元数据。"""
@@ -116,9 +131,10 @@ def make_writer_run(
         def quality_check(text: str) -> list[Violation]:
             """终态质检：全量 lint（纯函数）+ 轻量自审，违规合并为统一清单。
 
-            自审跳过分支（对齐源仓库「无引用池跳过自审」设计）：素材池为空则无
-            「派生未标」可判，跳过模型调用省一次 LLM 花费；不发 llm_call 事件对
-            （没有真实调用），但仍发 audit_done（issues=0）保证步骤流完整可观测。
+            自审跳过分支：适用裁决项为空（如素材池为空且文种只有依赖素材的
+            裁决项）则无可判之事，跳过模型调用省一次 LLM 花费；不发 llm_call
+            事件对（没有真实调用），但仍发 audit_done（issues=0）保证步骤流
+            完整可观测。
             """
             found = lint(
                 text,
@@ -129,7 +145,7 @@ def make_writer_run(
                 hypotheses=spec["hypotheses"],
             )
             progress("lint_done", violations=len(found))
-            if materials:
+            if audit_applicable:
                 progress("llm_call_start", call="audit")
                 audit = client.audit(text, task)
                 progress(

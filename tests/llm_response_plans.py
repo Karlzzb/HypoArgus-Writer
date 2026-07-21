@@ -109,12 +109,12 @@ AUDIT_EMPTY_RESPONSE = '{"issues": []}'
 # rewriter_loop 真实现的键控应答（demo 空转与端到端主干等真链路场景与
 # TRUNK_RESPONSES 合用）：写作调用按上下文块的「- 标题：<章名>」行键控
 # （同章 draft 在前、revise 在后，按调用时间顺序弹出）；自审调用按
-# 【引用自审】标签键控。正文刻意规避全部 lint 规则（角标在素材池内、
+# 【章节自审】标签键控。正文刻意规避全部 lint 规则（角标在素材池内、
 # 无口语化/编号/意识形态违规、无 ## 标题不落章型），保证每章恰好一次
 # 写作调用、不触发修订，应答计划保持确定性。revise 产物落实
 # MIXED_DIRECTIVE_RESPONSE 的两条指令（正文含指令原文，供落实断言）。
 WRITER_KEYED_RESPONSES = {
-    "【引用自审】": [AUDIT_EMPTY_RESPONSE] * 4,
+    "【章节自审】": [AUDIT_EMPTY_RESPONSE] * 4,
     "- 标题：第一章": [
         writer_envelope(
             "本专业面向智能制造领域培养高素质人才，课程体系对接行业标准。[m-ch1-p1-h1]",

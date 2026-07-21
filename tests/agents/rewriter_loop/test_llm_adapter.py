@@ -153,18 +153,33 @@ def test_真实适配器_revise修一次_同时含指令与违规清单(draft_ta
 
 def test_真实适配器_audit正常_条目转换正确(draft_task: dict[str, Any]) -> None:
     llm = FakeLLM(
-        responses=[json.dumps({"issues": [{"material_id": "m-h-1", "excerpt": "疑似片段"}]})]
+        responses=[
+            json.dumps(
+                {
+                    "issues": [
+                        {
+                            "item": "unmarked_derived_content",
+                            "material_id": "m-h-1",
+                            "excerpt": "疑似片段",
+                        }
+                    ]
+                }
+            )
+        ]
     )
     envelope = _make_client(llm).audit("本章正文。", draft_task)
 
     assert len(envelope.issues) == 1
+    assert envelope.issues[0].item == "unmarked_derived_content"
+    assert envelope.issues[0].label == "派生未标"
     assert envelope.issues[0].material_id == "m-h-1"
     assert envelope.issues[0].excerpt == "疑似片段"
     assert envelope.degraded is False
     # 自审指令置于 system（修复源仓库漏挂 system 的缺陷）；user 含素材池与正文。
     [messages] = llm.calls
     assert messages[0]["role"] == "system"
-    assert "引用质检自审员" in messages[0]["content"]
+    assert "质检自审员" in messages[0]["content"]
+    assert "【派生未标】" in messages[0]["content"]
     user = messages[1]["content"]
     assert "m-h-1" in user
     assert "本章正文。" in user
@@ -194,8 +209,10 @@ def test_真实适配器_audit非法条目_防御性丢弃(draft_task: dict[str,
             json.dumps(
                 {
                     "issues": [
-                        {"excerpt": "缺素材id的条目"},
-                        {"material_id": "m-h-2"},
+                        {"excerpt": "缺裁决项id的条目"},
+                        {"item": "臆造的裁决项", "excerpt": "裁决项不在适用集内"},
+                        {"item": "unmarked_derived_content", "excerpt": "派生未标缺素材id"},
+                        {"item": "unmarked_derived_content", "material_id": "m-h-2"},
                         "不是对象的条目",
                     ]
                 }
@@ -207,6 +224,75 @@ def test_真实适配器_audit非法条目_防御性丢弃(draft_task: dict[str,
     assert len(envelope.issues) == 1
     assert envelope.issues[0].material_id == "m-h-2"
     assert envelope.issues[0].excerpt == ""
+
+
+def test_真实适配器_audit按文种分派_调研报告拿到语义裁决项(draft_task: dict[str, Any]) -> None:
+    # 调研报告 + 有素材：通用层「派生未标」与文种层「对比叙事」「四步递进」并集拼装。
+    draft_task["doc_type"] = "调研报告"
+    draft_task["doc_variant"] = None
+    llm = FakeLLM(responses=[json.dumps({"issues": []})])
+    _make_client(llm).audit("本章正文。", draft_task)
+
+    system = llm.calls[0][0]["content"]
+    assert "【派生未标】" in system
+    assert "【对比叙事】" in system
+    assert "横向比" in system
+    assert "【四步递进】" in system
+    assert "归因分析" in system
+    # 依赖素材的裁决项声明 material_id 字段要求。
+    assert "material_id" in system
+
+
+def test_真实适配器_audit按文种分派_人培方案不被问调研报告裁决项(
+    draft_task: dict[str, Any],
+) -> None:
+    llm = FakeLLM(responses=[json.dumps({"issues": []})])
+    _make_client(llm).audit("本章正文。", draft_task)
+
+    system = llm.calls[0][0]["content"]
+    assert "【派生未标】" in system
+    assert "对比叙事" not in system
+    assert "四步递进" not in system
+
+
+def test_真实适配器_audit调研报告无素材_只问语义裁决项且条目可解析(
+    draft_task: dict[str, Any],
+) -> None:
+    # 素材池为空：依赖素材的「派生未标」不适用，语义裁决项照常自审；
+    # 语义条目不带 material_id 也合法。
+    draft_task["doc_type"] = "调研报告"
+    draft_task["doc_variant"] = None
+    for material in draft_task["materials"]:
+        material["verdict"] = "fail"
+    llm = FakeLLM(
+        responses=[
+            json.dumps(
+                {"issues": [{"item": "comparison_narrative", "excerpt": "孤立数值断言句"}]}
+            )
+        ]
+    )
+    envelope = _make_client(llm).audit("本章正文。", draft_task)
+
+    system = llm.calls[0][0]["content"]
+    assert "派生未标" not in system
+    assert "【对比叙事】" in system
+    assert "【四步递进】" in system
+    assert len(envelope.issues) == 1
+    assert envelope.issues[0].item == "comparison_narrative"
+    assert envelope.issues[0].label == "对比叙事"
+    assert envelope.issues[0].material_id == ""
+
+
+def test_真实适配器_audit无适用裁决项_不发调用返回空裁决(draft_task: dict[str, Any]) -> None:
+    # 人培方案（仅依赖素材的裁决项）+ 空素材池：防御性返回合法空裁决，零 LLM 调用。
+    for material in draft_task["materials"]:
+        material["verdict"] = "fail"
+    llm = FakeLLM(responses=[])
+    envelope = _make_client(llm).audit("本章正文。", draft_task)
+
+    assert envelope.issues == []
+    assert envelope.degraded is False
+    assert llm.calls == []
 
 
 def test_真实适配器_draft系统提示词_不含双方括号残留(draft_task: dict[str, Any]) -> None:
