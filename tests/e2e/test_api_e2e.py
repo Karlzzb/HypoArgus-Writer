@@ -83,8 +83,13 @@ def _make_app(
 
 
 @asynccontextmanager
-async def _client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
-    """在后台线程起真实 uvicorn 服务（随机端口），挂 httpx 客户端。"""
+async def _client(
+    app: FastAPI, read_timeout: float = TIMEOUT
+) -> AsyncIterator[httpx.AsyncClient]:
+    """在后台线程起真实 uvicorn 服务（随机端口），挂 httpx 客户端。
+
+    read_timeout 供长耗时场景（门控真实链路 E2E）放宽读超时，缺省不变。
+    """
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
@@ -102,7 +107,7 @@ async def _client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         port = server.servers[0].sockets[0].getsockname()[1]
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}",
-            timeout=httpx.Timeout(10.0, read=TIMEOUT),
+            timeout=httpx.Timeout(10.0, read=read_timeout),
         ) as client:
             yield client
     finally:

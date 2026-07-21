@@ -43,6 +43,9 @@ package = false
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "real_e2e: 门控真实链路 E2E（真实 LLM 与三条检索通道，需 HYPOARGUS_REAL_E2E=1 且凭据齐备）",
+]
 
 [tool.mypy]
 mypy_path = "src"
