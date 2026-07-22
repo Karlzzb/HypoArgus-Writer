@@ -77,6 +77,13 @@
 - **字数目标块（Word Count Prompt Block）** — 写作提示词中按章型动态生成的目标字数区间段。
   叙述章型提示取区间中上限，表章提示取中下限；数值全部取自 ssot-config，与校验器零漂移。
 
+## 检索子智能体（search_agent）
+
+- **佐证强度三值（Material Verdict）** — 每条落库素材的佐证强度裁决，取 pass / inconclusive / fail 三值。
+  pass 为强支撑（引擎裁决支撑引文，进写作池、可作量化断言与结论的直接依据）；inconclusive 为弱佐证（近似命中/补充引文，进写作池但仅可作背景或趋势提示、措辞须留余地）；fail 为反例或不可用（入库供审计，不进写作池）。IRRELEVANT/NEUTRAL 噪声在引擎裁决层即丢弃、不落库。
+- **薄弱章警告（Weak-chapter Warning）** — 一章 pass 落库数低于下限（`SEARCH_AGENT_MIN_PASS_PER_CHAPTER`，缺省 3）时发出的显式警告事件并计入诊断摘要。
+  只数 pass、不数 inconclusive；不阻断不补检、检索保持单轮，用于把检索薄弱的章节如实暴露给后续环节与人工。
+
 ## 测试
 
 - **注入点（Injection Point）** — 可替换实现的依赖边界，测试时在此换入确定性替身（假 LLM、Fake 客户端、打桩子智能体），生产时接真实现。

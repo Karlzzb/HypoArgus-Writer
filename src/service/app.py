@@ -26,7 +26,13 @@ from service.event_envelope import GRAPH_EVENT_TYPES, EventEnvelope
 from graph import build_graph, postgres_checkpointer
 from llm import observability
 from llm.llm_client import LLMFactory, default_llm_factory
-from agents.contracts import HypothesisPayload, MaterialPayload, SearchTask, Subagent
+from agents.contracts import (
+    HypothesisPayload,
+    MaterialPayload,
+    PointPayload,
+    SearchTask,
+    Subagent,
+)
 from agents.rewriter_loop import make_rewriter_loop
 from agents.search_agent import make_search_agent
 from domain.events import SUBAGENT_END, EventHook
@@ -140,14 +146,31 @@ class RetrievalHypothesis(BaseModel):
         return value
 
 
+class RetrievalPoint(BaseModel):
+    """独立检索请求中的论点条目：契约 PointPayload 的校验形态。"""
+
+    id: str
+    text: str
+
+    @field_validator("id", "text")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        """论点 id 与本文不允许为空白。"""
+        if not value.strip():
+            raise ValueError("论点 id 与 text 不允许为空白")
+        return value
+
+
 class RetrievalRequest(BaseModel):
-    """独立检索请求体：字段即 SearchTask 契约，genre 与既有素材摘要可选带默认值。
+    """独立检索请求体：字段即 SearchTask 契约，points/genre/既有素材摘要可选带默认值。
 
     session_id 由调用方透传（与创建任务一致，本系统不鉴权），
     进度事件按其入信封供 /graph_events 过滤订阅。
+    points 缺省为空：与假说一并聚合进查询构造（杠杆①），不传亦可检索。
     """
 
     chapter_id: str
+    points: list[RetrievalPoint] = []
     hypotheses: list[RetrievalHypothesis]
     genre: str = ""
     existing_materials_digest: str = ""
@@ -177,6 +200,10 @@ class RetrievalResponse(BaseModel):
 
     diagnostics 与 subagent_end 事件携带的诊断摘要同源（打桩等无诊断
     实现下为空对象），供无 Langfuse 权限的调用方观察本次检索运行细节。
+    素材 verdict 为三值枚举 pass/fail/inconclusive（杠杆②）：pass 强支撑、
+    inconclusive 弱佐证（近似命中/补充）、fail 反例或不可用；消费方须按三值处理。
+    diagnostics 可能含 weak_evidence_count（本章弱佐证条数）与 pass_below_threshold
+    （pass 落库低于下限的薄弱章警告，杠杆①）。
     """
 
     materials: list[MaterialPayload]
@@ -320,6 +347,10 @@ def create_app(
 
         task = SearchTask(
             chapter_id=request.chapter_id,
+            points=[
+                PointPayload(id=point.id, text=point.text)
+                for point in request.points
+            ],
             hypotheses=[
                 HypothesisPayload(
                     id=hypothesis.id,

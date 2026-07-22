@@ -93,7 +93,14 @@ class Material(BaseModel):
     默认 web 兼容旧 checkpoint（与既有条目全按联网来源渲染的行为一致）。"""
     excerpt: str
     relevance_score: float
-    verdict: Literal["pass", "fail"]
+    verdict: Literal["pass", "fail", "inconclusive"]
+    """佐证强度三值：pass 强支撑、inconclusive 弱佐证（近似命中/补充）、fail 反例或不可用。
+    默认 checkpoint 兼容——旧条目只有 pass/fail 两值，inconclusive 为本轮新增。"""
+
+
+CITABLE_VERDICTS: frozenset[str] = frozenset({"pass", "inconclusive"})
+"""可进写作池的素材 verdict 集合：pass 强支撑 + inconclusive 弱佐证；fail 仅入库供审计。
+素材过滤口径的唯一事实源，装配层与写作注入点共用，避免同形字面量多处漂移。"""
 
 
 class SelfCheck(BaseModel):

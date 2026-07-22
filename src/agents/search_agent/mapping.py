@@ -52,9 +52,12 @@ def engine_payload_from_task(task: dict[str, Any]) -> dict[str, Any]:
     目标文本为反驳条件），落实"可证伪"的产品设计。
     既有引文库摘要作为每个正向项的既有证据文本，供引擎规避重复素材；
     品类进论证边界字段，作为检索范围提示。
+    章节论点与假说一并聚合进段落文本（查询构造的素材来源），论点另经
+    argument_context.argument_path 给引擎论证层级上下文（杠杆①：查询聚合论点+假说）。
     """
     chapter_id = task["chapter_id"]
     digest = task["existing_materials_digest"].strip()
+    points = task.get("points", [])
     forward_items: list[dict[str, Any]] = []
     reverse_items: list[dict[str, Any]] = []
     for hypothesis in task["hypotheses"]:
@@ -79,14 +82,24 @@ def engine_payload_from_task(task: dict[str, Any]) -> dict[str, Any]:
     paragraph: dict[str, Any] = {
         "paragraph_id": chapter_id,
         "paragraph_text": "\n".join(
-            hypothesis["text"] for hypothesis in task["hypotheses"]
+            [point["text"] for point in points]
+            + [hypothesis["text"] for hypothesis in task["hypotheses"]]
         ),
         "forward_items": forward_items,
         "reverse_items": reverse_items,
     }
+    argument_context: dict[str, Any] = {}
+    if points:
+        # 论点是章下第一论证层：argument_path 的 level 从 1 起（章为根、不入路径）。
+        argument_context["argument_path"] = [
+            {"level": 1, "node_id": point["id"], "text": point["text"]}
+            for point in points
+        ]
     genre = task["genre"].strip()
     if genre:
-        paragraph["argument_context"] = {"boundary": genre}
+        argument_context["boundary"] = genre
+    if argument_context:
+        paragraph["argument_context"] = argument_context
     return {
         "request_id": f"chapter-{chapter_id}",
         "document_id": ENGINE_DOCUMENT_ID,
@@ -94,16 +107,24 @@ def engine_payload_from_task(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_VERDICT_RANK: dict[str, int] = {"fail": 0, "inconclusive": 1, "pass": 2}
+"""三值 verdict 优先级：同（假说, 引文）在多条裁决出现时取强者（pass > inconclusive > fail）。"""
+
+
 def search_result_from_engine_output(
     output: dict[str, Any], task: dict[str, Any]
 ) -> SearchResult:
     """引擎公开出参（search-agent-output/v1 的 dict 形态）→ SearchResult。
 
-    契约 verdict 的语义是"该素材可否作为支撑假说的通过证据"：
-    正向线裁决中被列为支撑引文的素材为 pass，其余（补充、反例）为 fail；
-    反向线（反驳条件检索）命中的素材一律 fail 入库——它们是对假说的
-    削弱证据，供后续环节筛选与审计，不得进入写作素材池。
-    同一（假说, 引文）在正反两线都出现时取 pass 优先（正向支撑事实成立）。
+    契约 verdict 三值化（杠杆②，经 T0 诊断放行、收窄口径）：
+    - 正向线被列为支撑引文（supporting）的素材为 pass——强支撑，进写作池；
+    - 正向线被列为补充引文（supplementary，即近似命中/SUPPLEMENT）的素材为
+      inconclusive——弱佐证，进写作池但按弱佐证渲染；
+    - 其余（正向线反例、反向线命中）一律 fail——供审计不进写作池。
+    IRRELEVANT/NEUTRAL 噪声在引擎裁决层已丢弃、根本不进公开出参，此处无需再判。
+    反向线（反驳条件检索）命中的素材一律 fail：它们是对假说的削弱证据，
+    即便被引擎列为补充也不得进写作池。
+    同一（假说, 引文）在多线出现时按 _VERDICT_RANK 取强者。
     回链不上任务包假说的裁决项（编码不合约定或假说未知）按脏数据丢弃。
     """
     chapter_id = task["chapter_id"]
@@ -118,6 +139,7 @@ def search_result_from_engine_output(
             continue
         hypothesis_id, line = linked
         supporting = set(decision.get("supporting_citation_ids", []))
+        supplementary = set(decision.get("supplementary_citation_ids", []))
         for citation_id in decision.get("citation_ids", []):
             citation = citations.get(citation_id)
             if citation is None:
@@ -125,13 +147,17 @@ def search_result_from_engine_output(
             source_kind = _SOURCE_KIND_BY_TYPE.get(citation.get("source_type", ""))
             if source_kind is None:
                 continue
-            verdict: Literal["pass", "fail"] = (
-                "pass" if line == "forward" and citation_id in supporting else "fail"
-            )
+            verdict: Literal["pass", "fail", "inconclusive"]
+            if line == "forward" and citation_id in supporting:
+                verdict = "pass"
+            elif line == "forward" and citation_id in supplementary:
+                verdict = "inconclusive"
+            else:
+                verdict = "fail"
             key = (hypothesis_id, citation_id)
             existing = picked.get(key)
             if existing is not None and (
-                existing["verdict"] == "pass" or verdict == "fail"
+                _VERDICT_RANK[verdict] <= _VERDICT_RANK[existing["verdict"]]
             ):
                 continue
             picked[key] = MaterialPayload(

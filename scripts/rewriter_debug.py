@@ -50,7 +50,7 @@ from agents.rewriter_loop import (  # noqa: E402
     load_prose,
     make_rewriter_loop,
 )
-from agents.rewriter_loop.writer_client import WriterEnvelope, pass_materials  # noqa: E402
+from agents.rewriter_loop.writer_client import WriterEnvelope, citable_materials  # noqa: E402
 from domain.doc_types import carried_doc_facts, tier_from_variant  # noqa: E402
 from llm.llm_client import LLM, FakeLLM, default_llm_factory  # noqa: E402
 
@@ -97,7 +97,7 @@ def build_fake_llm(task: dict[str, Any]) -> FakeLLM:
     写作应答正文取自真实现契约测试的已知干净文本（不触发 lint 规则），
     pass 素材角标逐条落位；自审固定报一条「派生未标」，确定性触发一次修订。
     """
-    materials = pass_materials(task)
+    materials = citable_materials(task)
     markers = "".join(f"[{m['id']}]" for m in materials)
     clean_sentence = "本专业面向智能制造领域培养高素质人才。"
     if task["mode"] == "revise":
@@ -186,7 +186,7 @@ def run_stepwise(
 
     # 环节二：风格校验（纯函数，参数口径与真编排一致）。
     spec = task["chapter_spec"]
-    materials = pass_materials(task)
+    materials = citable_materials(task)
     violations = lint(
         envelope.chapter_text,
         doc_type,

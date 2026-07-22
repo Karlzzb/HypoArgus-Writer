@@ -65,6 +65,7 @@ def _make_state() -> WritingAgentState:
         citation_library=[
             _material("m-1", "ch1", "pass"),
             _material("m-2", "ch1", "fail"),
+            _material("m-4", "ch1", "inconclusive"),
             _material("m-3", "ch2", "pass"),
         ],
         chapter_drafts=[
@@ -365,21 +366,25 @@ def test_多轮迭代不失忆_第1轮意见摘要仍在装配结果中():
 # ---------- 引文库摘要与章节素材 ----------
 
 
-def test_引文库摘要_总条数与分章通过未通过计数():
+def test_引文库摘要_总条数与分章通过弱佐证未通过三值计数():
     segments = extract_citation_digest(_make_state(), {}, _DEFAULT_CONFIG)
     digest = segments[0].text
-    assert "引文库共 3 条素材。" in digest
-    assert "章节 ch1：通过 1 条，未通过 1 条" in digest
-    assert "章节 ch2：通过 1 条，未通过 0 条" in digest
+    assert "引文库共 4 条素材。" in digest
+    assert "章节 ch1：通过 1 条，弱佐证 1 条，未通过 1 条" in digest
+    assert "章节 ch2：通过 1 条，弱佐证 0 条，未通过 0 条" in digest
 
 
-def test_章节素材_只取该章pass素材并JSON序列化():
+def test_章节素材_取该章pass与弱佐证素材并JSON序列化():
+    # 杠杆②放宽：写作池含 pass + inconclusive，fail 仍排除；条目保留 verdict。
     context = assemble(
         _make_state(), "writing_orchestrator", config=_DEFAULT_CONFIG, chapter_id="ch1"
     )
     materials = json.loads(context.text("chapter_materials"))
-    assert [material["id"] for material in materials] == ["m-1"]
-    assert materials[0]["excerpt"] == "摘录 m-1"
+    assert [material["id"] for material in materials] == ["m-1", "m-4"]
+    by_id = {material["id"]: material for material in materials}
+    assert by_id["m-1"]["verdict"] == "pass"
+    assert by_id["m-4"]["verdict"] == "inconclusive"
+    assert by_id["m-1"]["excerpt"] == "摘录 m-1"
 
 
 def test_章节素材_缺chapter_id时无该段且装配不抛错():

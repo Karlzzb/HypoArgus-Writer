@@ -21,7 +21,7 @@ from typing import cast
 from assembly.assembler_config import AssemblerConfig, BudgetOverride, load_assembler_config
 from domain.citation_reconciler import MARKER_PATTERN
 from llm.llm_config import RUNTIME_UNITS
-from domain.state import RevisionRound, WritingAgentState
+from domain.state import CITABLE_VERDICTS, RevisionRound, WritingAgentState
 
 # 切首句的句末标点：中文句号/叹号/问号与对应英文标点。
 _SENTENCE_ENDINGS = "。！？.!?"
@@ -228,15 +228,19 @@ def extract_citation_digest(
     params: Mapping[str, object],
     config: AssemblerConfig,
 ) -> list[Segment]:
-    """提取引文库摘要：总条数 + 按章节分组的通过/未通过计数。"""
+    """提取引文库摘要：总条数 + 按章节分组的通过/弱佐证/未通过三值计数。"""
     library = state.get("citation_library", [])
+    # 每章计数三元组 [pass, inconclusive, fail]，与 verdict 三值一一对应。
+    _index = {"pass": 0, "inconclusive": 1, "fail": 2}
     counts: dict[str, list[int]] = {}
     for material in library:
-        entry = counts.setdefault(material.chapter_id, [0, 0])
-        entry[0 if material.verdict == "pass" else 1] += 1
+        entry = counts.setdefault(material.chapter_id, [0, 0, 0])
+        entry[_index[material.verdict]] += 1
     lines = [f"引文库共 {len(library)} 条素材。"]
-    for chapter_id, (passed, failed) in counts.items():
-        lines.append(f"章节 {chapter_id}：通过 {passed} 条，未通过 {failed} 条")
+    for chapter_id, (passed, weak, failed) in counts.items():
+        lines.append(
+            f"章节 {chapter_id}：通过 {passed} 条，弱佐证 {weak} 条，未通过 {failed} 条"
+        )
     return [Segment("citation_digest", "\n".join(lines))]
 
 
@@ -255,8 +259,10 @@ def extract_chapter_materials(
     params: Mapping[str, object],
     config: AssemblerConfig,
 ) -> list[Segment]:
-    """提取指定章节通过校验的素材，JSON 序列化。
+    """提取指定章节可进写作池的素材（pass 强支撑 + inconclusive 弱佐证），JSON 序列化。
 
+    杠杆②放宽过滤口径：写作池由 pass-only 放宽为 pass+inconclusive，条目保留
+    verdict 供下游按佐证强度分组渲染；fail（反例/不可用）仍不进写作池。
     params 需带 chapter_id；缺失时返回空段列表（同一配方服务多场景）。
     """
     chapter_id = params.get("chapter_id")
@@ -265,7 +271,8 @@ def extract_chapter_materials(
     materials = [
         material.model_dump()
         for material in state.get("citation_library", [])
-        if material.chapter_id == chapter_id and material.verdict == "pass"
+        if material.chapter_id == chapter_id
+        and material.verdict in CITABLE_VERDICTS
     ]
     return [Segment("chapter_materials", json.dumps(materials, ensure_ascii=False))]
 

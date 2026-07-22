@@ -114,13 +114,18 @@ def flatten_hypotheses(chapter: ChapterSpec) -> list[HypothesisPayload]:
     ]
 
 
+def chapter_points(chapter: ChapterSpec) -> list[PointPayload]:
+    """把章节论点按顺序转为任务包条目：检索任务包与写作任务包共用。"""
+    return [PointPayload(id=point.id, text=point.text) for point in chapter.points]
+
+
 def chapter_spec_payload(chapter: ChapterSpec) -> ChapterSpecPayload:
     """章节骨架转任务包字典：论点列表 + 该章全部假说扁平列表。"""
     return ChapterSpecPayload(
         id=chapter.id,
         title=chapter.title,
         chapter_type=chapter.chapter_type,
-        points=[PointPayload(id=point.id, text=point.text) for point in chapter.points],
+        points=chapter_points(chapter),
         hypotheses=flatten_hypotheses(chapter),
     )
 
@@ -255,6 +260,7 @@ def make_writing_orchestrator_node(
         )
         task = SearchTask(
             chapter_id=chapter.id,
+            points=chapter_points(chapter),
             hypotheses=flatten_hypotheses(chapter),
             genre=state.get("genre", ""),
             existing_materials_digest=context.text("citation_digest"),
