@@ -33,7 +33,7 @@ from agents.rewriter_loop.writer_client import (
     AuditEnvelope,
     AuditIssue,
     WriterEnvelope,
-    pass_materials,
+    citable_materials,
 )
 from domain.doc_types import carried_doc_facts, tier_from_variant
 from llm.llm_client import LLM
@@ -60,6 +60,7 @@ _SYSTEM_INSTRUCTIONS = """\
    - 量化断言（数值/百分比/倍数的提升、降低、对比）必须**同句**挂角标，且数值须来自素材摘录，禁止无据数值；
    - 角标所在句须如实转述所引素材摘录的核心观点与关键数值/对比结论，不得弱化或省略（素材称「高出20%」，正文须写出「20%」，不得改写成「显著提升」）；
    - 凡照抄或改写自素材摘录的句子必须挂对应 `[素材id]` 角标，不得漏标。
+   - 素材池按佐证强度分【强支撑素材】与【弱佐证素材】两组：量化断言、精确数值与确定性结论只能由**强支撑素材**支撑；**弱佐证素材**（近似命中/补充）仅可作背景或趋势提示，其角标所在句须以留有余地的措辞转述（如「有资料显示」「部分数据表明」「或与……相关」），不得据其下精确数值或确定性结论；无强支撑素材时该论点宁可定性陈述、不得据弱佐证杜撰数值。
 5. 禁令：
    - 禁 AI 空泛总结词与无据定性断言（「旨在构建」「确保符合」「致力于」「助力」「显著提升」「有效解决」等），公文用密集列举与事实陈述。
    - 本章开头不加独立前言段、不加「如下表所示」式导引句——直接 `## 标题` / `### 子节` → 正文或表；禁讲客体。
@@ -102,13 +103,33 @@ def _build_audit_system(items: Sequence[AuditItem]) -> str:
     ) + JSON_ONLY_RULE
 
 
+def _material_line(m: MaterialPayload) -> str:
+    return f"- {m['id']}（支撑假说 {m['hypothesis_id']}，来源：{m['source']}）：{m['excerpt']}"
+
+
 def _format_materials(materials: Sequence[MaterialPayload]) -> str:
+    """按佐证强度分组渲染素材池：强支撑（pass）与弱佐证（inconclusive）分列标注。
+
+    分组让模型据佐证强度调节措辞：强支撑可作量化断言与结论的直接依据；
+    弱佐证仅近似命中/补充，只能作背景或趋势提示、措辞须留余地（详见系统提示词）。
+    仅一类时不加另一类的空分组标题；两类皆空返回「（无）」。
+    """
     if not materials:
         return "（无）"
-    return "\n".join(
-        f"- {m['id']}（支撑假说 {m['hypothesis_id']}，来源：{m['source']}）：{m['excerpt']}"
-        for m in materials
-    )
+    strong = [m for m in materials if m["verdict"] == "pass"]
+    weak = [m for m in materials if m["verdict"] == "inconclusive"]
+    blocks: list[str] = []
+    if strong:
+        blocks.append(
+            "【强支撑素材】（可作为量化断言、数据与结论的直接依据）：\n"
+            + "\n".join(_material_line(m) for m in strong)
+        )
+    if weak:
+        blocks.append(
+            "【弱佐证素材】（近似命中/补充，仅可作背景或趋势提示，不得据以下量化断言，措辞须留余地）：\n"
+            + "\n".join(_material_line(m) for m in weak)
+        )
+    return "\n".join(blocks)
 
 
 def _format_hypotheses(hypotheses: list[dict[str, Any]]) -> str:
@@ -145,7 +166,7 @@ def _build_context_block(task: dict[str, Any]) -> str:
         if task["prev_chapter_summary"]
         else "（首章，无上一章摘要，无需承上启下）"
     )
-    materials = pass_materials(task)
+    materials = citable_materials(task)
     material_block = ""
     if materials:
         material_block = (
@@ -217,7 +238,7 @@ def _build_audit_user(chapter_text: str, task: dict[str, Any]) -> str:
     """自审 user 提示词：给素材池 + 正文，要可机器判读的违规列表。"""
     return (
         f"{_AUDIT_TAG}按 system 中的裁决项逐项判断下面的本章正文。\n"
-        f"素材池（仅可引用池内 id）：\n{_format_materials(pass_materials(task))}\n\n"
+        f"素材池（仅可引用池内 id）：\n{_format_materials(citable_materials(task))}\n\n"
         f"本章正文：\n{chapter_text}\n\n"
         "判断并返回 issues（无违规时为空数组，不要臆造）。"
     )
@@ -322,7 +343,7 @@ class LlmWriterClient:
         防御性丢弃。
         """
         doc_type, _ = carried_doc_facts(task)
-        items = audit_items_for(doc_type, has_materials=bool(pass_materials(task)))
+        items = audit_items_for(doc_type, has_materials=bool(citable_materials(task)))
         if not items:
             # 无适用裁决项（编排层通常已跳过）：防御性返回合法空裁决，不发无意义调用。
             return AuditEnvelope()

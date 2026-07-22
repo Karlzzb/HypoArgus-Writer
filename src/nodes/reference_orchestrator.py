@@ -20,7 +20,11 @@ from assembly.assembler_config import AssemblerConfig
 from assembly.context_assembler import assemble
 from domain.state import WorkflowStatus, WritingAgentState
 from agents.contracts import SearchTask, Subagent, material_from_payload
-from nodes.writing_orchestrator import chapter_by_id, flatten_hypotheses
+from nodes.writing_orchestrator import (
+    chapter_by_id,
+    chapter_points,
+    flatten_hypotheses,
+)
 
 REFERENCE_CHAPTER_ID_KEY: Final = "reference_chapter_id"
 """Send 载荷中目标章 id 的键名：任务态专用，不是主状态字段。"""
@@ -76,6 +80,7 @@ def make_reference_orchestrator_node(
         context = assemble(state, "search_agent", config=assembler_config)
         task = SearchTask(
             chapter_id=chapter_id,
+            points=chapter_points(chapter),
             hypotheses=flatten_hypotheses(chapter),
             genre=state.get("genre", ""),
             existing_materials_digest=context.text("citation_digest"),

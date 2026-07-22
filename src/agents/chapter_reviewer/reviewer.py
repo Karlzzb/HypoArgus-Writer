@@ -26,7 +26,7 @@ from agents.chapter_reviewer.stub import UNIT
 from agents.concurrency import make_thread_permit
 from agents.contracts import SelfCheckPayload, SubagentAdapter
 from agents.rewriter_loop.style_linter import CITATION_RULES, audit_items_for, lint
-from agents.rewriter_loop.writer_client import pass_materials
+from agents.rewriter_loop.writer_client import citable_materials
 from domain.doc_types import carried_doc_facts
 from domain.env_config import read_positive_int
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook
@@ -64,7 +64,7 @@ def make_reviewer_run(
         chapter_id = spec["id"]
         mode = task["mode"]
         doc_type, doc_variant = carried_doc_facts(task)
-        materials = pass_materials(task)
+        materials = citable_materials(task)
         # 四维自审裁决项按文种加载 + 素材适用性过滤（与真实客户端内部同源）：
         # 编排层据此决定是否发起自审调用，并据裁决项配置权威赋予各违规 severity 定级。
         items = audit_items_for(doc_type, has_materials=bool(materials))

@@ -342,8 +342,8 @@ def test_修订模式_混合分支逐超步执行():
     # digest 由 citation_digest 段装配：4 条素材，ch1 通过 1 未通过 1、ch2 通过 2。
     assert search_task["existing_materials_digest"] == (
         "引文库共 4 条素材。\n"
-        "章节 ch1：通过 1 条，未通过 1 条\n"
-        "章节 ch2：通过 2 条，未通过 0 条"
+        "章节 ch1：通过 1 条，弱佐证 0 条，未通过 1 条\n"
+        "章节 ch2：通过 2 条，弱佐证 0 条，未通过 0 条"
     )
 
     # rewriter_loop 两次均 mode=revise，任务包带正确 directives 与 current_text。

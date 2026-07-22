@@ -234,6 +234,7 @@ Java 端                                  HypoArgus-Writer
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `chapter_id` | string | 是 | 章节标识，不允许空白，进事件上下文与素材 id |
+| `points` | array | 否 | 论点列表，缺省 `[]`；条目为 `{id, text}`（`id` 与 `text` 不允许空白），与假说一并聚合进查询构造 |
 | `hypotheses` | array | 是 | 假说列表，不允许为空；条目为 `{id, text, refute_condition}`，`id` 与 `text` 不允许空白，`refute_condition` 非空白时驱动反向检索 |
 | `genre` | string | 否 | 品类（检索范围提示），缺省 `""` |
 | `existing_materials_digest` | string | 否 | 既有素材摘要（供引擎规避重复素材），缺省 `""` |
@@ -242,6 +243,9 @@ Java 端                                  HypoArgus-Writer
 ```json
 {
   "chapter_id": "ch1",
+  "points": [
+    { "id": "p1", "text": "国产数据库替代能力的现状与边界" }
+  ],
   "hypotheses": [
     { "id": "h1", "text": "国产数据库在核心交易场景已具备替代能力", "refute_condition": "近两年存在因性能问题回迁的公开案例" }
   ],
@@ -265,7 +269,7 @@ Java 端                                  HypoArgus-Writer
       "verdict": "pass"
     }
   ],
-  "diagnostics": { "total_elapsed_ms": 1234, "call_counts": { "web_search": 2 } }
+  "diagnostics": { "total_elapsed_ms": 1234, "call_counts": { "web_search": 2 }, "weak_evidence_count": 1, "pass_below_threshold": { "pass_count": 2, "threshold": 3 } }
 }
 ```
 
@@ -274,8 +278,8 @@ Java 端                                  HypoArgus-Writer
 | `materials[].hypothesis_id` | 素材回链的假说 id |
 | `materials[].url` | 来源链接；仅联网来源必带，知识库与结构化来源可为 `null` |
 | `materials[].source_kind` | 来源通道三值：`web` / `knowledge_base` / `structured_data` |
-| `materials[].verdict` | `pass`（可作支撑证据）/ `fail`（反驳或不支撑，供筛选审计） |
-| `diagnostics` | 本次检索的诊断摘要（计数与耗时），与 `subagent_end` 事件携带的诊断同源 |
+| `materials[].verdict` | 佐证强度三值：`pass`（强支撑，可作量化断言依据）/ `inconclusive`（弱佐证，近似命中/补充，仅作背景提示）/ `fail`（反例或不可用，供筛选审计）。**消费方须按三值处理** |
+| `diagnostics` | 本次检索的诊断摘要（计数与耗时），与 `subagent_end` 事件携带的诊断同源；可含 `weak_evidence_count`（本章弱佐证条数）与 `pass_below_threshold`（pass 落库低于下限的薄弱章警告）|
 
 进度事件：调用期间以请求中的 `session_id` 在 `/graph_events` 通道发布 `subagent_start` → `progress`（多条）→ `subagent_end` 事件链，`subagent_start` 为本次调用的根事件（`thread_id` 为空串）。
 

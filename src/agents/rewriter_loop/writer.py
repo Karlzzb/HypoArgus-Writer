@@ -37,7 +37,7 @@ from agents.rewriter_loop.writer_client import (
     AuditIssue,
     WriterEnvelope,
     WriterLlmClient,
-    pass_materials,
+    citable_materials,
 )
 from domain.doc_types import carried_doc_facts
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook
@@ -91,7 +91,7 @@ def make_writer_run(
         chapter_id = spec["id"]
         mode = task["mode"]
         doc_type, doc_variant = carried_doc_facts(task)
-        materials = pass_materials(task)
+        materials = citable_materials(task)
         style_prose = load_prose(doc_type)
         # 自审是否发起按「适用裁决项是否非空」裁决（ADR-0005 按文种分派）：
         # 素材池为空时剔除依赖素材的裁决项（如通用层「派生未标」），语义级裁决项

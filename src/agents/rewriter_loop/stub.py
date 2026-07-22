@@ -9,6 +9,7 @@ from typing import Any
 from agents.contracts import SelfCheckPayload, SubagentAdapter
 from domain.doc_types import carried_doc_facts
 from domain.events import EventHook, noop_hook
+from domain.state import CITABLE_VERDICTS
 
 UNIT = "rewriter_loop"
 
@@ -23,8 +24,11 @@ async def stub_rewriter_loop_run(task: dict[str, Any]) -> dict[str, Any]:
     满足章节编号连续唯一校验（issue #18）。
     """
     spec = task["chapter_spec"]
-    pass_materials = [
-        material for material in task["materials"] if material["verdict"] == "pass"
+    # 写作池 = pass 强支撑 + inconclusive 弱佐证（杠杆②放宽），与真实适配层同口径。
+    citable = [
+        material
+        for material in task["materials"]
+        if material["verdict"] in CITABLE_VERDICTS
     ]
 
     if task["mode"] == "revise":
@@ -41,7 +45,7 @@ async def stub_rewriter_loop_run(task: dict[str, Any]) -> dict[str, Any]:
         paragraphs.append("本章围绕以下论点展开（打桩正文）。")
         for point in spec["points"]:
             paragraphs.append(f"论点：{point['text']}（打桩论证）")
-        for material in pass_materials:
+        for material in citable:
             paragraphs.append(
                 f"素材佐证假说 {material['hypothesis_id']}（打桩）[{material['id']}]"
             )

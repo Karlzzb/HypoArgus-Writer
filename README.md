@@ -71,6 +71,7 @@ cp .env.example .env          # 按下文约定填写
 | `GRAPH_MAX_CONCURRENCY` | 4 | 图级并行分支上限（首写阶段 Send 扇出的并发度） |
 | `FRAMEWORK_MAX_CONCURRENT_CHAPTERS` | 4 | 论证框架论点假说生成的章节级 LLM 并发上限 |
 | `CITATION_MAX_CONCURRENT_CHAPTERS` | 4 | 引文语义核查的章节级 LLM 并发上限 |
+| `SEARCH_AGENT_MIN_PASS_PER_CHAPTER` | 3 | 每章 pass 落库下限，低于此值发薄弱章警告并计入诊断摘要（不阻断不补检） |
 | `ASSEMBLER_*` | 见 `.env.example` | 上下文装配压缩阈值与保留策略 |
 
 ## 启动方式

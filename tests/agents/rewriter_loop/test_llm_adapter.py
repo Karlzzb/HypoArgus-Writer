@@ -61,6 +61,39 @@ def test_真实适配器_draft正常_信封字段与提示词内容合规(draft_
     assert "m-fail-x" not in user
 
 
+def test_真实适配器_弱佐证素材分组渲染并进提示词(draft_task: dict[str, Any]) -> None:
+    """杠杆②：inconclusive 弱佐证进写作池但与 pass 强支撑分组标注；fail 仍排除；
+    系统提示词含弱佐证措辞规则。"""
+    draft_task["materials"].append(
+        {
+            "id": "m-weak-1",
+            "hypothesis_id": "h-1",
+            "source": "弱来源",
+            "url": None,
+            "source_kind": "web",
+            "excerpt": "弱摘录",
+            "relevance_score": 0.3,
+            "verdict": "inconclusive",
+        }
+    )
+    llm = FakeLLM(responses=[_writer_json("## 一、示例章节\n正文。[m-h-1]")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    [messages] = llm.calls
+    system = messages[0]["content"]
+    user = messages[1]["content"]
+    # 素材池按佐证强度分两节，强支撑在弱佐证之前。
+    assert "【强支撑素材】" in user and "【弱佐证素材】" in user
+    assert user.index("【强支撑素材】") < user.index("【弱佐证素材】")
+    # 弱佐证素材进写作池（放宽过滤），且排在弱佐证节内。
+    assert "m-weak-1" in user
+    assert user.index("m-h-1") < user.index("m-weak-1")
+    # fail 素材仍不进池。
+    assert "m-fail-x" not in user
+    # 系统提示词含弱佐证措辞规则（强支撑支撑量化断言、弱佐证只作背景提示）。
+    assert "弱佐证素材" in system
+
+
 def test_真实适配器_draft解析失败_重试后成功(draft_task: dict[str, Any]) -> None:
     llm = FakeLLM(responses=["这不是 JSON", _writer_json("正文。")])
     envelope = _make_client(llm).draft(draft_task, _STYLE_PROSE)

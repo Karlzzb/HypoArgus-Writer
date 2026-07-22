@@ -8,6 +8,10 @@ from agents.search_agent import make_stub_search_agent
 # search_agent 任务包：含 3 条假说（ID 字节和恰好覆盖三种来源通道），字段按规范逐项给全。
 SEARCH_TASK: dict[str, Any] = {
     "chapter_id": "ch-1",
+    "points": [
+        {"id": "p-1", "text": "示例论点一"},
+        {"id": "p-2", "text": "示例论点二"},
+    ],
     "hypotheses": [
         {
             "id": "h-1",

@@ -40,7 +40,9 @@ class MaterialPayload(TypedDict):
     source_kind: SourceKind
     excerpt: str
     relevance_score: float
-    verdict: Literal["pass", "fail"]
+    verdict: Literal["pass", "fail", "inconclusive"]
+    """素材佐证强度三值：pass 强支撑（进写作池）、inconclusive 弱佐证（近似命中/补充，
+    进写作池但按弱佐证渲染）、fail 反例或不可用（入库供审计，不进写作池）。"""
 
 
 def material_from_payload(payload: MaterialPayload, chapter_id: str) -> Material:
@@ -61,10 +63,19 @@ def material_from_payload(payload: MaterialPayload, chapter_id: str) -> Material
     )
 
 
+class PointPayload(TypedDict):
+    """章节骨架中的论点条目。"""
+
+    id: str
+    text: str
+
+
 class SearchTask(TypedDict):
-    """search_agent 任务包：一次给整章假说列表（按章节批量调用）。"""
+    """search_agent 任务包：一次给整章论点与假说列表（按章节批量调用）。"""
 
     chapter_id: str
+    points: list[PointPayload]
+    """本章论点列表：与假说一并聚合进检索查询构造，给引擎论证层级上下文。"""
     hypotheses: list[HypothesisPayload]
     genre: str
     existing_materials_digest: str
@@ -74,13 +85,6 @@ class SearchResult(TypedDict):
     """search_agent 检索结果。"""
 
     materials: list[MaterialPayload]
-
-
-class PointPayload(TypedDict):
-    """章节骨架中的论点条目。"""
-
-    id: str
-    text: str
 
 
 class ChapterSpecPayload(TypedDict):

@@ -30,6 +30,12 @@ MAX_CONCURRENT_CALLS_ENV = "SEARCH_AGENT_MAX_CONCURRENT_CALLS"
 DEFAULT_MAX_CONCURRENT_CALLS = 2
 """并发阈值缺省值：引擎单次调用内部已有多路通道并发，外层从紧避免击穿限流。"""
 
+MIN_PASS_PER_CHAPTER_ENV = "SEARCH_AGENT_MIN_PASS_PER_CHAPTER"
+"""每章 pass 落库下限的环境变量名：低于此值发薄弱章警告（杠杆①）。"""
+
+DEFAULT_MIN_PASS_PER_CHAPTER = 3
+"""每章 pass 落库下限缺省值：低于 3 条强支撑素材即判本章检索薄弱、显式暴露。"""
+
 ENGINE_PROGRESS_PREFIX = "progress."
 """引擎进度事件的稳定前缀：桥只翻译此前缀事件，其余引擎诊断事件不进宿主进度。"""
 
@@ -89,12 +95,15 @@ def make_search_agent(
     *,
     runtime: SearchAgentRuntimeSeam | None = None,
     max_concurrent_calls: int | None = None,
+    min_pass_per_chapter: int | None = None,
 ) -> SubagentAdapter:
     """构造 search_agent 真实现适配器：工厂签名与打桩一致（事件钩子注入）。
 
     runtime 是检索引擎运行时边界的测试接缝（缺省真实引擎一次性调用，
     构造零环境依赖、首次调用才触碰引擎配置）；max_concurrent_calls 未注入时
-    按环境变量 SEARCH_AGENT_MAX_CONCURRENT_CALLS（缺省 2）。
+    按环境变量 SEARCH_AGENT_MAX_CONCURRENT_CALLS（缺省 2）；min_pass_per_chapter
+    未注入时按环境变量 SEARCH_AGENT_MIN_PASS_PER_CHAPTER（缺省 3），每章 pass
+    落库低于此值即发薄弱章警告并计入诊断摘要（杠杆①，不阻断不补检）。
     引擎调用失败即整体失败向上抛（无状态一次性调用，不做局部重试）。
     """
     effective_runtime = runtime or EngineRuntime()
@@ -106,6 +115,13 @@ def make_search_agent(
         )
     )
     permit = make_thread_permit(limit)
+    min_pass = (
+        min_pass_per_chapter
+        if min_pass_per_chapter is not None
+        else read_positive_int(
+            os.environ, MIN_PASS_PER_CHAPTER_ENV, DEFAULT_MIN_PASS_PER_CHAPTER
+        )
+    )
 
     async def run(task: dict[str, Any]) -> dict[str, Any]:
         payload = engine_payload_from_task(task)
@@ -162,17 +178,37 @@ def make_search_agent(
         finally:
             permit.release()
         result: dict[str, Any] = dict(search_result_from_engine_output(output, task))
+        materials = result["materials"]
+        pass_count = sum(1 for m in materials if m["verdict"] == "pass")
+        weak_count = sum(1 for m in materials if m["verdict"] == "inconclusive")
+        summary: dict[str, Any] = {}
         flow_metrics = diagnostics.get("flow_metrics")
         if isinstance(flow_metrics, dict) and flow_metrics:
             # 诊断三去向之二（issue #31）：全量进当前 subagent:search_agent
             # 的 Langfuse span 元数据，摘要子集经保留键随结束事件上报。
             update_current_span_metadata({"search_agent_flow_metrics": flow_metrics})
-            summary = diagnostics_summary(flow_metrics)
-            if summary:
-                result[DIAGNOSTICS_SUMMARY_KEY] = summary
+            summary.update(diagnostics_summary(flow_metrics))
+        if weak_count:
+            # 弱佐证单独计数进诊断摘要（杠杆②）：本章仅弱佐证 N 条，供排障与暴露。
+            summary["weak_evidence_count"] = weak_count
+        if pass_count < min_pass:
+            # 薄弱章显式暴露（杠杆①）：pass 落库低于下限即发警告事件并计入摘要，
+            # 计数只数 pass、不数 inconclusive；不阻断不补检、检索保持单轮。
+            summary["pass_below_threshold"] = {
+                "pass_count": pass_count,
+                "threshold": min_pass,
+            }
+            progress(
+                "weak_chapter_warning",
+                pass_count=pass_count,
+                threshold=min_pass,
+                weak_evidence_count=weak_count,
+            )
+        if summary:
+            result[DIAGNOSTICS_SUMMARY_KEY] = summary
         progress(
             "engine_call_end",
-            materials=len(result["materials"]),
+            materials=len(materials),
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
         return result

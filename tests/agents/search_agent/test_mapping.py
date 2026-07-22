@@ -231,3 +231,105 @@ def test_假引擎出参通过引擎公开契约校验() -> None:
     SearchAgentOutputState.model_validate(
         fake_engine_output(engine_payload_from_task(TASK))
     )
+
+
+# ---------- 杠杆①：查询构造聚合论点 + 假说 ----------
+
+_TASK_WITH_POINTS: dict[str, Any] = dict(
+    TASK,
+    points=[
+        {"id": "p-1", "text": "论点甲的论证方向"},
+        {"id": "p-2", "text": "论点乙的论证方向"},
+    ],
+)
+
+
+def test_任务包聚合论点与假说进查询构造() -> None:
+    paragraph = engine_payload_from_task(_TASK_WITH_POINTS)["paragraph"]
+
+    # 段落文本聚合论点在前、假说在后，供引擎查询构造取用（杠杆①）。
+    assert paragraph["paragraph_text"] == "\n".join(
+        ["论点甲的论证方向", "论点乙的论证方向", "示例假说一", "示例假说二"]
+    )
+    # 论点另经 argument_context.argument_path 给引擎论证层级上下文，品类仍进 boundary。
+    context = paragraph["argument_context"]
+    assert context["boundary"] == "行业白皮书"
+    assert context["argument_path"] == [
+        {"level": 1, "node_id": "p-1", "text": "论点甲的论证方向"},
+        {"level": 1, "node_id": "p-2", "text": "论点乙的论证方向"},
+    ]
+
+
+def test_任务包无论点时段落文本仅假说且无argument_path() -> None:
+    paragraph = engine_payload_from_task(TASK)["paragraph"]
+    assert paragraph["paragraph_text"] == "示例假说一\n示例假说二"
+    assert paragraph["argument_context"] == {"boundary": "行业白皮书"}
+
+
+def test_带论点入参映射产物通过引擎公开契约校验() -> None:
+    from search_agent.evidence_retrieval.public_contracts import SearchAgentInputState
+
+    SearchAgentInputState.model_validate(engine_payload_from_task(_TASK_WITH_POINTS))
+
+
+# ---------- 杠杆②：INCONCLUSIVE（补充引文）降级落库 ----------
+
+
+def test_引擎出参_正向补充引文降级为inconclusive落库() -> None:
+    """正向线支撑引文 → pass；正向线补充引文（SUPPLEMENT/近似命中）→ inconclusive；
+    正向线反例与反向线命中 → fail。IRRELEVANT 噪声在引擎裁决层已丢弃、不入出参。"""
+    output = {
+        "results": [
+            {
+                "item_id": forward_item_id("h-1"),
+                "citation_ids": ["c-pass", "c-weak", "c-refute"],
+                "supporting_citation_ids": ["c-pass"],
+                "supplementary_citation_ids": ["c-weak"],
+            },
+            {
+                "item_id": reverse_item_id("h-1"),
+                "citation_ids": ["c-rev"],
+                "supporting_citation_ids": [],
+                "supplementary_citation_ids": ["c-rev"],
+            },
+        ],
+        "citations": [
+            _citation("c-pass", "WEB", "https://example.com/pass"),
+            _citation("c-weak", "KNOWLEDGE_BASE", None),
+            _citation("c-refute", "WEB", "https://example.com/refute"),
+            _citation("c-rev", "STRUCTURED_DATA", None),
+        ],
+    }
+    by_id = {
+        material["id"]: material
+        for material in search_result_from_engine_output(output, TASK)["materials"]
+    }
+    assert by_id["m-ch-1-h-1-c-pass"]["verdict"] == "pass"
+    assert by_id["m-ch-1-h-1-c-weak"]["verdict"] == "inconclusive"
+    assert by_id["m-ch-1-h-1-c-refute"]["verdict"] == "fail"
+    # 反向线即便被引擎列为补充也一律 fail（对假说的削弱证据不进写作池）。
+    assert by_id["m-ch-1-h-1-c-rev"]["verdict"] == "fail"
+
+
+def test_同假说同引文多线并存时取强者_pass优于inconclusive优于fail() -> None:
+    output = {
+        "results": [
+            {
+                "item_id": reverse_item_id("h-1"),
+                "citation_ids": ["c-1"],
+                "supporting_citation_ids": [],
+                "supplementary_citation_ids": [],
+            },
+            {
+                "item_id": forward_item_id("h-1"),
+                "citation_ids": ["c-1"],
+                "supporting_citation_ids": [],
+                "supplementary_citation_ids": ["c-1"],
+            },
+        ],
+        "citations": [_citation("c-1", "WEB", "https://example.com/1")],
+    }
+    materials = search_result_from_engine_output(output, TASK)["materials"]
+    # 反向线判 fail、正向线判 inconclusive：取强者 inconclusive。
+    assert len(materials) == 1
+    assert materials[0]["verdict"] == "inconclusive"

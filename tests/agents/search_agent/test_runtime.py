@@ -11,10 +11,15 @@ from typing import Any, cast
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 
-from agents.search_agent import EngineRuntime, FakeSearchAgentRuntime
+from agents.search_agent import (
+    EngineRuntime,
+    FakeSearchAgentRuntime,
+    make_search_agent,
+)
 from tests.agents.test_search_agent import SEARCH_TASK
 
 from agents.search_agent.mapping import engine_payload_from_task
+from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS
 
 PARENT_CONFIG: dict[str, Any] = {
     "callbacks": ["宿主回调"],
@@ -165,3 +170,58 @@ def test_运行时假实现_返回诊断并回放进度事件() -> None:
     for event, event_payload in progress_events:
         if event.startswith(("progress.task.", "progress.verdict.")):
             assert "task_id" in event_payload
+
+
+def _run_agent_collecting_events(
+    *, min_pass_per_chapter: int
+) -> list[tuple[str, dict[str, Any]]]:
+    """经真实适配层跑一次假引擎检索，收集全部事件（含结束事件诊断摘要）。"""
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def hook(event_type: str, payload: dict[str, Any]) -> None:
+        events.append((event_type, payload))
+
+    agent = make_search_agent(
+        hook,
+        runtime=FakeSearchAgentRuntime(),
+        min_pass_per_chapter=min_pass_per_chapter,
+    )
+    asyncio.run(agent.run(dict(SEARCH_TASK)))
+    return events
+
+
+def test_pass落库低于下限_发薄弱章警告并计入诊断摘要() -> None:
+    # 假引擎每条假说恰 1 pass：3 假说 = 3 pass < 下限 5，触发薄弱章警告（杠杆①）。
+    events = _run_agent_collecting_events(min_pass_per_chapter=5)
+
+    warnings = [
+        payload
+        for event_type, payload in events
+        if event_type == SUBAGENT_PROGRESS
+        and payload.get("step") == "weak_chapter_warning"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["pass_count"] == 3
+    assert warnings[0]["threshold"] == 5
+
+    end_payload = next(payload for event_type, payload in events if event_type == SUBAGENT_END)
+    assert end_payload["diagnostics"]["pass_below_threshold"] == {
+        "pass_count": 3,
+        "threshold": 5,
+    }
+
+
+def test_pass落库达标_不发警告且诊断摘要无下限项() -> None:
+    # 3 pass >= 下限 2：不发警告；假引擎无补充引文，弱佐证计数亦不入摘要。
+    events = _run_agent_collecting_events(min_pass_per_chapter=2)
+
+    assert not any(
+        payload.get("step") == "weak_chapter_warning"
+        for event_type, payload in events
+        if event_type == SUBAGENT_PROGRESS
+    )
+    # 诊断摘要仍带假引擎 flow_metrics 子集，但不含薄弱章下限项与弱佐证计数。
+    end_payload = next(payload for event_type, payload in events if event_type == SUBAGENT_END)
+    diagnostics = end_payload["diagnostics"]
+    assert "pass_below_threshold" not in diagnostics
+    assert "weak_evidence_count" not in diagnostics

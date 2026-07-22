@@ -179,6 +179,12 @@ def test_单章分支任务包字段与假说扁平列表正确():
     assert [task["chapter_id"] for task in adapter.tasks] == ["ch1", "ch3"]
     for task in adapter.tasks:
         assert task["genre"] == "行业评论"
+    # 论点列表随任务包携带，供查询构造聚合论点+假说（杠杆①）。
+    assert adapter.tasks[0]["points"] == [
+        {"id": "ch1-p1", "text": "论点一"},
+        {"id": "ch1-p2", "text": "论点二"},
+    ]
+    assert adapter.tasks[1]["points"] == [{"id": "ch3-p1", "text": "论点四"}]
     # 假说扁平列表与骨架一致：跨论点按顺序拉平，字段完整。
     assert adapter.tasks[0]["hypotheses"] == [
         {
@@ -251,7 +257,7 @@ def test_existing_materials_digest只反映既有引文库():
 
     # 语义降档：digest 是扇出前既有引文库的快照，不再逐章反映轮内增长。
     assert [task["existing_materials_digest"] for task in adapter.tasks] == [
-        "引文库共 1 条素材。\n章节 ch1：通过 1 条，未通过 0 条"
+        "引文库共 1 条素材。\n章节 ch1：通过 1 条，弱佐证 0 条，未通过 0 条"
     ]
 
 
