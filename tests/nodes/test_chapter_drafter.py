@@ -32,6 +32,7 @@ _CONFIG = AssemblerConfig(
     summary_digest_max_chars=60,
     ledger_keep_rounds=2,
     ledger_digest_max_chars=60,
+    document_text_max_chars=30000,
 )
 
 
@@ -113,7 +114,7 @@ def test_路由_未写章节扇出Send_全部已写直进终审():
         ChapterDraft(chapter_id="ch1", text="a", summary="s"),
         ChapterDraft(chapter_id="ch2", text="b", summary="s"),
     ]
-    assert route_after_reference_join(state) == "citation_validator"
+    assert route_after_reference_join(state) == "document_reviewer"
 
 
 def test_节点单分支_任务包承接规划摘要链且只回写reducer字段():

@@ -40,14 +40,24 @@ FRAMEWORK_LLM_CALLS = len(FRAMEWORK_RESPONSES) + sum(
 # 语义核查全部对应（无问题）的应答：每个受审章节一条。
 SEMANTIC_PASS = "[]"
 
-# 首轮全量核查通过所需的完整顺序应答序列（2 章各一条语义核查）；
+# 篇级评审「无任何发现」的放行应答：document_reviewer 每次运行在全部
+# 语义核查之后恰好多消费一条（一次全篇四维评审调用）。
+DOCUMENT_REVIEW_PASS = "[]"
+
+# 首轮全量终审通过所需的完整顺序应答序列（2 章各一条语义核查 + 一条篇级评审）；
 # 配套的假说应答固定取 FRAMEWORK_KEYED_RESPONSES。
-FIRST_PASS_RESPONSES = [*FRAMEWORK_RESPONSES, SEMANTIC_PASS, SEMANTIC_PASS]
+FIRST_PASS_RESPONSES = [
+    *FRAMEWORK_RESPONSES,
+    SEMANTIC_PASS,
+    SEMANTIC_PASS,
+    DOCUMENT_REVIEW_PASS,
+]
 
-# 首轮全量核查通过的 LLM 调用总数（含键控假说调用）。
-FIRST_PASS_LLM_CALLS = FRAMEWORK_LLM_CALLS + 2
+# 首轮全量终审通过的 LLM 调用总数（含键控假说调用）。
+FIRST_PASS_LLM_CALLS = FRAMEWORK_LLM_CALLS + 3
 
-# 一轮 revise 的意见解析应答：ch2 纯改写；随后增量核查只重审 ch2 一条。
+# 一轮 revise 的意见解析应答：ch2 纯改写；随后增量核查只重审 ch2 一条，
+# 篇级评审始终全量再一条。
 DIRECTIVE_RESPONSE = json.dumps(
     [
         {
@@ -58,7 +68,7 @@ DIRECTIVE_RESPONSE = json.dumps(
     ],
     ensure_ascii=False,
 )
-REVISE_ROUND_RESPONSES = [DIRECTIVE_RESPONSE, SEMANTIC_PASS]
+REVISE_ROUND_RESPONSES = [DIRECTIVE_RESPONSE, SEMANTIC_PASS, DOCUMENT_REVIEW_PASS]
 
 # 一次意见混合两类分支且落在不同章节：ch1 纯改写、ch2 补充佐证。
 MIXED_DIRECTIVE_RESPONSE = json.dumps(
@@ -77,12 +87,14 @@ MIXED_DIRECTIVE_RESPONSE = json.dumps(
     ensure_ascii=False,
 )
 
-# 端到端主干完整编排：首轮全量核查 + 混合意见解析 + 增量核查重审两章各一条。
+# 端到端主干完整编排：首轮全量终审 + 混合意见解析 + 增量核查重审两章各一条
+# + 修订轮的篇级评审一条。
 TRUNK_RESPONSES = [
     *FIRST_PASS_RESPONSES,
     MIXED_DIRECTIVE_RESPONSE,
     SEMANTIC_PASS,
     SEMANTIC_PASS,
+    DOCUMENT_REVIEW_PASS,
 ]
 
 

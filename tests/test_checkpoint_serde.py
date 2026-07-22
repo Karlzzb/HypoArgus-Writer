@@ -73,9 +73,22 @@ def _sample_objects() -> list[object]:
                     chapter_id="ch1",
                     material_id="m1",
                     detail="明细",
-                )
+                ),
+                # issue #48 新增的篇级终审问题类型同样可往返。
+                CitationIssue(
+                    kind="fact_conflict",
+                    chapter_id="ch1",
+                    material_id="",
+                    detail="跨章硬事实冲突明细",
+                ),
+                CitationIssue(
+                    kind="chapter_missing",
+                    chapter_id="ch2",
+                    material_id="",
+                    detail="大纲章节缺少成稿。",
+                ),
             ],
-            failed_chapter_ids=["ch1"],
+            failed_chapter_ids=["ch1", "ch2"],
         ),
         WorkflowStatus.ARTICLE_WRITING,
     ]
@@ -111,6 +124,19 @@ def test_注册后的往返不再触发未注册类型告警(caplog) -> None:
         for obj in _sample_objects():
             assert serde.loads_typed(serde.dumps_typed(obj)) == obj
     assert "Deserializing unregistered type" not in caplog.text
+
+
+def test_旧检查点缺review_warnings键_读取回落空列表() -> None:
+    """issue #48 前留存的检查点状态没有 review_warnings 键。
+
+    该字段的全部读取方（human_review_gate 载荷等）都经 state.get 带缺省值，
+    旧检查点恢复后不炸且回落空列表。
+    """
+    serde = checkpoint_serializer()
+    legacy_state = {"status": WorkflowStatus.AWAIT_USER_REVIEW, "citation_warnings": []}
+    restored = serde.loads_typed(serde.dumps_typed(legacy_state))
+    assert "review_warnings" not in restored
+    assert restored.get("review_warnings", []) == []
 
 
 def test_严格模式下注册类型往返成立() -> None:

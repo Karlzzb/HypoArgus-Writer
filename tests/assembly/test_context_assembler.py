@@ -2,8 +2,8 @@
 
 覆盖：配置读取与回落、未知单元报错、提取器纯函数性质、
 摘要链压缩三档策略、修订台账保留策略与多轮不失忆、
-引文库摘要分章计数、章节草稿被引素材提取、提取器跨配方复用、
-7 个运行单元全部可装配。
+引文库摘要分章计数、章节草稿被引素材提取、篇级全文段拼接与压缩、
+提取器跨配方复用、全部运行单元可装配。
 """
 
 import copy
@@ -19,6 +19,7 @@ from assembly.context_assembler import (
     extract_chapter_draft,
     extract_chapter_materials,
     extract_citation_digest,
+    extract_document_review,
     extract_planned_summary_chain,
     extract_summary_chain,
 )
@@ -37,6 +38,7 @@ _DEFAULT_CONFIG = AssemblerConfig(
     summary_digest_max_chars=60,
     ledger_keep_rounds=2,
     ledger_digest_max_chars=60,
+    document_text_max_chars=30000,
 )
 
 
@@ -109,6 +111,7 @@ def test_配置独立覆盖单个变量其余取缺省():
         "ASSEMBLER_SUMMARY_DIGEST_MAX_CHARS",
         "ASSEMBLER_LEDGER_KEEP_ROUNDS",
         "ASSEMBLER_LEDGER_DIGEST_MAX_CHARS",
+        "ASSEMBLER_DOCUMENT_TEXT_MAX_CHARS",
     ],
 )
 def test_配置非法值抛错并指明变量名(name: str):
@@ -194,6 +197,7 @@ def test_摘要链超阈值_最后一章保留原文_更早章截为首句摘要
         summary_digest_max_chars=10,
         ledger_keep_rounds=2,
         ledger_digest_max_chars=60,
+        document_text_max_chars=30000,
     )
     state = _chain_state(["早章首句。这些尾巴内容不该出现。", "末章摘要原文完整保留。"])
     segments = extract_summary_chain(state, {}, config)
@@ -209,6 +213,7 @@ def test_摘要链首句超长截断加省略号():
         summary_digest_max_chars=5,
         ledger_keep_rounds=2,
         ledger_digest_max_chars=60,
+        document_text_max_chars=30000,
     )
     state = _chain_state(["这是一个没有断句标点的超长摘要文本", "末章摘要。"])
     segments = extract_summary_chain(state, {}, config)
@@ -222,6 +227,7 @@ def test_摘要链极端超长_最早章被丢弃且有省略标注():
         summary_digest_max_chars=30,
         ledger_keep_rounds=2,
         ledger_digest_max_chars=60,
+        document_text_max_chars=30000,
     )
     state = _chain_state(
         ["第一章很长的摘要句子甲。", "第二章很长的摘要句子乙。", "第三章末尾摘要保留原文。"]
@@ -287,6 +293,7 @@ def test_规划摘要链_超阈值时按摘要链同款策略压缩():
         summary_digest_max_chars=6,
         ledger_keep_rounds=2,
         ledger_digest_max_chars=60,
+        document_text_max_chars=30000,
     )
     state = WritingAgentState(
         outline=[
@@ -411,6 +418,82 @@ def test_章节草稿_缺chapter_id或草稿不存在返回空段列表():
     assert extract_chapter_draft(state, {"chapter_id": "ch9"}, _DEFAULT_CONFIG) == []
 
 
+# ---------- 篇级全文段 ----------
+
+
+def _document_state(bodies: list[str]) -> WritingAgentState:
+    """按章正文列表构造大纲与草稿一一对应的状态。"""
+    return WritingAgentState(
+        outline=[
+            ChapterSpec(id=f"ch{i}", title=f"第{i}章")
+            for i in range(1, len(bodies) + 1)
+        ],
+        chapter_drafts=[
+            ChapterDraft(chapter_id=f"ch{i}", text=body, summary="摘要。")
+            for i, body in enumerate(bodies, start=1)
+        ],
+    )
+
+
+def test_篇级全文段_按大纲顺序拼接且各章带标题():
+    state = _document_state(["第一章正文。", "第二章正文。"])
+    # 草稿存储顺序打乱也按大纲顺序拼接。
+    state["chapter_drafts"] = list(reversed(state["chapter_drafts"]))
+    (segment,) = extract_document_review(state, {}, _DEFAULT_CONFIG)
+    assert segment.name == "document_text"
+    assert segment.text == (
+        "## ch1 第1章\n第一章正文。\n## ch2 第2章\n第二章正文。"
+    )
+
+
+def test_篇级全文段_超阈值时尾章保原文更早章截为首句摘要():
+    config = AssemblerConfig(
+        summary_chain_max_chars=800,
+        summary_digest_max_chars=10,
+        ledger_keep_rounds=2,
+        ledger_digest_max_chars=60,
+        document_text_max_chars=40,
+    )
+    state = _document_state(["早章首句。这些尾巴内容不该出现。", "末章正文完整保留。"])
+    (segment,) = extract_document_review(state, {}, config)
+    assert "早章首句。" in segment.text
+    assert "尾巴内容" not in segment.text
+    assert "末章正文完整保留。" in segment.text
+
+
+def test_篇级全文段_极端超长_最早章被丢弃且有省略标注():
+    config = AssemblerConfig(
+        summary_chain_max_chars=800,
+        summary_digest_max_chars=30,
+        ledger_keep_rounds=2,
+        ledger_digest_max_chars=60,
+        document_text_max_chars=20,
+    )
+    state = _document_state(["第一章句甲。", "第二章句乙。", "第三章末尾正文保留原文。"])
+    (segment,) = extract_document_review(state, {}, config)
+    assert "（更早 " in segment.text and "章内容已省略）" in segment.text
+    assert "第一章句甲" not in segment.text
+    assert "第三章末尾正文保留原文。" in segment.text
+
+
+def test_篇级全文段_带chapter_id时不出段():
+    # 按调用形态分工：带 chapter_id 的单章调用不做无人消费的全篇拼接。
+    state = _make_state()
+    assert extract_document_review(state, {"chapter_id": "ch1"}, _DEFAULT_CONFIG) == []
+    context = assemble(
+        state, "document_reviewer", config=_DEFAULT_CONFIG, chapter_id="ch1"
+    )
+    assert "document_text" not in context.segments
+    assert context.text("chapter_text") == "第一章正文 [m-1]"
+
+
+def test_篇级全文段_无任何草稿时不出段():
+    state = _document_state([])
+    assert extract_document_review(state, {}, _DEFAULT_CONFIG) == []
+    context = assemble(state, "document_reviewer", config=_DEFAULT_CONFIG)
+    assert "document_text" not in context.segments
+
+
 # ---------- 章节清单 ----------
 
 
@@ -459,6 +542,7 @@ def test_配方预算覆盖生效_写作单元摘要链阈值放宽():
         summary_digest_max_chars=60,
         ledger_keep_rounds=2,
         ledger_digest_max_chars=60,
+        document_text_max_chars=30000,
     )
     state = _chain_state(["第一章摘要。补充说明。", "第二章摘要。"])
     direct = {s.name: s.text for s in extract_summary_chain(state, {}, config)}
@@ -476,6 +560,7 @@ def test_配方预算未覆盖字段回落全局配置():
         summary_digest_max_chars=5,
         ledger_keep_rounds=2,
         ledger_digest_max_chars=60,
+        document_text_max_chars=30000,
     )
     state = _chain_state(["长" * 1300, "末章摘要。"])
     context = assemble(state, "writing_orchestrator", config=config)

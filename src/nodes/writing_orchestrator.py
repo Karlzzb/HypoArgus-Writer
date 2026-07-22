@@ -90,7 +90,7 @@ def next_writing_step(state: WritingAgentState) -> WritingStep | None:
             if chapter.id in grouped:
                 return ("revise", chapter.id)
     report = state.get("citation_report")
-    # 终审回退只在重试预算内的失败报告上触发：citation_validator 写失败报告时
+    # 终审回退只在重试预算内的失败报告上触发：document_reviewer 写失败报告时
     # 必然把 citation_retry_count 递增到至少 1，而 human_review_gate 开新一轮
     # 修订时会把它重置为 0——由此保证超限后残留的旧失败报告不会在修订轮
     # 结束后触发计划外的回退重写（绕过重试上限判定）。
@@ -186,7 +186,7 @@ def _grouped_directives(
 def _report_revision_note(
     report: CitationReport, chapter_id: str
 ) -> RevisionNotePayload:
-    """把终审报告中该章各 issue 组装成分区式修订说明，驱动定向改写（ADR-0007）。
+    """把篇级终审报告中该章各 issue 组装成分区式修订说明，驱动定向改写（ADR-0007）。
 
     终审报告即评审结论，无需再过 chapter_reviewer：每条 issue 折成一条 error 级
     规则违规（kind 作规则名、detail 作修改指导），无用户指令、无冲突提示；有
@@ -194,7 +194,7 @@ def _report_revision_note(
     """
     violations = [
         RuleViolationEntry(
-            rule=f"citation.{issue.kind}",
+            rule=f"document_review.{issue.kind}",
             location_excerpt="",
             guidance=issue.detail,
             severity="error",

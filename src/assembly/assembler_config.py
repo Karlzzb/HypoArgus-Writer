@@ -31,6 +31,8 @@ class AssemblerConfig:
     """修订台账保留原文的最近轮数 K。"""
     ledger_digest_max_chars: int
     """更早轮次一句话摘要的字符数。"""
+    document_text_max_chars: int
+    """篇级终审全文段字符阈值：全篇拼接超过才触发按章压缩。"""
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ _CONFIG_DEFAULTS: tuple[tuple[str, int], ...] = (
     ("ASSEMBLER_SUMMARY_DIGEST_MAX_CHARS", 60),
     ("ASSEMBLER_LEDGER_KEEP_ROUNDS", 2),
     ("ASSEMBLER_LEDGER_DIGEST_MAX_CHARS", 60),
+    ("ASSEMBLER_DOCUMENT_TEXT_MAX_CHARS", 30000),
 )
 
 
@@ -71,4 +74,5 @@ def load_assembler_config(env: Mapping[str, str] | None = None) -> AssemblerConf
         summary_digest_max_chars=values["ASSEMBLER_SUMMARY_DIGEST_MAX_CHARS"],
         ledger_keep_rounds=values["ASSEMBLER_LEDGER_KEEP_ROUNDS"],
         ledger_digest_max_chars=values["ASSEMBLER_LEDGER_DIGEST_MAX_CHARS"],
+        document_text_max_chars=values["ASSEMBLER_DOCUMENT_TEXT_MAX_CHARS"],
     )

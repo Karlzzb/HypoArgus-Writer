@@ -20,10 +20,18 @@
 ## 运行单元
 
 - **运行单元（Runtime Unit）** — 可独立配置 LLM 参数（model / base_url / api_key）的最小执行体。
-  共 8 个：6 个 LangGraph 主节点（framework_orchestrator、reference_orchestrator、chapter_drafter、writing_orchestrator、citation_validator、human_review_gate）+ 2 个业务子智能体（search_agent、rewriter_loop）。
+  共 9 个：6 个 LangGraph 主节点（framework_orchestrator、reference_orchestrator、chapter_drafter、writing_orchestrator、document_reviewer、human_review_gate）+ 3 个业务子智能体（search_agent、rewriter_loop、chapter_reviewer）。
   未单独配置的单元回落到全局缺省 LLM 配置。
 - **并行首写（Parallel Drafting）** — 首写阶段由 chapter_drafter 节点经 Send 扇出承担：每个未写章节一个并行分支，各分支承接前章规划摘要链、只回写单章草稿。
   修订与终审回退仍由 writing_orchestrator 串行自环处理。
+
+## 评审
+
+- **篇级终审（document_reviewer）** — 全篇成稿后的终审门禁主节点（改名与扩维决策见 ADR-0008）。
+  在引用四步（对账、结构完整性、单章自检合并、引文语义核查）之上做一次全篇 LLM 评审：跨章硬事实冲突为 error 打回，章间衔接 / 口径统一 / 跨章重复为 warn 呈人工不打回。
+  error/warn 裁决权在代码不在模型；打回以修订说明结构驱动改写，重试超限交人工。
+- **两级评审视野切分（Two-level Review Scope Split）** — 章级评审（chapter_reviewer）只裁单章内部质量（派生未标、论证质量、章内连贯、摘要链一致），篇级终审只收「必须看全篇才能裁」的维度，两级互补不重叠。
+- **评审警告（Review Warnings）** — 篇级终审 warn 级提示的 state 字段（review_warnings），每轮随人工中断点载荷呈现，不触发打回，防止语义模糊判定引发多章重写雪崩。
 
 ## 文种
 

@@ -250,7 +250,7 @@ def create_app(
     search_agent: Subagent | SubagentFactory | None = None,
     rewriter_loop: Subagent | SubagentFactory | None = None,
     chapter_reviewer: Subagent | SubagentFactory | None = None,
-    citation_max_retries: int | None = None,
+    document_review_max_retries: int | None = None,
     assembler_config: AssemblerConfig | None = None,
 ) -> FastAPI:
     """构建 FastAPI 应用：全部依赖在 lifespan 里装配。
@@ -291,7 +291,7 @@ def create_app(
                     lambda hook: make_chapter_reviewer(llm_factory, hook),
                     hook_dispatcher,
                 ),
-                citation_max_retries=citation_max_retries,
+                document_review_max_retries=document_review_max_retries,
                 assembler_config=assembler_config,
             )
             graph_hub = EventHub(loop)

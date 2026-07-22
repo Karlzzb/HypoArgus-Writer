@@ -152,11 +152,11 @@ def test_合成流块_终审失败触发branch_taken回退与loop_iteration():
     events: list[EventEnvelope] = []
     emitter = _make_emitter(events)
     emitter.emit_root(type="progress", unit="graph", payload={})
-    emitter.handle("debug", _task_chunk("citation_validator", 4))
+    emitter.handle("debug", _task_chunk("document_reviewer", 4))
     emitter.handle(
         "updates",
         {
-            "citation_validator": {
+            "document_reviewer": {
                 "status": WorkflowStatus.CITATION_CHECKING,
                 "citation_retry_count": 1,
             }
@@ -165,23 +165,23 @@ def test_合成流块_终审失败触发branch_taken回退与loop_iteration():
 
     branch = next(event for event in events if event.type == "branch_taken")
     assert branch.payload == {
-        "from": "citation_validator",
+        "from": "document_reviewer",
         "to": "writing_orchestrator",
-        "reason": "引文终审失败，定向回退重写",
+        "reason": "篇级终审失败，定向回退重写",
     }
     loop = next(event for event in events if event.type == "loop_iteration")
     assert loop.payload == {"loop": "citation_retry", "round": 1}
-    assert branch.unit == loop.unit == "citation_validator"
+    assert branch.unit == loop.unit == "document_reviewer"
 
 
 def test_合成流块_终审通过branch_taken去人工中断点且无loop_iteration():
     events: list[EventEnvelope] = []
     emitter = _make_emitter(events)
     emitter.emit_root(type="progress", unit="graph", payload={})
-    emitter.handle("debug", _task_chunk("citation_validator", 4))
+    emitter.handle("debug", _task_chunk("document_reviewer", 4))
     emitter.handle(
         "updates",
-        {"citation_validator": {"status": WorkflowStatus.AWAIT_USER_REVIEW}},
+        {"document_reviewer": {"status": WorkflowStatus.AWAIT_USER_REVIEW}},
     )
 
     branch = next(event for event in events if event.type == "branch_taken")
@@ -491,7 +491,7 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
         "framework_orchestrator",
         "reference_orchestrator",
         "chapter_drafter",
-        "citation_validator",
+        "document_reviewer",
         "human_review_gate",
     }
     # 2 章并行扇出：检索与首写两段各恰好两个任务。
@@ -506,7 +506,7 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
             assert event.parent_id in node_start_ids[event.unit]
 
     branch = next(event for event in events if event.type == "branch_taken")
-    assert branch.unit == "citation_validator"
+    assert branch.unit == "document_reviewer"
     assert branch.payload["to"] == "human_review_gate"
 
 

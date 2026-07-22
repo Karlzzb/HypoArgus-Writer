@@ -1,7 +1,7 @@
 """human_review_gate 主节点：人工中断点与用户意见解析器。
 
 用 LangGraph interrupt 实现真实中断：中断载荷只含元数据（迭代轮次、章节 id
-列表与未决引文警告），不携带正文全文。恢复值契约为 dict：
+列表、未决引文警告与篇级评审 warn 提示），不携带正文全文。恢复值契约为 dict：
 {"action": "finalize"} 定稿；{"action": "revise", "feedback": "自然语言意见"}
 经 LLM 一次调用解析为修订指令列表，程序侧过滤非法条目并追加修订台账。
 
@@ -136,6 +136,7 @@ def make_human_review_gate_node(
                 "iteration_round": state.get("iteration_round", 0),
                 "chapter_ids": [chapter.id for chapter in outline],
                 "citation_warnings": state.get("citation_warnings", []),
+                "review_warnings": state.get("review_warnings", []),
             }
             if error is not None:
                 payload["error"] = error
@@ -148,6 +149,7 @@ def make_human_review_gate_node(
                         status=WorkflowStatus.FINISHED,
                         pending_directives=[],
                         citation_warnings=[],
+                        review_warnings=[],
                         current_node_llm_config={"unit": "human_review_gate"},
                     )
                 llm = llm_factory("human_review_gate")
@@ -191,6 +193,7 @@ def make_human_review_gate_node(
             revision_ledger=ledger,
             iteration_round=round_no,
             citation_warnings=[],
+            review_warnings=[],
             # 新一轮修订获得全新的终审重试预算。
             citation_retry_count=0,
             status=WorkflowStatus.AWAIT_USER_REVIEW,

@@ -99,41 +99,52 @@ def extract_user_intent(
     ]
 
 
+def _compressed_chain(
+    entries: list[tuple[str, str]],
+    render: Callable[[str, str], str],
+    max_chars: int,
+    digest_max_chars: int,
+    drop_note: Callable[[int], str],
+) -> str:
+    """（标题, 正文）序列 → 单块文本，超阈值时做「保尾压首、再丢最早」压缩。
+
+    压缩策略：总字符数超 max_chars 时，除最后一项保留原文外，更早各项截为首句
+    摘要（digest_max_chars 限长）；仍超阈值则从最早项起丢弃并在段首标注省略数量。
+    render(title, body) 定义单项行格式，drop_note(n) 定义省略提示，供摘要链与
+    篇级全文段共用同一压缩骨架、只换外壳。
+    """
+    lines = [render(title, body) for title, body in entries]
+    text = "\n".join(lines)
+    if len(text) > max_chars and lines:
+        compressed = [
+            render(title, _first_sentence_digest(body, digest_max_chars))
+            for title, body in entries[:-1]
+        ]
+        compressed.append(lines[-1])
+        dropped = 0
+        while len("\n".join(compressed)) > max_chars and len(compressed) > 1:
+            compressed.pop(0)
+            dropped += 1
+        if dropped:
+            compressed.insert(0, drop_note(dropped))
+        text = "\n".join(compressed)
+    return text
+
+
 def _compressed_chain_text(
     entries: list[tuple[str, str]], config: AssemblerConfig
 ) -> str:
     """（标题, 摘要）序列 → 摘要链文本，超阈值时做「摘要的摘要」压缩。
 
-    压缩策略：总字符数超 summary_chain_max_chars 时，除最后一章保留原文外，
-    更早各章截为首句摘要；仍超阈值则从最早章节起丢弃并在段首标注省略数量。
     实际摘要链与规划摘要链共用此行格式与压缩策略。
     """
-
-    def _line(title: str, summary: str) -> str:
-        return f"【{title}】{summary}"
-
-    lines = [_line(title, summary) for title, summary in entries]
-    text = "\n".join(lines)
-    if len(text) > config.summary_chain_max_chars and lines:
-        compressed = [
-            _line(
-                title,
-                _first_sentence_digest(summary, config.summary_digest_max_chars),
-            )
-            for title, summary in entries[:-1]
-        ]
-        compressed.append(lines[-1])
-        dropped = 0
-        while (
-            len("\n".join(compressed)) > config.summary_chain_max_chars
-            and len(compressed) > 1
-        ):
-            compressed.pop(0)
-            dropped += 1
-        if dropped:
-            compressed.insert(0, f"（更早 {dropped} 章摘要已省略）")
-        text = "\n".join(compressed)
-    return text
+    return _compressed_chain(
+        entries,
+        render=lambda title, summary: f"【{title}】{summary}",
+        max_chars=config.summary_chain_max_chars,
+        digest_max_chars=config.summary_digest_max_chars,
+        drop_note=lambda dropped: f"（更早 {dropped} 章摘要已省略）",
+    )
 
 
 def extract_summary_chain(
@@ -312,6 +323,45 @@ def extract_chapter_draft(
     ]
 
 
+def extract_document_review(
+    state: WritingAgentState,
+    params: Mapping[str, object],
+    config: AssemblerConfig,
+) -> list[Segment]:
+    """提取篇级终审全文段：全部章节按大纲顺序拼为「## <chapter_id> <title>\n<正文>」。
+
+    篇级评审的视野是整篇，只在不带 chapter_id 时出段；超 document_text_max_chars
+    时复用摘要链压缩骨架（保尾章原文、更早章首句摘要、仍超则丢最早并标注省略数），
+    保证单次 LLM 调用输入不越预算。全篇无草稿时返回空段列表。
+    """
+    # 按调用形态分工：带 chapter_id 走单章段、不带走全篇段，免做无人消费的全篇拼接。
+    if params.get("chapter_id") is not None:
+        return []
+    drafts = list(state.get("chapter_drafts", []))
+    if not drafts:
+        return []
+    titles = {chapter.id: chapter.title for chapter in state.get("outline", [])}
+    order = {chapter.id: index for index, chapter in enumerate(state.get("outline", []))}
+    ordered = sorted(
+        drafts, key=lambda draft: order.get(draft.chapter_id, len(order))
+    )
+    entries = [
+        (
+            f"{draft.chapter_id} {titles.get(draft.chapter_id, '')}".strip(),
+            draft.text,
+        )
+        for draft in ordered
+    ]
+    document_text = _compressed_chain(
+        entries,
+        render=lambda heading, body: f"## {heading}\n{body}",
+        max_chars=config.document_text_max_chars,
+        digest_max_chars=config.summary_digest_max_chars,
+        drop_note=lambda dropped: f"（更早 {dropped} 章内容已省略）",
+    )
+    return [Segment("document_text", document_text)]
+
+
 def extract_user_feedback(
     state: WritingAgentState,
     params: Mapping[str, object],
@@ -331,7 +381,10 @@ _WRITING_BUDGET = BudgetOverride(summary_chain_max_chars=1200)
 # 按运行单元注册的装配配方；键覆盖 llm_config.RUNTIME_UNITS 全部 9 个单元。
 # 写作各配方只留 RewriteTask 实际消费的段（摘要链与章节素材）；
 # chapter_drafter（并行首写）用规划摘要链替代实际摘要链，其余与写作配方一致；
-# chapter_reviewer（章级评审）消费同一批段（素材 + 摘要链 + 章文本）。
+# chapter_reviewer（章级评审）消费同一批段（素材 + 摘要链 + 章文本）；
+# document_reviewer（篇级终审）逐章配 extract_chapter_draft（引用四步用），
+# 再配 extract_document_review（全篇拼接段，篇级维度用），一份配方服务
+# 两种调用形态：带 chapter_id 时只有前者出段，不带时只有后者出全篇段。
 RECIPES: dict[str, Recipe] = {
     "framework_orchestrator": Recipe(extractors=(extract_user_intent,)),
     "reference_orchestrator": Recipe(
@@ -354,7 +407,9 @@ RECIPES: dict[str, Recipe] = {
         extractors=(extract_summary_chain, extract_chapter_materials),
         budget=_WRITING_BUDGET,
     ),
-    "citation_validator": Recipe(extractors=(extract_chapter_draft,)),
+    "document_reviewer": Recipe(
+        extractors=(extract_chapter_draft, extract_document_review)
+    ),
     "human_review_gate": Recipe(
         extractors=(extract_chapter_list, extract_revision_ledger, extract_user_feedback)
     ),

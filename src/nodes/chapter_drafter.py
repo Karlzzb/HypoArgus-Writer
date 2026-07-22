@@ -4,7 +4,7 @@
 本节点每个并行分支只写一章：Send 载荷携带目标章 id 与装配所需的状态切片，
 产物经 chapter_drafts 的合并 reducer 汇入主状态并按超步落 checkpoint
 （ADR-0001 约束 1：崩溃重跑只损失进行中的分支），
-全部分支完成后汇合进入 citation_validator。
+全部分支完成后汇合进入 document_reviewer。
 
 前文承接用框架生成的规划摘要链（extract_planned_summary_chain 段，
 各章用其之前各章的规划摘要衔接），不依赖前章实际写成的摘要，

@@ -488,7 +488,7 @@ def _build_app(real: bool):
 
     if real:
         # rewriter_loop 已是真实现，终审失败的定向回退重写有实际效果，
-        # 重试次数走缺省配置（环境变量 CITATION_MAX_RETRIES，缺省 2）。
+        # 重试次数走缺省配置（环境变量 DOCUMENT_REVIEW_MAX_RETRIES，缺省 2）。
         return create_app()
 
     from langgraph.checkpoint.memory import InMemorySaver

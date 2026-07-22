@@ -9,7 +9,7 @@ MAIN_NODES: tuple[str, ...] = (
     "reference_orchestrator",
     "chapter_drafter",
     "writing_orchestrator",
-    "citation_validator",
+    "document_reviewer",
     "human_review_gate",
 )
 """6 个 LangGraph 主节点，顺序即主路径接线顺序。

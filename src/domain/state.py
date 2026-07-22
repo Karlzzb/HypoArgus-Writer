@@ -140,7 +140,10 @@ class RevisionRound(BaseModel):
 
 
 class CitationIssue(BaseModel):
-    """引文对账发现的单条问题。"""
+    """篇级终审 document_reviewer 发现的单条 error 级问题。
+
+    模型名与字段名保留 Citation 前缀是检查点与契约稳定考虑（旧 checkpoint 兼容），
+    实际承载篇级终审全部 error 级问题（引用四步 + 结构完整性 + 跨章硬事实冲突）。"""
 
     kind: Literal[
         "orphan_marker",
@@ -149,18 +152,22 @@ class CitationIssue(BaseModel):
         "semantic_mismatch",
         "self_check_failed",
         "numbering_broken",
+        "fact_conflict",
+        "chapter_missing",
     ]
     """orphan_marker 无来源的标注；unused_material 未被引用的素材；
     cross_chapter 跨章误引；semantic_mismatch 语义核查不通过；
     self_check_failed 单章自检（双层校验第一层）不通过；
-    numbering_broken 跨章编号重复、断号或与大纲不一致。"""
+    numbering_broken 跨章编号重复、断号或与大纲不一致；
+    fact_conflict 跨章硬事实冲突（篇级评审判定，严重级由代码固定为 error）；
+    chapter_missing 大纲章节缺少成稿（结构完整性确定性判定）。"""
     chapter_id: str
     material_id: str
     detail: str
 
 
 class CitationReport(BaseModel):
-    """citation_validator 全局终审结论。"""
+    """篇级终审 document_reviewer 的全篇终审结论（模型名保留 Citation 前缀兼容旧 checkpoint）。"""
 
     passed: bool
     issues: list[CitationIssue] = []
@@ -257,13 +264,16 @@ class WritingAgentState(TypedDict, total=False):
     pending_directives: list[RevisionDirective]
     """本轮待执行的修订指令；writing_orchestrator 执行完毕后清空。"""
     revised_chapter_ids: list[str]
-    """本轮被修改章节；citation_validator 据此做增量核查，核查完毕后清空。"""
+    """本轮被修改章节；document_reviewer 据此做增量核查，核查完毕后清空。"""
     citation_report: CitationReport | None
     """最近一次终审结论。"""
     citation_retry_count: int
     """终审失败定向回退的已重试次数；超限强制进入人工中断点。"""
     citation_warnings: list[str]
     """重试超限携带的未决引文警告，交人工裁决。"""
+    review_warnings: list[str]
+    """篇级评审的 warn 级提示（章间衔接/口径统一/跨章重复），每次终审都写入，
+    不打回、不影响重试，随人工中断点呈现给人工，供其自行裁量。"""
     status: Annotated[WorkflowStatus, keep_last]
     iteration_round: int
     execution_trace_id: str
@@ -291,6 +301,7 @@ def initial_state(
         citation_report=None,
         citation_retry_count=0,
         citation_warnings=[],
+        review_warnings=[],
         status=WorkflowStatus.IDLE,
         iteration_round=0,
         execution_trace_id=execution_trace_id,

@@ -46,10 +46,10 @@ def test_空字符串视为未配置():
 
 def test_全局也缺失时报错并指明变量名():
     env = {"LLM_MODEL": "m", "LLM_BASE_URL": "https://x/v1"}
-    with pytest.raises(ValueError, match="CITATION_VALIDATOR_LLM_API_KEY"):
-        load_llm_config("citation_validator", env)
+    with pytest.raises(ValueError, match="DOCUMENT_REVIEWER_LLM_API_KEY"):
+        load_llm_config("document_reviewer", env)
     with pytest.raises(ValueError, match="LLM_API_KEY"):
-        load_llm_config("citation_validator", env)
+        load_llm_config("document_reviewer", env)
 
 
 def test_base_url剥掉多余的路径后缀():

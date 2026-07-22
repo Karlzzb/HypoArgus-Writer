@@ -36,10 +36,10 @@ from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START, Event
 
 # 条件路由节点 → 按状态机值判定的路由去向与理由。
 _BRANCH_RULES: dict[str, dict[WorkflowStatus, tuple[str, str]]] = {
-    "citation_validator": {
+    "document_reviewer": {
         WorkflowStatus.CITATION_CHECKING: (
             "writing_orchestrator",
-            "引文终审失败，定向回退重写",
+            "篇级终审失败，定向回退重写",
         ),
     },
     "human_review_gate": {
@@ -499,9 +499,9 @@ class GraphRunEmitter:
     ) -> None:
         """条件路由节点：按状态机值发布 branch_taken 与 loop_iteration。"""
         rule = _BRANCH_RULES[node].get(status)
-        if rule is None and node == "citation_validator":
+        if rule is None and node == "document_reviewer":
             # 终审通过或重试超限：主路径进入人工中断点。
-            rule = ("human_review_gate", "终审通过或重试超限，进入人工中断点")
+            rule = ("human_review_gate", "篇级终审通过或重试超限，进入人工中断点")
         if rule is not None:
             to, reason = rule
             self._emit(
@@ -511,7 +511,7 @@ class GraphRunEmitter:
                 parent_id=parent_id,
             )
 
-        if node == "citation_validator" and status is WorkflowStatus.CITATION_CHECKING:
+        if node == "document_reviewer" and status is WorkflowStatus.CITATION_CHECKING:
             self._emit(
                 type="loop_iteration",
                 unit=node,

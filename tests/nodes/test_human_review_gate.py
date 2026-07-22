@@ -259,6 +259,7 @@ def test_滑出保留窗口的早期轮次digest已持久化到State() -> None:
         summary_digest_max_chars=60,
         ledger_keep_rounds=2,
         ledger_digest_max_chars=60,
+        document_text_max_chars=30000,
     )
     fake = FakeLLM(
         [

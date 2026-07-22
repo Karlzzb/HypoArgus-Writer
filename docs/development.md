@@ -18,7 +18,7 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 | `src/assembly/` | 上下文装配：`assemble(state, unit)` 统一入口与压缩阈值配置 |
 | `src/agents/` | 子智能体：任务包契约（`contracts.py`）、跨子智能体共享的线程信号量限流（`concurrency.py`）、`rewriter_loop/` 真实实现子包（编排、写作 LLM 注入点、真实适配器、风格校验器、随包风格指南；打桩同包共存、可显式注入）、`search_agent/` 真实检索适配层子包（契约映射、引擎运行时边界与假实现接缝、信号量限流；打桩同包共存、可显式注入）、`chapter_reviewer/` 章级评审子包（评审编排、评审 LLM 注入点、真实适配器、分区式修订说明纯函数装配；跨包引用 rewriter_loop 的确定性校验纯函数，ADR-0006） |
 | `src/search_agent/` | 检索引擎包：自源项目一次性 fork 的 SearchAgent V12（火山联网 / Bisheng 知识库 / Doris 结构化三通道），归本项目所有、可自由改造；经 `src/agents/search_agent/` 薄适配层接入主流程（LLM 配置走 `SEARCH_AGENT_LLM_*` 统一解析） |
-| `src/nodes/` | 6 个主节点：framework_orchestrator → reference_orchestrator（检索并行扇出）→ chapter_drafter（首写并行扇出）→ writing_orchestrator（修订与回退串行自环）→ citation_validator → human_review_gate |
+| `src/nodes/` | 6 个主节点：framework_orchestrator → reference_orchestrator（检索并行扇出）→ chapter_drafter（首写并行扇出）→ writing_orchestrator（修订与回退串行自环）→ document_reviewer（篇级终审门禁）→ human_review_gate |
 | `src/graph.py` | 图接线、条件路由、Postgres 检查点保存器（含 `checkpoint_serializer` 类型注册） |
 | `src/service/` | 对外服务：FastAPI 应用（`app.py`）、任务生命周期（`task_service.py`）、事件枢纽与事件信封 |
 | `docs_templates/` | 本地模板库（品类识别与大纲骨架来源） |
@@ -36,11 +36,11 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 | 组 | 变量 | 说明 |
 |---|---|---|
 | LLM 全局缺省 | `LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_ENABLE_THINKING` | OpenAI 兼容端点；base_url 自动剥掉 `/chat/completions` 后缀；思考模式缺省关闭（`0`） |
-| LLM 单元覆盖 | `<前缀>_LLM_MODEL` / `_LLM_BASE_URL` / `_LLM_API_KEY` / `_LLM_ENABLE_THINKING` | 前缀共 9 个：`FRAMEWORK_ORCHESTRATOR`、`REFERENCE_ORCHESTRATOR`、`CHAPTER_DRAFTER`、`WRITING_ORCHESTRATOR`、`CITATION_VALIDATOR`、`HUMAN_REVIEW_GATE`、`SEARCH_AGENT`、`REWRITER_LOOP`、`CHAPTER_REVIEWER`；逐字段回落全局 |
+| LLM 单元覆盖 | `<前缀>_LLM_MODEL` / `_LLM_BASE_URL` / `_LLM_API_KEY` / `_LLM_ENABLE_THINKING` | 前缀共 9 个：`FRAMEWORK_ORCHESTRATOR`、`REFERENCE_ORCHESTRATOR`、`CHAPTER_DRAFTER`、`WRITING_ORCHESTRATOR`、`DOCUMENT_REVIEWER`、`HUMAN_REVIEW_GATE`、`SEARCH_AGENT`、`REWRITER_LOOP`、`CHAPTER_REVIEWER`；逐字段回落全局 |
 | 持久化 | `HYPOARGUS_PG_DSN` | 生产 Postgres 连接串，检查点保存器自动建表 |
 | 可观测（可选） | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` / `LANGFUSE_TIMEOUT` / `LANGFUSE_TRACING_ENABLED` | 公私钥齐备即启用；总开关设 `false` 关闭上报（公私钥可留着不动） |
-| 业务调节 | `FRAMEWORK_MAX_POINTS_PER_CHAPTER`(4)、`FRAMEWORK_MAX_HYPOTHESES_PER_POINT`(3)、`FRAMEWORK_MAX_HYPOTHESES_TOTAL`(60)、`CITATION_MAX_RETRIES`(2)、`CHAPTER_MAX_REWRITES`(1)、`ASSEMBLER_*` 四项 | 括号内为缺省值；`CHAPTER_MAX_REWRITES` 是章级写→评→重写循环的重写次数上限，设 0 关闭评审重写、只保留纯首写 |
-| 并发度 | `GRAPH_MAX_CONCURRENCY`(4)、`FRAMEWORK_MAX_CONCURRENT_CHAPTERS`(4)、`CITATION_MAX_CONCURRENT_CHAPTERS`(4)、`SEARCH_AGENT_MAX_CONCURRENT_CALLS`(2)、`CHAPTER_REVIEWER_MAX_CONCURRENT_CALLS`(2) | 依次为：图级并行分支上限（检索与首写 Send 扇出）、论证框架论点假说生成与引文语义核查的章节级 LLM 并发上限、检索适配层与章级评审外部调用总并发（跨并行分支共享的线程信号量阈值，同一机制见 `src/agents/concurrency.py`） |
+| 业务调节 | `FRAMEWORK_MAX_POINTS_PER_CHAPTER`(4)、`FRAMEWORK_MAX_HYPOTHESES_PER_POINT`(3)、`FRAMEWORK_MAX_HYPOTHESES_TOTAL`(60)、`DOCUMENT_REVIEW_MAX_RETRIES`(2)、`CHAPTER_MAX_REWRITES`(1)、`ASSEMBLER_*` 五项（含篇级终审全文段阈值 `ASSEMBLER_DOCUMENT_TEXT_MAX_CHARS`，缺省 30000） | 括号内为缺省值；`CHAPTER_MAX_REWRITES` 是章级写→评→重写循环的重写次数上限，设 0 关闭评审重写、只保留纯首写 |
+| 并发度 | `GRAPH_MAX_CONCURRENCY`(4)、`FRAMEWORK_MAX_CONCURRENT_CHAPTERS`(4)、`DOCUMENT_REVIEW_MAX_CONCURRENT_CHAPTERS`(4)、`SEARCH_AGENT_MAX_CONCURRENT_CALLS`(2)、`CHAPTER_REVIEWER_MAX_CONCURRENT_CALLS`(2) | 依次为：图级并行分支上限（检索与首写 Send 扇出）、论证框架论点假说生成与引文语义核查的章节级 LLM 并发上限、检索适配层与章级评审外部调用总并发（跨并行分支共享的线程信号量阈值，同一机制见 `src/agents/concurrency.py`） |
 | 检索通道 | `VOLCANO_SEARCH_*`、`BISHENG_*`、`DORIS_*`、`SEARCH_AGENT_SHADOW_MODE`、`SEARCH_AGENT_*_LLM_ENABLED`、`JUDGE_MODEL`、`EVIDENCE_RETRIEVAL_<字段>` | search_agent 检索引擎三通道接入与细项配置，逐项说明见 `.env.example` 的检索通道分节 |
 | 调测 | `LLM_DEBUG_TIMING` | 设为 `1` 打印逐次 LLM 调用计时 |
 | 测试 | `HYPOARGUS_TEST_PG_DSN` | 缺省 `postgresql://postgres:postgres@127.0.0.1:15432/postgres`（本地 docker 容器 `hypoargus-test-pg`） |

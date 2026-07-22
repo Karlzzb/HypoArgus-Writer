@@ -551,7 +551,7 @@ def test_增量素材入库与去重():
 def _make_fallback_state(failed_chapter_ids: list[str]) -> WritingAgentState:
     """在基础三章状态上叠加现有草稿与失败终审报告（终审回退模式入口）。
 
-    citation_retry_count 置 1 模拟 citation_validator 写失败报告时的递增：
+    citation_retry_count 置 1 模拟 document_reviewer 写失败报告时的递增：
     回退只在重试预算内触发，预算由该字段承载。
     """
     state = _make_state()
@@ -592,12 +592,12 @@ def test_终审回退模式_只重写不合格章节():
     # prev_chapter_summary 注入 summary_chain 段（带章节标题前缀）。
     assert task["prev_chapter_summary"] == "【第一章】ch1 旧摘要"
     # 终审报告直接组装分区式修订说明：每条 issue 折成 error 级规则违规，
-    # rule 带 citation. 前缀、guidance 为 issue 明细；无用户指令。
+    # rule 带 document_review. 前缀、guidance 为 issue 明细；无用户指令。
     note = task["revision_note"]
     assert note["user_directives"] == ""
     assert len(note["rule_violations"]) == 1
     violation = note["rule_violations"][0]
-    assert violation["rule"] == "citation.orphan_marker"
+    assert violation["rule"] == "document_review.orphan_marker"
     assert violation["severity"] == "error"
     assert violation["guidance"] == "章节 ch2 角标 m-x 无对应素材"
     assert note["passed"] is False
@@ -671,7 +671,7 @@ def test_路由与判别函数一致():
     state = _make_state()
     assert route_after_writing_orchestrator(state) == "writing_orchestrator"
     state["chapter_drafts"] = _existing_drafts()
-    assert route_after_writing_orchestrator(state) == "citation_validator"
+    assert route_after_writing_orchestrator(state) == "document_reviewer"
     state["pending_directives"] = [
         RevisionDirective(
             target_chapter_id="ch1", type="rewrite_only", instruction="改一"

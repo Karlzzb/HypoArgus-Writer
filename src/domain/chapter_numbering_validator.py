@@ -10,7 +10,7 @@
 2. 模型自生成：rewriter_loop 的 LLM 被要求在 chapter_text 中原样输出含编号的
    ## 标题，但可能自行生成或修改编号，导致重复或断号。
 
-校验层级：全局校验层（citation_validator 调用本模块），不修改 rewriter_loop
+校验层级：全局校验层（document_reviewer 调用本模块），不修改 rewriter_loop
 单章边界内的任何职责（遵守 ADR-0001 非子图边界与章级 checkpoint 约束）。
 
 自由结构模式的大纲标题可以没有中文数字编号，不带编号的章节不参与连续性校验，

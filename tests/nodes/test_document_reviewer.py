@@ -1,7 +1,12 @@
-"""citation_validator 节点单元测试：用假 LLM 预置语义核查应答直接调用节点函数。
+"""document_reviewer 节点单元测试：用假 LLM 预置应答直接调用节点函数。
 
-覆盖：全部通过、程序对账失败、语义核查失败、自检失败合并、
-重试超限携带警告、增量核查范围与 LLM 调用次数、环境变量读取。
+覆盖：引用四步（全部通过、程序对账失败、语义核查失败、自检失败合并、
+重试超限携带警告、增量核查范围与 LLM 调用次数）、结构完整性（编号校验与
+大纲缺稿）、篇级评审（fact_conflict 打回、warn 三维呈人工不打回、幻觉与
+未知维度防护、失败轮同样写入 review_warnings）、环境变量读取。
+
+应答消费顺序：引文语义核查逐章并发弹出顺序应答（各章应答须互为等价或
+按内容可丢弃），篇级评审在全部语义核查完成后恰好消费最后一条应答。
 """
 
 import json
@@ -9,10 +14,10 @@ from typing import Any
 
 import pytest
 
-from nodes.citation_validator import (
-    ValidatorConfig,
-    load_validator_config,
-    make_citation_validator_node,
+from nodes.document_reviewer import (
+    ReviewerConfig,
+    load_reviewer_config,
+    make_document_reviewer_node,
 )
 from llm.llm_client import FakeLLM
 from domain.state import (
@@ -24,6 +29,9 @@ from domain.state import (
     WritingAgentState,
     initial_state,
 )
+
+# 篇级评审「无任何发现」的放行应答。
+REVIEW_PASS = "[]"
 
 
 def _mat(material_id: str, chapter_id: str, verdict: str = "pass") -> Material:
@@ -63,7 +71,7 @@ def _state(
     citation_retry_count: int = 0,
 ) -> WritingAgentState:
     """构造带大纲与草稿的图状态。"""
-    state = initial_state("需求", "身份", "trace-cv")
+    state = initial_state("需求", "身份", "trace-dr")
     state["outline"] = [
         ChapterSpec(id=draft.chapter_id, title=f"章 {draft.chapter_id}")
         for draft in drafts
@@ -80,20 +88,27 @@ def _aligned(material_id: str, aligned: bool = True, reason: str = "对应") -> 
     return {"material_id": material_id, "aligned": aligned, "reason": reason}
 
 
+def _finding(
+    dimension: str, chapter_ids: list[str], detail: str = "发现说明"
+) -> dict[str, Any]:
+    """构造一条篇级评审发现项。"""
+    return {"dimension": dimension, "chapter_ids": chapter_ids, "detail": detail}
+
+
 def _run(
     state: WritingAgentState,
     responses: list[Any],
     max_retries: int = 2,
 ) -> tuple[dict[str, Any], FakeLLM]:
-    """预置应答序列（list 自动转 JSON 文本）后执行一次节点。"""
+    """预置应答序列（list/dict 自动转 JSON 文本）后执行一次节点。"""
     fake = FakeLLM(
         [
             item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
             for item in responses
         ]
     )
-    node = make_citation_validator_node(
-        lambda unit: fake, ValidatorConfig(max_retries=max_retries)
+    node = make_document_reviewer_node(
+        lambda unit: fake, ReviewerConfig(max_retries=max_retries)
     )
     return dict(node(state)), fake
 
@@ -104,7 +119,7 @@ def test_全部通过_报告放行且计数归零() -> None:
         [_mat("m1", "ch1")],
         citation_retry_count=1,
     )
-    result, fake = _run(state, [[_aligned("m1")]])
+    result, fake = _run(state, [[_aligned("m1")], REVIEW_PASS])
 
     report = result["citation_report"]
     assert report.passed is True
@@ -112,11 +127,13 @@ def test_全部通过_报告放行且计数归零() -> None:
     assert report.failed_chapter_ids == []
     assert result["citation_retry_count"] == 0
     assert result["citation_warnings"] == []
+    assert result["review_warnings"] == []
     assert result["revised_chapter_ids"] == []
     # 通过即将进入人工中断点：等待人工期间的状态机值由本节点写入。
     assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
-    assert result["current_node_llm_config"]["unit"] == "citation_validator"
-    assert len(fake.calls) == 1
+    assert result["current_node_llm_config"]["unit"] == "document_reviewer"
+    # 语义核查 1 次 + 篇级评审 1 次。
+    assert len(fake.calls) == 2
 
 
 def test_程序对账失败_定位章节且无语义误报() -> None:
@@ -124,7 +141,7 @@ def test_程序对账失败_定位章节且无语义误报() -> None:
         [_draft("ch1", "引用[m1]与孤儿[m404]。"), _draft("ch2", "引用[m2]。")],
         [_mat("m1", "ch1"), _mat("m2", "ch2")],
     )
-    result, _ = _run(state, [[_aligned("m1")], [_aligned("m2")]])
+    result, _ = _run(state, [[_aligned("m1")], [_aligned("m2")], REVIEW_PASS])
 
     report = result["citation_report"]
     assert report.passed is False
@@ -137,7 +154,9 @@ def test_程序对账失败_定位章节且无语义误报() -> None:
 
 def test_语义核查失败_生成semantic_mismatch() -> None:
     state = _state([_draft("ch1", "引用[m1]。")], [_mat("m1", "ch1")])
-    result, _ = _run(state, [[_aligned("m1", aligned=False, reason="观点不符")]])
+    result, _ = _run(
+        state, [[_aligned("m1", aligned=False, reason="观点不符")], REVIEW_PASS]
+    )
 
     report = result["citation_report"]
     assert report.passed is False
@@ -152,7 +171,10 @@ def test_语义核查应答中不在被引集合的素材项被丢弃() -> None:
     state = _state([_draft("ch1", "引用[m1]。")], [_mat("m1", "ch1")])
     result, _ = _run(
         state,
-        [[_aligned("m1"), _aligned("m外来", aligned=False, reason="幻觉项")]],
+        [
+            [_aligned("m1"), _aligned("m外来", aligned=False, reason="幻觉项")],
+            REVIEW_PASS,
+        ],
     )
     assert result["citation_report"].passed is True
 
@@ -162,7 +184,7 @@ def test_语义核查应答被对象包裹时同样解析() -> None:
     state = _state([_draft("ch1", "引用[m1]。")], [_mat("m1", "ch1")])
     result, _ = _run(
         state,
-        [{"results": [_aligned("m1", aligned=False, reason="观点不符")]}],
+        [{"results": [_aligned("m1", aligned=False, reason="观点不符")]}, REVIEW_PASS],
     )
     report = result["citation_report"]
     assert report.passed is False
@@ -172,7 +194,9 @@ def test_语义核查应答被对象包裹时同样解析() -> None:
 def test_语义核查应答为单个核查项对象时同样解析() -> None:
     """关思考后模型偶发直接返回单个核查项对象，应包成单元素数组。"""
     state = _state([_draft("ch1", "引用[m1]。")], [_mat("m1", "ch1")])
-    result, _ = _run(state, [_aligned("m1", aligned=False, reason="观点不符")])
+    result, _ = _run(
+        state, [_aligned("m1", aligned=False, reason="观点不符"), REVIEW_PASS]
+    )
     report = result["citation_report"]
     assert report.passed is False
     assert [issue.kind for issue in report.issues] == ["semantic_mismatch"]
@@ -195,7 +219,7 @@ def test_自检失败合并为self_check_failed() -> None:
         ],
         [_mat("m1", "ch1")],
     )
-    result, _ = _run(state, [[_aligned("m1")]])
+    result, _ = _run(state, [[_aligned("m1")], REVIEW_PASS])
 
     report = result["citation_report"]
     assert report.passed is False
@@ -209,7 +233,7 @@ def test_自检失败但issues为空也生成一条() -> None:
         [_draft("ch1", "无角标正文。", self_check=SelfCheck(citations_ok=False))],
         [],
     )
-    result, _ = _run(state, [])
+    result, _ = _run(state, [REVIEW_PASS])
     assert [issue.kind for issue in result["citation_report"].issues] == [
         "self_check_failed"
     ]
@@ -221,7 +245,7 @@ def test_重试超限_携带未决引文警告() -> None:
         [],
         citation_retry_count=2,
     )
-    result, _ = _run(state, [], max_retries=2)
+    result, _ = _run(state, [REVIEW_PASS], max_retries=2)
 
     report = result["citation_report"]
     assert report.passed is False
@@ -231,26 +255,30 @@ def test_重试超限_携带未决引文警告() -> None:
     assert result["revised_chapter_ids"] == []
 
 
-def test_增量核查_只审revised章节且LLM只调一次() -> None:
+def test_增量核查_只审revised章节且语义核查只调一次() -> None:
     state = _state(
         [_draft("ch1", "孤儿[m404]。"), _draft("ch2", "引用[m2]。")],
         [_mat("m2", "ch2")],
         revised_chapter_ids=["ch2"],
     )
-    result, fake = _run(state, [[_aligned("m2")]])
+    result, fake = _run(state, [[_aligned("m2")], REVIEW_PASS])
 
-    # ch1 的孤儿角标不在范围内，不报；LLM 只为 ch2 调用一次。
+    # ch1 的孤儿角标不在范围内，不报；语义核查只为 ch2 调用一次，
+    # 篇级评审始终全量：其调用输入含未受审的 ch1 正文。
     assert result["citation_report"].passed is True
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
     assert "m2" in fake.calls[0][1]["content"]
+    assert "孤儿[m404]" in fake.calls[1][1]["content"]
     assert result["revised_chapter_ids"] == []
 
 
-def test_章节没有角标素材时跳过LLM调用() -> None:
+def test_章节没有角标素材时跳过语义核查_篇级评审仍执行() -> None:
     state = _state([_draft("ch1", "无角标正文。")], [])
-    result, fake = _run(state, [])
+    result, fake = _run(state, [REVIEW_PASS])
     assert result["citation_report"].passed is True
-    assert fake.calls == []
+    # 唯一一次调用是篇级评审，不是语义核查。
+    assert len(fake.calls) == 1
+    assert "篇级评审器" in fake.calls[0][0]["content"]
 
 
 def test_failed_chapter_ids按大纲顺序去重() -> None:
@@ -258,20 +286,20 @@ def test_failed_chapter_ids按大纲顺序去重() -> None:
         [_draft("ch1", "孤儿[m404]。"), _draft("ch2", "孤儿[m405]与[m406]。")],
         [],
     )
-    result, _ = _run(state, [])
+    result, _ = _run(state, [REVIEW_PASS])
     assert result["citation_report"].failed_chapter_ids == ["ch1", "ch2"]
 
 
 def test_环境变量缺省为2() -> None:
-    assert load_validator_config({}).max_retries == 2
-    assert load_validator_config({"CITATION_MAX_RETRIES": ""}).max_retries == 2
-    assert load_validator_config({"CITATION_MAX_RETRIES": "5"}).max_retries == 5
+    assert load_reviewer_config({}).max_retries == 2
+    assert load_reviewer_config({"DOCUMENT_REVIEW_MAX_RETRIES": ""}).max_retries == 2
+    assert load_reviewer_config({"DOCUMENT_REVIEW_MAX_RETRIES": "5"}).max_retries == 5
 
 
 @pytest.mark.parametrize("raw", ["abc", "0", "-1"])
 def test_环境变量非法值抛ValueError(raw: str) -> None:
-    with pytest.raises(ValueError, match="CITATION_MAX_RETRIES"):
-        load_validator_config({"CITATION_MAX_RETRIES": raw})
+    with pytest.raises(ValueError, match="DOCUMENT_REVIEW_MAX_RETRIES"):
+        load_reviewer_config({"DOCUMENT_REVIEW_MAX_RETRIES": raw})
 
 
 def test_章节编号重复_检出失败() -> None:
@@ -283,7 +311,7 @@ def test_章节编号重复_检出失败() -> None:
         ],
         [_mat("m1", "ch1"), _mat("m2", "ch2")],
     )
-    result, fake = _run(state, [[_aligned("m1")], [_aligned("m2")]])
+    result, fake = _run(state, [[_aligned("m1")], [_aligned("m2")], REVIEW_PASS])
     assert not result["citation_report"].passed
     issues = result["citation_report"].issues
     numbering_issues = [issue for issue in issues if issue.kind == "numbering_broken"]
@@ -307,7 +335,7 @@ def test_章节编号断号_检出失败() -> None:
         ],
         [_mat("m1", "ch1"), _mat("m2", "ch2")],
     )
-    result, _ = _run(state, [[_aligned("m1")], [_aligned("m2")]])
+    result, _ = _run(state, [[_aligned("m1")], [_aligned("m2")], REVIEW_PASS])
     assert not result["citation_report"].passed
     issues = result["citation_report"].issues
     numbering_issues = [issue for issue in issues if issue.kind == "numbering_broken"]
@@ -327,9 +355,133 @@ def test_章节编号连续_全部通过() -> None:
         ],
         [_mat("m1", "ch1"), _mat("m2", "ch2"), _mat("m3", "ch3")],
     )
-    result, _ = _run(state, [[_aligned("m1")], [_aligned("m2")], [_aligned("m3")]])
+    result, _ = _run(
+        state, [[_aligned("m1")], [_aligned("m2")], [_aligned("m3")], REVIEW_PASS]
+    )
     assert result["citation_report"].passed
     issues = result["citation_report"].issues
     numbering_issues = [issue for issue in issues if issue.kind == "numbering_broken"]
     assert len(numbering_issues) == 0
 
+
+def test_大纲章节缺稿_报chapter_missing() -> None:
+    """结构完整性：大纲章节没有成稿时报 error 级 chapter_missing。"""
+    state = _state([_draft("ch1", "无角标正文。")], [])
+    state["outline"] = [
+        ChapterSpec(id="ch1", title="章 ch1"),
+        ChapterSpec(id="ch2", title="章 ch2"),
+    ]
+    result, _ = _run(state, [REVIEW_PASS])
+
+    report = result["citation_report"]
+    assert report.passed is False
+    assert [(issue.kind, issue.chapter_id) for issue in report.issues] == [
+        ("chapter_missing", "ch2")
+    ]
+    assert report.failed_chapter_ids == ["ch2"]
+    assert result["status"] == WorkflowStatus.CITATION_CHECKING
+
+
+def test_篇级评审fact_conflict_打回涉及章节() -> None:
+    """跨章硬事实冲突是 error：进问题清单与 failed_chapter_ids 触发定向回退。"""
+    state = _state(
+        [_draft("ch1", "无角标正文一。"), _draft("ch2", "无角标正文二。")], []
+    )
+    result, _ = _run(
+        state,
+        [[_finding("fact_conflict", ["ch1", "ch2"], detail="两章结论相反")]],
+    )
+
+    report = result["citation_report"]
+    assert report.passed is False
+    assert [(issue.kind, issue.chapter_id) for issue in report.issues] == [
+        ("fact_conflict", "ch1"),
+        ("fact_conflict", "ch2"),
+    ]
+    # 每条问题都点名全部涉及章节，重写侧能看到冲突对方章。
+    assert all(
+        "跨章硬事实冲突（涉及章节 ch1、ch2）：两章结论相反" in issue.detail
+        for issue in report.issues
+    )
+    assert report.failed_chapter_ids == ["ch1", "ch2"]
+    assert result["citation_retry_count"] == 1
+    assert result["status"] == WorkflowStatus.CITATION_CHECKING
+    assert result["review_warnings"] == []
+
+
+def test_篇级评审warn三维_不打回且写入review_warnings() -> None:
+    """章间衔接/口径统一/跨章重复是 warn：呈人工不打回，重试计数归零。"""
+    state = _state(
+        [_draft("ch1", "无角标正文一。"), _draft("ch2", "无角标正文二。")],
+        [],
+        citation_retry_count=1,
+    )
+    result, _ = _run(
+        state,
+        [
+            [
+                _finding("transition", ["ch1", "ch2"], detail="承接生硬"),
+                _finding("consistency", ["ch2"], detail="口径不一"),
+                _finding("duplication", ["ch1", "ch2"], detail="大段重复"),
+            ]
+        ],
+    )
+
+    assert result["citation_report"].passed is True
+    warnings = result["review_warnings"]
+    assert len(warnings) == 3
+    assert "章间衔接" in warnings[0] and "承接生硬" in warnings[0]
+    assert "口径统一" in warnings[1] and "ch2" in warnings[1]
+    assert "跨章重复" in warnings[2] and "大段重复" in warnings[2]
+    assert result["citation_retry_count"] == 0
+    assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+
+
+def test_篇级评审幻觉章节与未知维度被丢弃() -> None:
+    """涉及章节 id 不在大纲的剔除、剔空整条丢；未知维度直接丢。"""
+    state = _state([_draft("ch1", "无角标正文。")], [])
+    result, _ = _run(
+        state,
+        [
+            [
+                _finding("fact_conflict", ["ch99"], detail="全是幻觉章节"),
+                _finding("nonsense", ["ch1"], detail="未知维度"),
+                _finding("duplication", ["ch1", "ch幻觉"], detail="剔除幻觉后保留"),
+            ]
+        ],
+    )
+
+    assert result["citation_report"].passed is True
+    # 前两条整条丢弃；第三条剔除幻觉 id 后仍有合法章节，保留为 warn。
+    warnings = result["review_warnings"]
+    assert len(warnings) == 1
+    assert "剔除幻觉后保留" in warnings[0]
+    assert "ch幻觉" not in warnings[0]
+    assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+
+
+def test_打回轮次review_warnings同样写入() -> None:
+    """error 与 warn 同现：warn 每轮呈人工不因打回丢失，error 照常打回。"""
+    state = _state(
+        [_draft("ch1", "无角标正文一。"), _draft("ch2", "无角标正文二。")], []
+    )
+    result, _ = _run(
+        state,
+        [
+            [
+                _finding("fact_conflict", ["ch1"], detail="数字矛盾"),
+                _finding("duplication", ["ch1", "ch2"], detail="大段重复"),
+            ]
+        ],
+    )
+
+    report = result["citation_report"]
+    assert report.passed is False
+    assert [(issue.kind, issue.chapter_id) for issue in report.issues] == [
+        ("fact_conflict", "ch1")
+    ]
+    assert report.failed_chapter_ids == ["ch1"]
+    assert result["status"] == WorkflowStatus.CITATION_CHECKING
+    warnings = result["review_warnings"]
+    assert len(warnings) == 1
+    assert "跨章重复" in warnings[0] and "大段重复" in warnings[0]

@@ -3,7 +3,7 @@
 首写不再是单次 rewriter 调用：write(draft) 后经 chapter_reviewer 章级评审，
 评审不过则按分区式修订说明 rewrite(revise) 一次，如此至多 ``max_rewrites`` 轮。
 **评审在顶、无终态复审**——最后一次 rewrite 之后不再评审（章级不做终态复审，
-交由全局 citation_validator 兜底）。缺省 ``max_rewrites=1``：
+交由全局 document_reviewer 兜底）。缺省 ``max_rewrites=1``：
 
     write(draft)                       # 1 次写作调用
     if 空稿: 短路返回（不评审、不重写）
