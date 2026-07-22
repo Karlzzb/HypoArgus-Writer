@@ -153,34 +153,50 @@ def test_真实适配器_修一次口径_提示词含违规清单(draft_task: di
     assert "重写本章正文与一行摘要时全部规避" in user
 
 
-def test_真实适配器_revise_提示词含现有正文与定向指令(draft_task: dict[str, Any]) -> None:
+def test_真实适配器_revise_提示词含现有正文与分区修订说明(draft_task: dict[str, Any]) -> None:
     llm = FakeLLM(responses=[_writer_json("改后正文。")])
     draft_task["mode"] = "revise"
-    draft_task["revision_directives"] = [
-        {"type": "rewrite_only", "instruction": "精简第一段"},
-        {"type": "evidence_augmented", "instruction": "为论点乙补充数据佐证"},
-    ]
+    draft_task["revision_note"] = {
+        "user_directives": "精简第一段",
+        "rule_violations": [
+            {
+                "rule": "hypothesis_no_support",
+                "location_excerpt": "论点乙段落",
+                "guidance": "为论点乙补充数据佐证",
+                "severity": "error",
+            }
+        ],
+        "conflict_hints": [{"description": "用户要求精简与字数下限冲突，以用户指令为准"}],
+        "passed": False,
+    }
     draft_task["current_text"] = "现有正文初稿。[m-h-1]"
     _make_client(llm).revise(draft_task, _STYLE_PROSE)
 
     user = llm.calls[0][1]["content"]
     assert "现有正文：\n现有正文初稿。[m-h-1]" in user
-    assert "[rewrite_only] 精简第一段" in user
-    assert "[evidence_augmented] 为论点乙补充数据佐证" in user
+    # 分区式修订说明按优先级渲染：用户指令区逐字呈现，error 违规带位置与指导。
+    assert "【用户指令（最高优先，逐字落实）】\n精简第一段" in user
+    assert "[hypothesis_no_support]（位置：论点乙段落） 为论点乙补充数据佐证" in user
+    assert "用户要求精简与字数下限冲突，以用户指令为准" in user
     assert "保持原样" in user
 
 
-def test_真实适配器_revise修一次_同时含指令与违规清单(draft_task: dict[str, Any]) -> None:
+def test_真实适配器_revise修一次_同时含修订说明与违规清单(draft_task: dict[str, Any]) -> None:
     llm = FakeLLM(responses=[_writer_json("再改正文。")])
     draft_task["mode"] = "revise"
-    draft_task["revision_directives"] = [{"type": "rewrite_only", "instruction": "精简第一段"}]
+    draft_task["revision_note"] = {
+        "user_directives": "精简第一段",
+        "rule_violations": [],
+        "conflict_hints": [],
+        "passed": True,
+    }
     draft_task["current_text"] = "现有正文初稿。"
     violations = [Violation(rule="numbering", message="行起手「1、」命中禁用编号式。")]
     _make_client(llm).revise(draft_task, _STYLE_PROSE, fix_violations=violations)
 
     user = llm.calls[0][1]["content"]
     assert "现有正文：\n现有正文初稿。" in user
-    assert "[rewrite_only] 精简第一段" in user
+    assert "【用户指令（最高优先，逐字落实）】\n精简第一段" in user
     assert "[numbering] 行起手「1、」命中禁用编号式。" in user
 
 
@@ -376,7 +392,12 @@ def test_真实适配器_revise字数目标_同样注入目标区间(draft_task:
     # revise 与 draft 共用上下文块 → 修订提示词同样携带本章目标字数区间。
     draft_task["chapter_spec"]["title"] = "一、总则"
     draft_task["mode"] = "revise"
-    draft_task["revision_directives"] = [{"type": "rewrite_only", "instruction": "精简第一段"}]
+    draft_task["revision_note"] = {
+        "user_directives": "精简第一段",
+        "rule_violations": [],
+        "conflict_hints": [],
+        "passed": True,
+    }
     draft_task["current_text"] = "现有正文初稿。"
     llm = FakeLLM(responses=[_writer_json("改后正文。")])
     _make_client(llm).revise(draft_task, _STYLE_PROSE)

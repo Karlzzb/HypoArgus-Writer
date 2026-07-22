@@ -59,7 +59,7 @@ def resolve_max_rewrites(max_rewrites: int | None) -> int:
     return read_nonnegative_int(os.environ, MAX_REWRITES_ENV, DEFAULT_MAX_REWRITES)
 
 
-def _relint_self_check(
+def relint_self_check(
     text: str,
     doc_type: str,
     doc_variant: str | None,
@@ -69,7 +69,9 @@ def _relint_self_check(
     """对重写后正文跑纯函数 re-lint，折出修后终态自检（零 LLM，非复审）。
 
     引用类规则与 rewriter / reviewer 同源 ``CITATION_RULES``：终态正文仍存
-    引用类违规则 ``citations_ok=False``，交全局终审裁决。
+    引用类违规则 ``citations_ok=False``，交全局终审裁决。写作循环与
+    writing_orchestrator 的修订/终审回退路径共用此纯函数产出修后终态自检
+    （ADR-0007：revise 恰一次改写后终态评审仅记录、不触发二次重写）。
     """
     violations = lint(
         text,
@@ -148,7 +150,7 @@ async def run_chapter_write_loop(
                 self_check = revised["self_check"]
                 break
             # 无终态复审：以确定性 re-lint 给出重写后正文的修后终态自检（ADR-0004）。
-            self_check = _relint_self_check(
+            self_check = relint_self_check(
                 text, doc_type, doc_variant, chapter_spec, materials
             )
 

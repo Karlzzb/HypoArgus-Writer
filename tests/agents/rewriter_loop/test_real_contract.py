@@ -67,19 +67,29 @@ def test_改写真实现_draft模式_返回字段与原位角标合规(
     assert len(fake.calls) == 1
 
 
-def test_改写真实现_revise模式_保留原文并落实每条指令(
+def test_改写真实现_revise模式_保留原文并落实修订说明(
     draft_task: dict[str, Any],
 ) -> None:
-    directives = [
-        {"type": "rewrite_only", "instruction": "精简第一段"},
-        {"type": "evidence_augmented", "instruction": "为论点乙补充数据佐证"},
-    ]
+    revision_note = {
+        "user_directives": "精简第一段",
+        "rule_violations": [
+            {
+                "rule": "hypothesis_no_support",
+                "location_excerpt": "论点乙段落",
+                "guidance": "为论点乙补充数据佐证",
+                "severity": "error",
+            }
+        ],
+        "conflict_hints": [],
+        "passed": False,
+    }
     draft_task["mode"] = "revise"
-    draft_task["revision_directives"] = directives
+    draft_task["revision_note"] = revision_note
     draft_task["current_text"] = "现有正文：论点甲与论点乙的初稿。[m-h-1]"
-    # 定向改写产物：保留原文与角标，逐条落实指令（干净正文，不触发修订）。
-    revised_text = draft_task["current_text"] + "".join(
-        f"（修订落实：{directive['instruction']}）" for directive in directives
+    # 定向改写产物：保留原文与角标，逐项落实用户指令与违规修改指导（干净正文，不触发修订）。
+    revised_text = (
+        draft_task["current_text"]
+        + "（修订落实：精简第一段）（修订落实：为论点乙补充数据佐证）"
     )
     fake = FakeLLM([writer_envelope(revised_text, "修订后摘要"), AUDIT_EMPTY_RESPONSE])
     adapter = make_rewriter_loop(lambda unit: fake)
@@ -94,14 +104,14 @@ def test_改写真实现_revise模式_保留原文并落实每条指令(
         "doc_variant",
     }
     assert draft_task["current_text"] in chapter_text
-    for directive in directives:
-        assert directive["instruction"] in chapter_text
+    assert "精简第一段" in chapter_text
+    assert "为论点乙补充数据佐证" in chapter_text
 
-    # 真链路验收：revise 提示词携带现有正文与全部定向指令（定向修改而非重写）。
+    # 真链路验收：revise 提示词携带现有正文与分区式修订说明（用户指令 + 违规指导）。
     revise_prompt = joined_prompt(fake.calls[0])
     assert draft_task["current_text"] in revise_prompt
-    for directive in directives:
-        assert directive["instruction"] in revise_prompt
+    assert "精简第一段" in revise_prompt
+    assert "为论点乙补充数据佐证" in revise_prompt
 
 
 def test_改写真实现_工厂路径_请求单元名且回带任务包文种(

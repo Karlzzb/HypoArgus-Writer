@@ -142,11 +142,6 @@ def _format_violations(violations: Sequence[Violation]) -> str:
     return "\n".join(f"- [{v.rule}] {v.message}" for v in violations)
 
 
-def _format_directives(task: dict[str, Any]) -> str:
-    directives = task.get("revision_directives") or []
-    return "\n".join(f"- [{d['type']}] {d['instruction']}" for d in directives)
-
-
 def _format_note_entries(entries: Sequence[dict[str, Any]]) -> str:
     """把分区式修订说明的规则违规条目逐条渲染：规则名 + 位置摘录 + 修改指导。"""
     lines: list[str] = []
@@ -250,11 +245,11 @@ def _build_revise_user(
     *,
     fix_violations: Sequence[Violation] | None,
 ) -> str:
-    """revise 的 user 提示词：同一上下文块 + 现有正文 + 修订说明 / 修订指令。
+    """revise 的 user 提示词：同一上下文块 + 现有正文 + 分区式修订说明。
 
-    优先渲染分区式修订说明（``revision_note``，评审产物 ADR-0006）：按
-    用户指令 > error 违规 > warn 违规 > 冲突提示的优先级分区呈现。为兼容尚未
-    迁移的人工修订指令流（``revision_directives``，删除留 T3b），两者并存时都渲染。
+    修订说明（``revision_note``，评审产物 ADR-0006）是 revise 模式唯一的修订
+    驱动：按用户指令 > error 违规 > warn 违规 > 冲突提示的优先级分区呈现，三条
+    修订链路（写作循环 / 终审打回 / 人工修订）统一消费同一结构（ADR-0007）。
     未被覆盖的内容与角标一律保持原样；``fix_violations`` 为旧的既存违规清单
     （ADR-0004，纯写作链路下已不再从 rewriter 传入，保留仅供调测脚本复用）。
     """
@@ -266,11 +261,6 @@ def _build_revise_user(
             "修订说明（按优先级落实：用户指令 > error 违规 > warn 违规；"
             "未被覆盖的内容与 [素材id] 角标一律保持原样）：\n"
             f"{_format_revision_note(note)}\n"
-        )
-    if task.get("revision_directives"):
-        prompt += (
-            "修订指令（仅按下列指令定向修改；未被指令覆盖的内容与 [素材id] 角标一律保持原样）：\n"
-            f"{_format_directives(task)}\n"
         )
     if fix_violations:
         prompt += (

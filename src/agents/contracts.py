@@ -99,13 +99,6 @@ class ChapterSpecPayload(TypedDict):
     hypotheses: list[HypothesisPayload]
 
 
-class RevisionDirectivePayload(TypedDict):
-    """rewriter_loop 任务包中的修订指令条目。"""
-
-    type: Literal["rewrite_only", "evidence_augmented"]
-    instruction: str
-
-
 class SelfCheckPayload(TypedDict):
     """rewriter_loop 单章自检结果。"""
 
@@ -159,10 +152,11 @@ class RewriteTask(TypedDict):
     chapter_spec: ChapterSpecPayload
     materials: list[MaterialPayload]
     prev_chapter_summary: str
-    revision_directives: NotRequired[list[RevisionDirectivePayload]]
-    """旧修订指令字段（ADR-0004）：与 ``revision_note`` 并存（expand），删除留 T3b。"""
     revision_note: NotRequired[RevisionNotePayload]
-    """分区式修订说明字段（ADR-0006）：章级评审产物，rewriter revise 模式优先消费。"""
+    """分区式修订说明字段（ADR-0006）：章级评审产物，revise 模式唯一的修订驱动。
+
+    写作首写循环、终审打回、人工修订三链路统一以此驱动 revise（ADR-0007）：
+    用户指令、规则违规与冲突提示皆折入分区式修订说明，不再另设一句话指令字段。"""
     current_text: NotRequired[str]
 
 
