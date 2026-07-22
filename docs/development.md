@@ -98,7 +98,8 @@ python -m mypy src scripts tests
 - 节点内用 `asyncio.run` 调子智能体，因此图运行必须经 `asyncio.to_thread` 在独占工作线程同步驱动，绝不能跑在服务事件循环上（见 `src/service/task_service.py` 模块注释）。
 - 双 SSE 通道严格隔离：业务通道每任务一个枢纽、终态后关闭；graph_event 可视化通道全局一个枢纽、永不主动关闭。
 - 事件信封与 `state_snapshot` 只携带元数据，正文全文绝不入信封。
-- 人工审阅用 `langgraph.types.interrupt` 真实中断；恢复值契约为 `{"action": "finalize"}` 或 `{"action": "revise", "feedback": "..."}`；契约不符时不抛异常，携 `error` 字段重新中断（安全汇点循环）。
+- 人工审阅用 `langgraph.types.interrupt` 真实中断；恢复值契约为 `{"action": "finalize"}`、`{"action": "revise", "feedback": "..."}` 或 `{"action": "confirm"}`（仅在大扇出确认中断时可用，动作全集见 `human_review_gate.RESUME_ACTIONS`）。
+契约不符时不抛异常，携 `error` 字段重新中断；意见含混/定位失败携 `clarification_questions` 回问；受影响章数超过大纲一半携 `pending_confirmation` 清单待确认（均为安全汇点循环，ADR-0009）。
 - 引文内容存于 State 引文库，书目格式在交付时指定，两者完全解耦。
 - ulmen-langgraph 实验结论为**不启用**（见 README 与 `tests/e2e/test_ulmen_serde_experiment.py`）。
 

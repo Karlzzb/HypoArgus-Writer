@@ -610,6 +610,19 @@ async def _drive(
 
     async def on_review(data: dict) -> None:
         nonlocal reviewed, review_round
+        # 大扇出确认（issue #49）：意见触及超过大纲一半的章节时，
+        # 系统携解析清单重新中断待确认，回复 confirm 后才执行。
+        if "pending_confirmation" in data:
+            confirmation = data["pending_confirmation"]
+            print(
+                f"[演示] 修订清单待确认（受影响章节 {confirmation['affected_chapter_ids']}"
+                f"/共 {confirmation['total_chapters']} 章），提交确认"
+            )
+            recorder.record_review_action({"action": "confirm"})
+            await client.post(
+                f"/tasks/{thread_id}/review", json={"action": "confirm"}
+            )
+            return
         review_round += 1
         if data["citation_warnings"]:
             print(f"[业务] 未决引文警告：{data['citation_warnings']}")

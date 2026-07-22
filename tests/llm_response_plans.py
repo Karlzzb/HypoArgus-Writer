@@ -88,9 +88,12 @@ MIXED_DIRECTIVE_RESPONSE = json.dumps(
 )
 
 # 端到端主干完整编排：首轮全量终审 + 混合意见解析 + 增量核查重审两章各一条
-# + 修订轮的篇级评审一条。
+# + 修订轮的篇级评审一条。混合意见影响 2/2 章（超过大纲一半），触发大扇出
+# 确认重新中断；confirm 恢复时 human_review_gate 节点从头重放、意见解析
+# LLM 调用重复执行一次，故解析应答备两份。
 TRUNK_RESPONSES = [
     *FIRST_PASS_RESPONSES,
+    MIXED_DIRECTIVE_RESPONSE,
     MIXED_DIRECTIVE_RESPONSE,
     SEMANTIC_PASS,
     SEMANTIC_PASS,
@@ -118,15 +121,20 @@ def joined_prompt(messages: list[dict[str, str]]) -> str:
 # 自审空裁决：真实现每次写作后自审一次，空转编排一律判无违规。
 AUDIT_EMPTY_RESPONSE = '{"issues": []}'
 
+# 章级评审空裁决：chapter_reviewer 真实现单次调用的合法非退化应答
+# （issues 与 conflicts 均为空数组，评审通过、循环短路）。
+REVIEW_EMPTY_RESPONSE = '{"issues": [], "conflicts": []}'
+
 # rewriter_loop 真实现的键控应答（demo 空转与端到端主干等真链路场景与
 # TRUNK_RESPONSES 合用）：写作调用按上下文块的「- 标题：<章名>」行键控
-# （同章 draft 在前、revise 在后，按调用时间顺序弹出）；自审调用按
-# 【章节自审】标签键控。正文刻意规避全部 lint 规则（角标在素材池内、
-# 无口语化/编号/意识形态违规、无 ## 标题不落章型），保证每章恰好一次
-# 写作调用、不触发修订，应答计划保持确定性。revise 产物落实
-# MIXED_DIRECTIVE_RESPONSE 的两条指令（正文含指令原文，供落实断言）。
+# （同章 draft 在前、revise 在后，按调用时间顺序弹出）；章级评审调用按
+# 【章节评审】标签键控（demo 空转走 chapter_reviewer 真实现：首写两章 +
+# 修订两章共 4 次评审，一律空裁决短路）。正文刻意规避全部 lint 规则
+# （角标在素材池内、无口语化/编号/意识形态违规、无 ## 标题不落章型），
+# 保证每章恰好一次写作调用、不触发修订，应答计划保持确定性。revise 产物
+# 落实 MIXED_DIRECTIVE_RESPONSE 的两条指令（正文含指令原文，供落实断言）。
 WRITER_KEYED_RESPONSES = {
-    "【章节自审】": [AUDIT_EMPTY_RESPONSE] * 4,
+    "【章节评审】": [REVIEW_EMPTY_RESPONSE] * 4,
     "- 标题：第一章": [
         writer_envelope(
             "本专业面向智能制造领域培养高素质人才，课程体系对接行业标准。[m-ch1-p1-h1]",

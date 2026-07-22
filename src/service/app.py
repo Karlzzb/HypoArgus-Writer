@@ -97,9 +97,13 @@ class CreateTaskResponse(BaseModel):
 
 
 class ReviewRequest(BaseModel):
-    """提交审阅请求体：契约与人工中断点恢复值一致。"""
+    """提交审阅请求体：契约与人工中断点恢复值一致。
 
-    action: Literal["finalize", "revise"]
+    confirm 仅在任务停在大扇出确认中断（review_required 载荷携
+    pending_confirmation 解析清单）时有意义，用于确认按清单执行。
+    """
+
+    action: Literal["finalize", "revise", "confirm"]
     feedback: str | None = None
 
     @model_validator(mode="after")

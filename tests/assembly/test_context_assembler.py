@@ -497,9 +497,14 @@ def test_篇级全文段_无任何草稿时不出段():
 # ---------- 章节清单 ----------
 
 
-def test_章节清单_id与标题逐行():
+def test_章节清单_逐行携id标题与草稿摘要_无稿章摘要为空():
+    # 草稿摘要供意见解析 LLM 判断意见落章（两级定位的第二级）；ch3 尚无草稿。
     context = assemble(_make_state(), "human_review_gate", config=_DEFAULT_CONFIG)
-    assert context.text("chapter_list") == "ch1 第一章\nch2 第二章\nch3 第三章"
+    assert context.text("chapter_list") == (
+        "ch1 第一章：第一章摘要。补充说明。\n"
+        "ch2 第二章：第二章摘要。\n"
+        "ch3 第三章："
+    )
 
 
 # ---------- 覆盖 State 后装配 ----------

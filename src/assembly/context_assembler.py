@@ -260,8 +260,18 @@ def extract_chapter_list(
     params: Mapping[str, object],
     config: AssemblerConfig,
 ) -> list[Segment]:
-    """提取大纲章节清单：每行「id 标题」。"""
-    lines = [f"{chapter.id} {chapter.title}" for chapter in state.get("outline", [])]
+    """提取大纲章节清单：每行「id 标题：草稿摘要」。
+
+    草稿摘要供 human_review_gate 的意见解析 LLM 判断意见落章
+    （两级定位的第二级）；该章尚无草稿时摘要为空串，行尾保留冒号。
+    """
+    summaries = {
+        draft.chapter_id: draft.summary for draft in state.get("chapter_drafts", [])
+    }
+    lines = [
+        f"{chapter.id} {chapter.title}：{summaries.get(chapter.id, '')}"
+        for chapter in state.get("outline", [])
+    ]
     return [Segment("chapter_list", "\n".join(lines))]
 
 

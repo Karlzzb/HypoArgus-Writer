@@ -57,6 +57,24 @@ class InvalidReview(Exception):
     """审阅提交内容不符合恢复值契约。"""
 
 
+def build_resume_value(action: str, feedback: str | None) -> dict[str, Any]:
+    """把审阅动作构造成人工中断点恢复值（恢复值契约的服务侧唯一产地）。
+
+    与 human_review_gate 的恢复值校验同形：finalize / confirm 只携 action，
+    revise 必须携非空 feedback；confirm 是否可用由节点按是否存在待确认清单
+    裁决，服务层只透传。非法动作或缺意见抛 InvalidReview。
+    """
+    if action == "finalize":
+        return {"action": "finalize"}
+    if action == "confirm":
+        return {"action": "confirm"}
+    if action == "revise":
+        if not (isinstance(feedback, str) and feedback.strip()):
+            raise InvalidReview("action=revise 时必须携带非空的 feedback 意见文本")
+        return {"action": "revise", "feedback": feedback.strip()}
+    raise InvalidReview(f"非法的审阅动作：{action!r}")
+
+
 class SubagentHookDispatcher:
     """基于 contextvars 的子智能体事件钩子分发器。
 
@@ -158,14 +176,7 @@ class TaskManager:
         entry = self._require_entry(thread_id)
         if entry.running:
             raise TaskConflict(f"任务 {thread_id} 已有运行在进行中")
-        if action == "finalize":
-            resume_value: dict[str, Any] = {"action": "finalize"}
-        elif action == "revise":
-            if not (isinstance(feedback, str) and feedback.strip()):
-                raise InvalidReview("action=revise 时必须携带非空的 feedback 意见文本")
-            resume_value = {"action": "revise", "feedback": feedback.strip()}
-        else:
-            raise InvalidReview(f"非法的审阅动作：{action!r}")
+        resume_value = build_resume_value(action, feedback)
 
         config = self._thread_config(thread_id)
         snapshot = self._graph.get_state(config)
@@ -402,10 +413,14 @@ class TaskManager:
 
     @staticmethod
     def _at_interrupt(snapshot: Any) -> bool:
-        """检查点是否停在人工中断点：有待执行节点且任务携带中断。"""
-        return bool(snapshot.next) and any(
-            task.interrupts for task in snapshot.tasks
-        )
+        """检查点是否停在人工中断点：有任务携带中断即是。
+
+        不能以 snapshot.next 非空作前置条件：同一节点内重新中断
+        （安全汇点循环——契约错误、含混回问、大扇出确认）后，
+        LangGraph 的 snapshot.next 为空而中断仍挂在任务上，
+        此时任务依然可以且必须接受下一次审阅提交。
+        """
+        return any(task.interrupts for task in snapshot.tasks)
 
     @staticmethod
     def _interrupt_payload_of(snapshot: Any) -> dict[str, Any]:
