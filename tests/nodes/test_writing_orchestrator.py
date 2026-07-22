@@ -378,17 +378,15 @@ def test_修订模式_混合分支逐超步执行():
         "章节 ch2：通过 2 条，弱佐证 0 条，未通过 0 条"
     )
 
-    # rewriter_loop 两次均 mode=revise，任务包带正确 directives 与 current_text。
+    # rewriter_loop 两次均 mode=revise，任务包带评审装配的分区式修订说明与 current_text：
+    # 未显式注入评审时回落打桩评审，用户意见原文逐字进用户指令区。
     assert [task["chapter_spec"]["id"] for task in rewriter.tasks] == ["ch1", "ch2"]
     assert all(task["mode"] == "revise" for task in rewriter.tasks)
-    assert rewriter.tasks[0]["revision_directives"] == [
-        {"type": "rewrite_only", "instruction": "收紧第一章语气"}
-    ]
+    assert rewriter.tasks[0]["revision_note"]["user_directives"] == "收紧第一章语气"
+    assert rewriter.tasks[0]["revision_note"]["rule_violations"] == []
     assert rewriter.tasks[0]["current_text"] == "ch1 旧正文"
     assert rewriter.tasks[0]["prev_chapter_summary"] == ""
-    assert rewriter.tasks[1]["revision_directives"] == [
-        {"type": "evidence_augmented", "instruction": "补充第二章数据佐证"}
-    ]
+    assert rewriter.tasks[1]["revision_note"]["user_directives"] == "补充第二章数据佐证"
     assert rewriter.tasks[1]["current_text"] == "ch2 旧正文"
     # 章级落 state 的自然结果：ch1 的改写在前一超步已入 state，
     # ch2 超步装配的摘要链承接的是 ch1 修订后的最新摘要。
@@ -410,6 +408,90 @@ def test_修订模式_混合分支逐超步执行():
     assert final["pending_directives"] == []
     assert final["status"] == WorkflowStatus.ARTICLE_WRITING
     assert final["current_node_llm_config"] == {"unit": "writing_orchestrator"}
+
+
+class 记录式装配假评审适配器(SubagentAdapter):
+    """记录评审任务包并装配「用户指令 + 一条 warn 违规」修订说明的假 chapter_reviewer。
+
+    用于验证 ADR-0007 评审前置：修订模式先经章级评审装配分区式修订说明，
+    评审产物必须原封不动地成为 rewriter revise 任务包的 revision_note。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("chapter_reviewer", self._run)
+        self.tasks: list[dict[str, Any]] = []
+
+    async def _run(self, task: dict[str, Any]) -> dict[str, Any]:
+        self.tasks.append(task)
+        return {
+            "revision_note": {
+                "user_directives": task.get("user_feedback", ""),
+                "rule_violations": [
+                    {
+                        "rule": "oral_blacklist",
+                        "location_excerpt": "我们认为",
+                        "guidance": "改为书面语表述",
+                        "severity": "warn",
+                    }
+                ],
+                "conflict_hints": [],
+                "passed": True,
+            },
+            "self_check": {"citations_ok": True, "issues": []},
+        }
+
+
+def test_修订模式_评审前置装配修订说明_且恰一次改写无二次重写():
+    """issue #47 验收：revise 路径先调 chapter_reviewer（mode=revise）装配修订说明。
+
+    同章多条指令的 instruction 合并为用户意见原文逐字交给评审；评审产物原封
+    不动驱动 rewriter 恰一次改写——rewriter revise 调用计数 == 目标章数，
+    改写后只跑纯函数 re-lint，绝无二次评审、二次重写叠加（ADR-0007）。
+    """
+    rewriter = 记录式假改写适配器()
+    reviewer = 记录式装配假评审适配器()
+    node = make_writing_orchestrator_node(
+        rewriter, 记录式假检索适配器(), chapter_reviewer=reviewer
+    )
+    state = _make_revision_state(
+        [
+            RevisionDirective(
+                target_chapter_id="ch1", type="rewrite_only", instruction="收紧语气"
+            ),
+            RevisionDirective(
+                target_chapter_id="ch1", type="rewrite_only", instruction="压缩篇幅"
+            ),
+            RevisionDirective(
+                target_chapter_id="ch2", type="rewrite_only", instruction="精简第二章"
+            ),
+        ]
+    )
+    final, _, steps = _drive_to_completion(node, state)
+    assert steps == 2
+
+    # 评审前置：每个目标章恰一次 mode=revise 评审，现存草稿与合并指令入任务包。
+    assert [task["mode"] for task in reviewer.tasks] == ["revise", "revise"]
+    assert [task["chapter_spec"]["id"] for task in reviewer.tasks] == ["ch1", "ch2"]
+    assert reviewer.tasks[0]["chapter_text"] == "ch1 旧正文"
+    # 同章多条指令按顺序合并为用户意见原文（逐字，不改写）。
+    assert reviewer.tasks[0]["user_feedback"] == "收紧语气\n压缩篇幅"
+    assert reviewer.tasks[1]["user_feedback"] == "精简第二章"
+
+    # 恰一次改写、无二次重写叠加：rewriter revise 调用计数 == 目标章数（2）。
+    assert len(rewriter.tasks) == 2
+    assert all(task["mode"] == "revise" for task in rewriter.tasks)
+    # 评审装配的分区式修订说明原封不动进 rewriter 任务包。
+    assert rewriter.tasks[0]["revision_note"]["user_directives"] == "收紧语气\n压缩篇幅"
+    assert rewriter.tasks[0]["revision_note"]["rule_violations"] == [
+        {
+            "rule": "oral_blacklist",
+            "location_excerpt": "我们认为",
+            "guidance": "改为书面语表述",
+            "severity": "warn",
+        }
+    ]
+    assert final["chapter_drafts"][0].text == "ch1 修订后正文"
+    assert final["chapter_drafts"][1].text == "ch2 修订后正文"
 
 
 def test_修订模式_只作用于指定章节():
@@ -509,10 +591,16 @@ def test_终审回退模式_只重写不合格章节():
     assert task["current_text"] == "ch2 旧正文"
     # prev_chapter_summary 注入 summary_chain 段（带章节标题前缀）。
     assert task["prev_chapter_summary"] == "【第一章】ch1 旧摘要"
-    directives = task["revision_directives"]
-    assert len(directives) == 1
-    assert directives[0]["type"] == "rewrite_only"
-    assert "章节 ch2 角标 m-x 无对应素材" in directives[0]["instruction"]
+    # 终审报告直接组装分区式修订说明：每条 issue 折成 error 级规则违规，
+    # rule 带 citation. 前缀、guidance 为 issue 明细；无用户指令。
+    note = task["revision_note"]
+    assert note["user_directives"] == ""
+    assert len(note["rule_violations"]) == 1
+    violation = note["rule_violations"][0]
+    assert violation["rule"] == "citation.orphan_marker"
+    assert violation["severity"] == "error"
+    assert violation["guidance"] == "章节 ch2 角标 m-x 无对应素材"
+    assert note["passed"] is False
     drafts = final["chapter_drafts"]
     assert drafts[0] is original_drafts[0]
     assert drafts[1].text == "ch2 修订后正文"

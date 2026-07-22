@@ -55,7 +55,7 @@ from domain.doc_types import carried_doc_facts, tier_from_variant  # noqa: E402
 from llm.llm_client import LLM, FakeLLM, default_llm_factory  # noqa: E402
 
 # 缺省样例任务包路径：按脚本自身位置解析，任意 cwd 下均可直接运行。
-# draft 上下文与 revise 字段（current_text / revision_directives）齐备，两种模式皆可空转。
+# draft 上下文与 revise 字段（current_text / revision_note）齐备，两种模式皆可空转。
 _DEFAULT_TASK_PATH = Path(__file__).resolve().parent / "rewriter_task.sample.json"
 
 # 任务包必备键（编排链路真正依赖的字段；mode 可被 --mode 覆盖故单独处理，
@@ -101,11 +101,16 @@ def build_fake_llm(task: dict[str, Any]) -> FakeLLM:
     markers = "".join(f"[{m['id']}]" for m in materials)
     clean_sentence = "本专业面向智能制造领域培养高素质人才。"
     if task["mode"] == "revise":
-        notes = "".join(
-            f"（修订落实：{d['instruction']}）"
-            for d in task.get("revision_directives") or []
-        )
-        body = f"{task.get('current_text', '')}{notes}"
+        # 附注口径对齐 rewriter_loop 打桩（stub.py）：用户指令与规则违规
+        # 修改指导逐条落「（修订落实：…）」附注，避免两处口径分叉。
+        note = task.get("revision_note") or {}
+        parts: list[str] = []
+        directives = (note.get("user_directives") or "").strip()
+        if directives:
+            parts.append(f"（修订落实：{directives}）")
+        for entry in note.get("rule_violations", []):
+            parts.append(f"（修订落实：{entry['guidance']}）")
+        body = f"{task.get('current_text', '')}{''.join(parts)}"
     else:
         prev = task["prev_chapter_summary"]
         lead = f"承接上文：{prev}" if prev else ""

@@ -55,9 +55,18 @@
     }
   ],
   "prev_chapter_summary": "上一章摘要：已完成背景铺陈。",
-  "revision_directives": [
-    { "type": "rewrite_only", "instruction": "精简第一段" },
-    { "type": "evidence_augmented", "instruction": "为论点乙补充数据佐证" }
-  ],
+  "revision_note": {
+    "user_directives": "精简第一段；为论点乙补充数据佐证",
+    "rule_violations": [
+      {
+        "rule": "citation.missing_marker",
+        "location_excerpt": "论点乙的初稿",
+        "guidance": "为论点乙的支撑句补挂素材角标",
+        "severity": "error"
+      }
+    ],
+    "conflict_hints": [],
+    "passed": false
+  },
   "current_text": "现有正文：论点甲与论点乙的初稿。[m-h-1]"
 }

@@ -18,7 +18,7 @@ async def stub_rewriter_loop_run(task: dict[str, Any]) -> dict[str, Any]:
     """rewriter_loop 打桩：产出含原位角标的确定性正文、章节摘要与自检结果。
 
     draft 模式承接上一章摘要生成正文；revise 模式在 current_text 基础上
-    逐条附注修订指令，保证两种模式的接口都可空转。
+    逐条附注修订说明的用户指令与规则违规修改指导，保证两种模式的接口都可空转。
 
     正文含 ## 标题行（spec['title'] 已含模板编号「一、」等，原样输出），
     满足章节编号连续唯一校验（issue #18）。
@@ -32,11 +32,14 @@ async def stub_rewriter_loop_run(task: dict[str, Any]) -> dict[str, Any]:
     ]
 
     if task["mode"] == "revise":
-        directives = task.get("revision_directives", [])
-        notes = "".join(
-            f"（修订落实：{directive['instruction']}）" for directive in directives
-        )
-        chapter_text = f"{task.get('current_text', '')}{notes}"
+        note = task.get("revision_note") or {}
+        parts: list[str] = []
+        user_directives = (note.get("user_directives") or "").strip()
+        if user_directives:
+            parts.append(f"（修订落实：{user_directives}）")
+        for entry in note.get("rule_violations", []):
+            parts.append(f"（修订落实：{entry['guidance']}）")
+        chapter_text = f"{task.get('current_text', '')}{''.join(parts)}"
     else:
         paragraphs: list[str] = [f"## {spec['title']}"]
         prev_summary = task["prev_chapter_summary"]

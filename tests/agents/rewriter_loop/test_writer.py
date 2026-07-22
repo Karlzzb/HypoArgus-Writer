@@ -75,9 +75,12 @@ def test_写作编排_revise模式_走revise返回改写正文且自检退化通
 ) -> None:
     fake = FakeWriterLlmClient(revise_script=[_envelope("改写后的正文。[m-h-1]", "修订摘要")])
     draft_task["mode"] = "revise"
-    draft_task["revision_directives"] = [
-        {"type": "rewrite_only", "instruction": "精简第一段"}
-    ]
+    draft_task["revision_note"] = {
+        "user_directives": "精简第一段",
+        "rule_violations": [],
+        "conflict_hints": [],
+        "passed": True,
+    }
     draft_task["current_text"] = "现有正文。[m-h-1]"
     run = make_writer_run(fake)
     result = asyncio.run(run(draft_task))

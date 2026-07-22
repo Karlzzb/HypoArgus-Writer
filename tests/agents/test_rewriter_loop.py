@@ -85,19 +85,28 @@ def test_改写打桩_draft模式_返回字段与原位角标合规() -> None:
     assert set(result["self_check"].keys()) == {"citations_ok", "issues"}
 
 
-def test_改写打桩_revise模式_保留原文并落实每条指令() -> None:
+def test_改写打桩_revise模式_保留原文并落实修订说明() -> None:
     adapter = make_stub_rewriter_loop()
-    directives = [
-        {"type": "rewrite_only", "instruction": "精简第一段"},
-        {"type": "evidence_augmented", "instruction": "为论点乙补充数据佐证"},
-    ]
     task = _make_draft_task()
     task["mode"] = "revise"
-    task["revision_directives"] = directives
+    task["revision_note"] = {
+        "user_directives": "精简第一段",
+        "rule_violations": [
+            {
+                "rule": "hypothesis_no_support",
+                "location_excerpt": "",
+                "guidance": "为论点乙补充数据佐证",
+                "severity": "error",
+            }
+        ],
+        "conflict_hints": [],
+        "passed": False,
+    }
     task["current_text"] = "现有正文：论点甲与论点乙的初稿。[m-h-1]"
     result = asyncio.run(adapter.run(task))
 
     chapter_text = result["chapter_text"]
     assert task["current_text"] in chapter_text
-    for directive in directives:
-        assert directive["instruction"] in chapter_text
+    # 打桩逐项附注修订说明的用户指令与违规修改指导。
+    assert "精简第一段" in chapter_text
+    assert "为论点乙补充数据佐证" in chapter_text
