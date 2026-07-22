@@ -25,9 +25,11 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 def test_空转整跑_事件流完整且产出最终结果() -> None:
     proc = _run()
     assert proc.returncode == 0, proc.stderr
-    # 整跑走真编排：进度事件全链条打印（含空转固定触发的修订环节）。
-    for step in ("llm_call_start", "lint_done", "audit_done", "revise_triggered"):
-        assert step in proc.stdout
+    # 整跑走真编排（ADR-0006 T3 纯写作链路）：只发唯一一对写作调用事件，
+    # 不再打印 lint_done / audit_done / revise_triggered（质检已移出 rewriter）。
+    assert "llm_call_start" in proc.stdout and "llm_call_end" in proc.stdout
+    for absent in ("lint_done", "audit_done", "revise_triggered"):
+        assert absent not in proc.stdout
     assert "subagent_start" in proc.stdout and "subagent_end" in proc.stdout
     assert "最终产物（RewriteResult）" in proc.stdout
     assert "citations_ok" in proc.stdout

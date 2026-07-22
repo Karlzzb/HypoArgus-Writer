@@ -23,11 +23,11 @@ from assembly.context_assembler import assemble
 from domain.doc_types import carried_doc_facts
 from domain.state import (
     ChapterDraft,
-    SelfCheck,
     WorkflowStatus,
     WritingAgentState,
 )
-from agents.contracts import RewriteTask, Subagent
+from agents.contracts import Subagent
+from nodes.chapter_write_loop import resolve_max_rewrites, run_chapter_write_loop
 from nodes.writing_orchestrator import (
     chapter_by_id,
     chapter_spec_payload,
@@ -78,12 +78,19 @@ def draft_send_payloads(state: WritingAgentState) -> list[DraftSendPayload]:
 
 def make_chapter_drafter_node(
     rewriter_loop: Subagent,
+    chapter_reviewer: Subagent,
     assembler_config: AssemblerConfig | None = None,
+    *,
+    max_rewrites: int | None = None,
 ) -> ChapterDrafterNode:
-    """构造 chapter_drafter 节点函数：注入 rewriter_loop 适配器。
+    """构造 chapter_drafter 节点函数：注入 rewriter_loop 与 chapter_reviewer 适配器。
 
-    assembler_config 为 None 时在节点执行时读取环境变量装配配置。
+    每个并行首写分支跑一章的写→评→重写循环（ADR-0006 T3，见 chapter_write_loop）：
+    write(draft) → review → 至多 max_rewrites 次 rewrite，无终态复审。
+    assembler_config 为 None 时在节点执行时读取环境变量装配配置；
+    max_rewrites 为 None 时读环境变量 CHAPTER_MAX_REWRITES（缺省 1）。
     """
+    resolved_max_rewrites = resolve_max_rewrites(max_rewrites)
 
     def node(state: DraftSendPayload) -> WritingAgentState:
         config = assembler_config
@@ -95,24 +102,17 @@ def make_chapter_drafter_node(
             state, "chapter_drafter", config=config, chapter_id=chapter_id
         )
         doc_type, doc_variant = carried_doc_facts(state)
-        task = RewriteTask(
-            mode="draft",
-            doc_type=doc_type,
-            doc_variant=doc_variant,
-            chapter_spec=chapter_spec_payload(chapter),
-            materials=materials_from_segment(context.text("chapter_materials")),
-            prev_chapter_summary=context.text("summary_chain"),
-        )
-        result = asyncio.run(rewriter_loop.run(dict(task)))
-        self_check = result["self_check"]
-        draft = ChapterDraft(
-            chapter_id=chapter_id,
-            text=result["chapter_text"],
-            summary=result["chapter_summary"],
-            self_check=SelfCheck(
-                citations_ok=self_check["citations_ok"],
-                issues=self_check["issues"],
-            ),
+        draft = asyncio.run(
+            run_chapter_write_loop(
+                rewriter_loop=rewriter_loop,
+                chapter_reviewer=chapter_reviewer,
+                max_rewrites=resolved_max_rewrites,
+                doc_type=doc_type,
+                doc_variant=doc_variant,
+                chapter_spec=chapter_spec_payload(chapter),
+                materials=materials_from_segment(context.text("chapter_materials")),
+                prev_chapter_summary=context.text("summary_chain"),
+            )
         )
         return WritingAgentState(
             chapter_drafts=[draft],

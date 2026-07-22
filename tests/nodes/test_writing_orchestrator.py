@@ -65,6 +65,36 @@ class 记录式假改写适配器(SubagentAdapter):
         }
 
 
+class 回带自检假评审适配器(SubagentAdapter):
+    """按章节回带与 rewriter 一致自检、且判 passed=True 的假 chapter_reviewer。
+
+    首写循环在评审通过时以评审的 self_check 作为该章成稿自检。为验证 rewriter
+    的逐章自检（ch2 失败带问题清单）确实入 State，评审须原样回带 rewriter 对
+    该章产出的自检，并判通过以走干净退出路径（单次 rewriter 草稿调用）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("chapter_reviewer", self._run)
+        self.tasks: list[dict[str, Any]] = []
+
+    async def _run(self, task: dict[str, Any]) -> dict[str, Any]:
+        self.tasks.append(task)
+        chapter_id = task["chapter_spec"]["id"]
+        if chapter_id == "ch2":
+            self_check = {"citations_ok": False, "issues": ["角标 m-x 不在素材列表中"]}
+        else:
+            self_check = {"citations_ok": True, "issues": []}
+        return {
+            "revision_note": {
+                "user_directives": "",
+                "rule_violations": [],
+                "conflict_hints": [],
+                "passed": True,
+            },
+            "self_check": self_check,
+        }
+
+
 class 记录式假检索适配器(SubagentAdapter):
     """记录任务包并按章节返回预设素材的假 search_agent。"""
 
@@ -170,7 +200,9 @@ def _drive_to_completion(
 
 def _run_node() -> tuple[记录式假改写适配器, WritingAgentState]:
     adapter = 记录式假改写适配器()
-    node = make_writing_orchestrator_node(adapter, 记录式假检索适配器())
+    node = make_writing_orchestrator_node(
+        adapter, 记录式假检索适配器(), chapter_reviewer=回带自检假评审适配器()
+    )
     final, _, _ = _drive_to_completion(node, _make_state())
     return adapter, final
 

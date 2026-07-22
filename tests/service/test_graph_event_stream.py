@@ -19,6 +19,7 @@ from service.graph_event_stream import GraphRunEmitter
 from llm.llm_client import FakeLLM
 from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
 from domain.state import WorkflowStatus, initial_state
+from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.rewriter_loop import make_stub_rewriter_loop
 from agents.search_agent import make_stub_search_agent
 from tests.llm_response_plans import FIRST_PASS_RESPONSES, FRAMEWORK_KEYED_RESPONSES
@@ -425,6 +426,7 @@ def _run_first_pass(events: list[EventEnvelope]):
         checkpointer=InMemorySaver(serde=checkpoint_serializer()),
         search_agent=make_stub_search_agent(emitter.make_subagent_hook()),
         rewriter_loop=make_stub_rewriter_loop(emitter.make_subagent_hook()),
+        chapter_reviewer=make_stub_chapter_reviewer(emitter.make_subagent_hook()),
     )
     config: RunnableConfig = {"configurable": {"thread_id": f"evt-{uuid.uuid4()}"}}
     emitter.emit_root(
@@ -518,13 +520,18 @@ def test_真图集成_子智能体事件成对且挂当前节点():
             node_start_ids.setdefault(event.unit, []).append(event.event_id)
     starts = [event for event in events if event.type == "subagent_start"]
     ends = [event for event in events if event.type == "subagent_end"]
-    # 2 章：search_agent 每章一次、rewriter_loop 每章（每超步）一次，成对出现。
-    assert len(starts) == len(ends) == 4
-    assert {event.unit for event in starts} == {"search_agent", "rewriter_loop"}
+    # 2 章：search_agent 每章一次、rewriter_loop（draft）每章一次、
+    # chapter_reviewer（review）每章一次，成对出现。
+    assert len(starts) == len(ends) == 6
+    assert {event.unit for event in starts} == {
+        "search_agent",
+        "rewriter_loop",
+        "chapter_reviewer",
+    }
 
-    # 并行扇出下每章的子智能体精确挂到本章所属分支的 node_start
+    # 并行扇出下每章的检索/首写子智能体精确挂到本章所属分支的 node_start
     #（按 node_start 载荷里的 chapter_id 配对，跨线程到达顺序无关）：
-    # search_agent 挂检索分支，draft 模式的 rewriter_loop 挂首写分支。
+    # search_agent 挂检索分支，draft 的 rewriter_loop 挂本章首写分支。
     branch_start_by_key = {
         (event.unit, event.payload["chapter_id"]): event.event_id
         for event in events
@@ -532,25 +539,42 @@ def test_真图集成_子智能体事件成对且挂当前节点():
         and event.unit in {"reference_orchestrator", "chapter_drafter"}
     }
     for event in starts:
-        branch_node = (
-            "reference_orchestrator"
-            if event.unit == "search_agent"
-            else "chapter_drafter"
-        )
-        assert event.parent_id == branch_start_by_key[
-            (branch_node, event.payload["chapter_id"])
-        ]
+        if event.unit == "search_agent":
+            assert event.parent_id == branch_start_by_key[
+                ("reference_orchestrator", event.payload["chapter_id"])
+            ]
+        elif event.unit == "rewriter_loop":
+            assert event.parent_id == branch_start_by_key[
+                ("chapter_drafter", event.payload["chapter_id"])
+            ]
+
+    # 章级评审在首写节点内串行发起（write→review 同超步），不带独立分支键，
+    # 故按「当前执行中节点，未知退根事件」挂父：并行扇出下当前节点判定有竞态，
+    # 父链要么落在某个 chapter_drafter 的 node_start，要么退回本次根事件。
+    root_id = events[0].event_id
+    chapter_drafter_start_ids = {
+        event.event_id
+        for event in events
+        if event.type == "node_start" and event.unit == "chapter_drafter"
+    }
+    reviewer_parents = chapter_drafter_start_ids | {root_id}
+    for event in starts:
+        if event.unit == "chapter_reviewer":
+            assert event.parent_id in reviewer_parents
 
     # subagent_end 挂对应的 subagent_start：按单元名配对顺序逐一对应。
     start_ids = {event.event_id for event in starts}
     for event in ends:
         assert event.parent_id in start_ids
 
-    # 启停载荷携带任务上下文：章节 id 可判定时必带，mode 仅改写任务有。
+    # 启停载荷携带任务上下文：章节 id 可判定时必带；
+    # rewriter_loop 首写为 draft、chapter_reviewer 章评为 review、检索无 mode。
     for event in starts + ends:
         assert event.payload["chapter_id"] in {"ch1", "ch2"}
         if event.unit == "rewriter_loop":
             assert event.payload["mode"] == "draft"
+        elif event.unit == "chapter_reviewer":
+            assert event.payload["mode"] == "review"
         else:
             assert event.payload["mode"] is None
 

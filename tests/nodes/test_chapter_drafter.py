@@ -8,6 +8,7 @@ from typing import Any
 
 from langgraph.types import Send
 
+from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.contracts import SubagentAdapter
 from assembly.assembler_config import AssemblerConfig
 from domain.state import (
@@ -127,7 +128,9 @@ def test_节点单分支_任务包承接规划摘要链且只回写reducer字段
         }
 
     node = make_chapter_drafter_node(
-        SubagentAdapter("rewriter_loop", _recording_run), _CONFIG
+        SubagentAdapter("rewriter_loop", _recording_run),
+        make_stub_chapter_reviewer(),
+        _CONFIG,
     )
     payloads = draft_send_payloads(_state())
     ch2_payload = payloads[1]
@@ -161,7 +164,9 @@ def test_节点单分支_首章规划摘要链为空串():
         }
 
     node = make_chapter_drafter_node(
-        SubagentAdapter("rewriter_loop", _recording_run), _CONFIG
+        SubagentAdapter("rewriter_loop", _recording_run),
+        make_stub_chapter_reviewer(),
+        _CONFIG,
     )
     node(draft_send_payloads(_state())[0])
     assert tasks[0]["prev_chapter_summary"] == ""

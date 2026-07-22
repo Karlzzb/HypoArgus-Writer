@@ -11,6 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from llm import observability
+from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.rewriter_loop import make_stub_rewriter_loop
 from agents.search_agent import make_stub_search_agent
 from domain.units import MAIN_NODES
@@ -232,9 +233,11 @@ def captured_spans():
         graph = build_graph(
             llm_factory=lambda unit: fake,
             checkpointer=InMemorySaver(serde=checkpoint_serializer()),
-            # 本测试验收 span 覆盖而非子智能体真实现：显式注入两个打桩。
+            # 本测试验收 span 覆盖而非子智能体真实现：显式注入打桩子智能体。
+            # 章级评审打桩不调 LLM 工厂，故不新增 generation span。
             search_agent=make_stub_search_agent(),
             rewriter_loop=make_stub_rewriter_loop(),
+            chapter_reviewer=make_stub_chapter_reviewer(),
         )
         config: RunnableConfig = {"configurable": {"thread_id": "obs-test"}}
         with observability.run_span(
