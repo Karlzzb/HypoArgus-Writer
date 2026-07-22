@@ -126,6 +126,43 @@ def _format_directives(task: dict[str, Any]) -> str:
     return "\n".join(f"- [{d['type']}] {d['instruction']}" for d in directives)
 
 
+def _format_note_entries(entries: Sequence[dict[str, Any]]) -> str:
+    """把分区式修订说明的规则违规条目逐条渲染：规则名 + 位置摘录 + 修改指导。"""
+    lines: list[str] = []
+    for entry in entries:
+        location = entry.get("location_excerpt") or ""
+        loc = f"（位置：{location}）" if location.strip() else ""
+        lines.append(f"- [{entry['rule']}]{loc} {entry['guidance']}")
+    return "\n".join(lines)
+
+
+def _format_revision_note(note: dict[str, Any]) -> str:
+    """按优先级渲染分区式修订说明：用户指令 > error 违规 > warn 违规 > 冲突提示。
+
+    评审产出的 ``RevisionNotePayload``（ADR-0006）渲染为分区块：用户指令区逐字
+    落实（最高优先）、error 级违规必须修复、warn 级违规建议修复、冲突提示处以
+    用户指令为准。任一区为空则整段省略，不产出空标题。
+    """
+    sections: list[str] = []
+    user_directives = (note.get("user_directives") or "").strip()
+    if user_directives:
+        sections.append(f"【用户指令（最高优先，逐字落实）】\n{user_directives}")
+    violations = note.get("rule_violations") or []
+    errors = [entry for entry in violations if entry.get("severity") == "error"]
+    warns = [entry for entry in violations if entry.get("severity") == "warn"]
+    if errors:
+        sections.append("【必须修复的违规（error 级）】\n" + _format_note_entries(errors))
+    if warns:
+        sections.append("【建议修复的违规（warn 级）】\n" + _format_note_entries(warns))
+    conflicts = note.get("conflict_hints") or []
+    if conflicts:
+        sections.append(
+            "【冲突提示（与上方用户指令抵触处，以用户指令为准）】\n"
+            + "\n".join(f"- {c['description']}" for c in conflicts)
+        )
+    return "\n".join(sections)
+
+
 def _build_context_block(task: dict[str, Any]) -> str:
     """draft / revise 共用的上下文块（章节骨架 / 字数目标 / 素材池 / 假说 / 衔接），不含尾部指令。
 
@@ -192,18 +229,28 @@ def _build_revise_user(
     *,
     fix_violations: Sequence[Violation] | None,
 ) -> str:
-    """revise 的 user 提示词：同一上下文块 + 现有正文 + 定向修订指令。
+    """revise 的 user 提示词：同一上下文块 + 现有正文 + 修订说明 / 修订指令。
 
-    未被指令覆盖的内容与角标一律保持原样；``fix_violations`` 置位时追加现有
-    正文的既存违规清单（ADR-0004：revise 与 fix 合并——既存违规经预 lint 得到，
-    与修订指令在同一次调用内一并解决，修复违规优先于「保持原样」）。
+    优先渲染分区式修订说明（``revision_note``，评审产物 ADR-0006）：按
+    用户指令 > error 违规 > warn 违规 > 冲突提示的优先级分区呈现。为兼容尚未
+    迁移的人工修订指令流（``revision_directives``，删除留 T3b），两者并存时都渲染。
+    未被覆盖的内容与角标一律保持原样；``fix_violations`` 为旧的既存违规清单
+    （ADR-0004，纯写作链路下已不再从 rewriter 传入，保留仅供调测脚本复用）。
     """
     base = _build_context_block(task)
-    prompt = (
-        f"{base}\n现有正文：\n{task.get('current_text', '')}\n"
-        f"修订指令（仅按下列指令定向修改；未被指令覆盖的内容与 [素材id] 角标一律保持原样）：\n"
-        f"{_format_directives(task)}\n"
-    )
+    prompt = f"{base}\n现有正文：\n{task.get('current_text', '')}\n"
+    note = task.get("revision_note")
+    if note:
+        prompt += (
+            "修订说明（按优先级落实：用户指令 > error 违规 > warn 违规；"
+            "未被覆盖的内容与 [素材id] 角标一律保持原样）：\n"
+            f"{_format_revision_note(note)}\n"
+        )
+    if task.get("revision_directives"):
+        prompt += (
+            "修订指令（仅按下列指令定向修改；未被指令覆盖的内容与 [素材id] 角标一律保持原样）：\n"
+            f"{_format_directives(task)}\n"
+        )
     if fix_violations:
         prompt += (
             f"现有正文另检出以下违规，请在本次修订中一并规避"

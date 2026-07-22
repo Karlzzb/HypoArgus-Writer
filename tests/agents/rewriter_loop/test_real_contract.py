@@ -32,8 +32,8 @@ _DRAFT_TEXT = (
 def test_改写真实现_draft模式_返回字段与原位角标合规(
     draft_task: dict[str, Any],
 ) -> None:
-    # 顺序应答：一次写作调用 + 一次自审（素材池非空必自审）。
-    fake = FakeLLM([writer_envelope(_DRAFT_TEXT, "一行公文摘要"), AUDIT_EMPTY_RESPONSE])
+    # 纯写作链路（ADR-0006 T3）：draft 只发一次写作调用，不再自审、不再 lint。
+    fake = FakeLLM([writer_envelope(_DRAFT_TEXT, "一行公文摘要")])
     adapter = make_rewriter_loop(lambda unit: fake)
     result = asyncio.run(adapter.run(draft_task))
 
@@ -54,7 +54,7 @@ def test_改写真实现_draft模式_返回字段与原位角标合规(
     # prev_chapter_summary 非空时正文承接该摘要文本。
     assert draft_task["prev_chapter_summary"] in chapter_text
 
-    # 干净正文 + 空自审：无违规不触发修订，自检通过。
+    # 成稿：self_check 恒退化为引用通过、无 issues（终态质检交由评审与循环层）。
     assert set(result["self_check"].keys()) == {"citations_ok", "issues"}
     assert result["self_check"] == {"citations_ok": True, "issues": []}
 
@@ -63,9 +63,8 @@ def test_改写真实现_draft模式_返回字段与原位角标合规(
     assert draft_task["prev_chapter_summary"] in write_prompt
     assert "m-h-1" in write_prompt and "m-h-2" in write_prompt
     assert "m-fail-x" not in write_prompt
-    # 第二次调用是自审：真自审链路确实执行。
-    assert "【章节自审】" in joined_prompt(fake.calls[1])
-    assert len(fake.calls) == 2
+    # 纯写作链路只发一次调用：无自审、无 lint 的第二次调用。
+    assert len(fake.calls) == 1
 
 
 def test_改写真实现_revise模式_保留原文并落实每条指令(

@@ -43,6 +43,7 @@ from domain.state import (
     WorkflowStatus,
     WritingAgentState,
 )
+from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.contracts import (
     ChapterSpecPayload,
     HypothesisPayload,
@@ -54,6 +55,7 @@ from agents.contracts import (
     Subagent,
     material_from_payload,
 )
+from nodes.chapter_write_loop import resolve_max_rewrites, run_chapter_write_loop
 
 # 单超步的判别结果：模式（修订 / 终审回退 / 首写）与目标章 id。
 WritingStep = tuple[Literal["revise", "fallback", "draft"], str]
@@ -193,24 +195,28 @@ def make_writing_orchestrator_node(
     search_agent: Subagent,
     assembler_config: AssemblerConfig | None = None,
     chapter_reviewer: Subagent | None = None,
+    *,
+    max_rewrites: int | None = None,
 ) -> WritingOrchestratorNode:
     """构造 writing_orchestrator 节点函数：注入 rewriter_loop 与 search_agent 适配器。
 
-    assembler_config 为 None 时在节点执行时读取环境变量装配配置。
-    chapter_reviewer 为章级评审子智能体的注入接缝（ADR-0006）：本期（T2）只落
-    契约与子智能体本体、接受构图注入（stub 可替换），修订自环消费其修订说明留 T3。
+    assembler_config 为 None 时在节点执行时读取环境变量装配配置；
+    max_rewrites 为 None 时读环境变量 CHAPTER_MAX_REWRITES（缺省 1）。
+    chapter_reviewer 为章级评审子智能体（ADR-0006）：防御性首写分支（_draft_chapter）
+    经其跑写→评→重写循环；未注入时回落打桩评审（正常路径首写由 chapter_drafter
+    并行扇出承担，本分支不在主路径可达）。修订/终审回退分支的评审消费留 T3b。
     """
-    # T3 起于修订/终审回退分支消费评审修订说明；本期仅持有注入引用，保注入链贯通。
-    _reserved_chapter_reviewer = chapter_reviewer
+    effective_chapter_reviewer = chapter_reviewer or make_stub_chapter_reviewer()
+    resolved_max_rewrites = resolve_max_rewrites(max_rewrites)
 
     async def _draft_chapter(
         state: WritingAgentState, chapter: ChapterSpec, config: AssemblerConfig
     ) -> ChapterDraft:
-        """首写单章：素材与前文摘要链经装配入口取得后调 rewriter_loop（mode=draft）。
+        """首写单章：经写→评→重写循环产出成稿（ADR-0006 T3，见 chapter_write_loop）。
 
         前章草稿已逐超步落在 State 的 chapter_drafts 中（本章尚无草稿），
         summary_chain 段由此给出该章之前的全部前章摘要链（超阈值即压缩，
-        未超时为原样拼接；首章为空串），rewriter 由此得到完整前文链。
+        未超时为原样拼接；首章为空串），循环由此得到完整前文链。
         """
         context = assemble(
             state,
@@ -219,24 +225,15 @@ def make_writing_orchestrator_node(
             chapter_id=chapter.id,
         )
         doc_type, doc_variant = carried_doc_facts(state)
-        task = RewriteTask(
-            mode="draft",
+        return await run_chapter_write_loop(
+            rewriter_loop=rewriter_loop,
+            chapter_reviewer=effective_chapter_reviewer,
+            max_rewrites=resolved_max_rewrites,
             doc_type=doc_type,
             doc_variant=doc_variant,
             chapter_spec=chapter_spec_payload(chapter),
             materials=materials_from_segment(context.text("chapter_materials")),
             prev_chapter_summary=context.text("summary_chain"),
-        )
-        result = await rewriter_loop.run(dict(task))
-        self_check = result["self_check"]
-        return ChapterDraft(
-            chapter_id=chapter.id,
-            text=result["chapter_text"],
-            summary=result["chapter_summary"],
-            self_check=SelfCheck(
-                citations_ok=self_check["citations_ok"],
-                issues=self_check["issues"],
-            ),
         )
 
     async def _augment_evidence(

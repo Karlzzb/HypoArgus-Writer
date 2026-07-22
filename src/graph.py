@@ -194,7 +194,8 @@ def build_graph(
         rewriter_loop or make_rewriter_loop(llm_factory)
     )
     # chapter_reviewer 未注入时用真实现工厂（ADR-0006）：模型保持 plus（回落全局配置）。
-    # 本期只落契约与本体、接受构图注入（stub 可替换），修订自环消费其产物留 T3。
+    # 首写路径经章级写→评→重写循环消费其修订说明（ADR-0006 T3）；
+    # 修订/终审回退分支的评审消费留 T3b。
     effective_chapter_reviewer = observability.wrap_subagent(
         chapter_reviewer or make_chapter_reviewer(llm_factory)
     )
@@ -207,7 +208,7 @@ def build_graph(
             effective_search_agent, assembler_config
         ),
         "chapter_drafter": make_chapter_drafter_node(
-            effective_rewriter_loop, assembler_config
+            effective_rewriter_loop, effective_chapter_reviewer, assembler_config
         ),
         "writing_orchestrator": make_writing_orchestrator_node(
             effective_rewriter_loop,
