@@ -34,6 +34,21 @@ _MD_TABLE_SEP = re.compile(r"^\s*\|[\s:|-]*-{3,}[\s:|-]*\|")
 # 只压横向空白（空格/制表/全角空格），不吞换行——换行是标题/段落结构，不可丢。
 _CJK_WS = re.compile(r"(?<=[一-鿿])[ \t　]+(?=[一-鿿])")
 
+# 自审违规的规则名前缀：规则名 = 前缀 + 裁决项 id，与 lint 侧规则同族命名。
+AUDIT_RULE_PREFIX = "self_audit_"
+
+# 引用类违规规则名（单一事实源）：rewriter_loop 的 self_check 与 chapter_reviewer
+# 的自检都据此折叠——终态正文命中任一条则 citations_ok=False。自审裁决项中仅
+# 「派生未标」属引用类；语义级裁决项（对比叙事/论证质量/连贯等）折入 issues 但
+# 不影响引用门禁。跨包共用此常量满足「评审跨包引用纯函数、单一事实源」。
+CITATION_RULES = frozenset(
+    {
+        "unknown_material_marker",
+        "unmarked_derived_content",
+        f"{AUDIT_RULE_PREFIX}unmarked_derived_content",
+    }
+)
+
 
 class Violation(BaseModel):
     """校验器单条违规。"""
@@ -197,6 +212,15 @@ class AuditItem:
     label: str
     criteria: str
     requires_materials: bool = False
+    severity: str = "error"
+    """裁决项定级（ADR-0006）：error 阻断、warn 仅提示；缺省 error（既有条目语义不变）。
+
+    各文种经 ssot-config 逐条自声明 severity 实现「定级」，文种层追加自身裁决项
+    实现文种粒度「开关」（两层并集合并语义，与 lint 规则同源）。
+    """
+
+
+_AUDIT_SEVERITIES = frozenset({"error", "warn"})
 
 
 def load_audit_items(
@@ -204,20 +228,26 @@ def load_audit_items(
 ) -> list[AuditItem]:
     """按文种加载合并后的自审裁决项（通用层在前、文种层追加，同 lint 合并语义）。
 
-    条目缺 id 或 criteria 属配置错误，立即抛出——ssot-config 是随包携带的
-    单一事实源，坏配置应在加载时暴露，不做静默容错。
+    条目缺 id 或 criteria、或 severity 非法（须 error/warn）属配置错误，立即抛出——
+    ssot-config 是随包携带的单一事实源，坏配置应在加载时暴露，不做静默容错。
     """
     config = load_config(doc_type, style_guides_dir=style_guides_dir)
     items: list[AuditItem] = []
     for entry in config.get("audit_items") or []:
         if not isinstance(entry, dict) or not entry.get("id") or not entry.get("criteria"):
             raise ValueError(f"audit_items 条目须为含 id 与 criteria 的映射：{entry!r}")
+        severity = str(entry.get("severity", "error"))
+        if severity not in _AUDIT_SEVERITIES:
+            raise ValueError(
+                f"audit_items 条目 severity 须为 error/warn：{entry!r}"
+            )
         items.append(
             AuditItem(
                 id=str(entry["id"]),
                 label=str(entry.get("label") or entry["id"]),
                 criteria=str(entry["criteria"]).strip(),
                 requires_materials=bool(entry.get("requires_materials", False)),
+                severity=severity,
             )
         )
     return items

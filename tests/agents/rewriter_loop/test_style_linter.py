@@ -1297,18 +1297,31 @@ def _audit_ids(doc_type: str) -> list[str]:
     return [item.id for item in load_audit_items(doc_type)]
 
 
-def test_裁决项加载_通用公文_仅通用层派生未标() -> None:
+# 通用层四维裁决项（ADR-0006）：rewriter in-loop 自审与 chapter_reviewer 章级评审共用。
+_GENERIC_AUDIT_IDS = [
+    "unmarked_derived_content",
+    "weak_material_assertion",
+    "intra_chapter_coherence",
+    "summary_chain_consistency",
+]
+
+
+def test_裁决项加载_通用公文_四维裁决项含定级() -> None:
     items = load_audit_items("通用公文")
-    assert [item.id for item in items] == ["unmarked_derived_content"]
-    assert items[0].label == "派生未标"
-    assert items[0].requires_materials is True
-    assert "excerpt 原文" in items[0].criteria
+    assert [item.id for item in items] == _GENERIC_AUDIT_IDS
+    by_id = {item.id: item for item in items}
+    # 派生未标 / 论证质量为 error 且依赖素材；章内连贯 / 摘要链一致为 warn 且不依赖素材。
+    assert (by_id["unmarked_derived_content"].severity, by_id["unmarked_derived_content"].requires_materials) == ("error", True)
+    assert (by_id["weak_material_assertion"].severity, by_id["weak_material_assertion"].requires_materials) == ("error", True)
+    assert (by_id["intra_chapter_coherence"].severity, by_id["intra_chapter_coherence"].requires_materials) == ("warn", False)
+    assert (by_id["summary_chain_consistency"].severity, by_id["summary_chain_consistency"].requires_materials) == ("warn", False)
+    assert "excerpt 原文" in by_id["unmarked_derived_content"].criteria
 
 
 def test_裁决项加载_调研报告_通用层在前文种层追加() -> None:
-    # 并集保序（与 lint 列表合并同机制）：通用层「派生未标」在前，文种层语义裁决项追加。
+    # 并集保序（与 lint 列表合并同机制）：通用层四维在前，文种层语义裁决项追加。
     assert _audit_ids("调研报告") == [
-        "unmarked_derived_content",
+        *_GENERIC_AUDIT_IDS,
         "comparison_narrative",
         "four_step_progression",
     ]
@@ -1322,17 +1335,37 @@ def test_裁决项加载_调研报告_通用层在前文种层追加() -> None:
 
 def test_裁决项加载_人培方案与汇报材料_不含调研报告语义裁决项() -> None:
     # 按文种分派：人培方案自审不再被问对比叙事等无关裁决项；无专属指南文种回落通用层。
-    assert _audit_ids("人才培养方案") == ["unmarked_derived_content"]
-    assert _audit_ids("汇报材料") == ["unmarked_derived_content"]
+    assert _audit_ids("人才培养方案") == _GENERIC_AUDIT_IDS
+    assert _audit_ids("汇报材料") == _GENERIC_AUDIT_IDS
+
+
+def test_裁决项加载_severity非法_配置错误立即抛出(tmp_path: Path) -> None:
+    (tmp_path / "通用公文.md").write_text(
+        "# 指南\n\n<!-- ssot-config-begin\n"
+        "audit_items:\n  - id: x\n    criteria: 判定\n    severity: fatal\n"
+        "ssot-config-end -->\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="severity"):
+        load_audit_items("通用公文", style_guides_dir=tmp_path)
 
 
 def test_裁决项适用过滤_无素材剔除依赖素材项_语义项保留() -> None:
     survey_items = load_audit_items("调研报告")
     remaining = applicable_audit_items(survey_items, has_materials=False)
-    assert [item.id for item in remaining] == ["comparison_narrative", "four_step_progression"]
+    # 无素材：剔除依赖素材的 派生未标/论证质量，保留不依赖素材的 连贯/摘要链一致 与调研语义项。
+    assert [item.id for item in remaining] == [
+        "intra_chapter_coherence",
+        "summary_chain_consistency",
+        "comparison_narrative",
+        "four_step_progression",
+    ]
     assert applicable_audit_items(survey_items, has_materials=True) == survey_items
-    # 通用公文只有依赖素材的裁决项：无素材时适用集为空（编排层据此跳过自审）。
-    assert applicable_audit_items(load_audit_items("通用公文"), has_materials=False) == []
+    # 通用公文无素材：仍保留两条不依赖素材的 warn 裁决项（连贯 / 摘要链一致）。
+    assert [item.id for item in applicable_audit_items(load_audit_items("通用公文"), has_materials=False)] == [
+        "intra_chapter_coherence",
+        "summary_chain_consistency",
+    ]
 
 
 def test_裁决项加载_条目缺id或criteria_配置错误立即抛出(tmp_path: Path) -> None:

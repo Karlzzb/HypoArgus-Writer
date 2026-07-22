@@ -25,6 +25,8 @@ from typing import Any
 from agents.contracts import SelfCheckPayload, SubagentAdapter
 from agents.rewriter_loop.llm_adapter import LlmWriterClient
 from agents.rewriter_loop.style_linter import (
+    AUDIT_RULE_PREFIX,
+    CITATION_RULES,
     Violation,
     audit_items_for,
     lint,
@@ -41,18 +43,9 @@ from domain.doc_types import carried_doc_facts
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook
 from llm.llm_client import LLMFactory
 
-# 自审违规的规则名前缀：规则名 = 前缀 + 裁决项 id，与 lint 侧规则同族命名。
-_AUDIT_RULE_PREFIX = "self_audit_"
-
-# 引用类违规规则名：修前检出任一条则 citations_ok=False。自审裁决项中仅
-# 「派生未标」属引用类；语义级裁决项（对比叙事等）折入 issues 但不影响引用门禁。
-_CITATION_RULES = frozenset(
-    {
-        "unknown_material_marker",
-        "unmarked_derived_content",
-        f"{_AUDIT_RULE_PREFIX}unmarked_derived_content",
-    }
-)
+# 引用类规则常量单源于 style_linter（ADR-0006）：rewriter 与 chapter_reviewer 共用同一定义。
+_AUDIT_RULE_PREFIX = AUDIT_RULE_PREFIX
+_CITATION_RULES = CITATION_RULES
 
 
 def audit_issues_to_violations(issues: Sequence[AuditIssue]) -> list[Violation]:

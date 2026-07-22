@@ -109,6 +109,41 @@ class SelfCheckPayload(TypedDict):
     issues: list[str]
 
 
+class RuleViolationEntry(TypedDict):
+    """分区式修订说明·规则违规区单条：位置摘录 + 修改指导 + error/warn 定级。
+
+    确定性 lint 违规与四维 LLM 自审违规折成同形一条：``location_excerpt`` 对
+    确定性违规可为空串（lint 不总能定位到片段），自审违规给正文片段；
+    ``severity`` 是引用类门禁之外的软/硬定级依据（error 阻断、warn 提示）。
+    """
+
+    rule: str
+    location_excerpt: str
+    guidance: str
+    severity: Literal["error", "warn"]
+
+
+class ConflictHintEntry(TypedDict):
+    """分区式修订说明·冲突提示区单条：用户指令与规则冲突处，用户指令优先。"""
+
+    description: str
+
+
+class RevisionNotePayload(TypedDict):
+    """分区式修订说明（chapter_reviewer 产物，部分取代 ADR-0004 的 self_check 折叠）。
+
+    四区语义：用户指令区（原文逐字保留、零改写）、规则违规区（逐条含位置摘录、
+    修改指导与定级）、冲突提示区（用户指令优先）、passed 结论（error 级违规为空即过）。
+    """
+
+    user_directives: str
+    """用户指令区：revise 时取用户意见原文、逐字保留；draft 无用户意见为空串。"""
+    rule_violations: list[RuleViolationEntry]
+    conflict_hints: list[ConflictHintEntry]
+    passed: bool
+    """error 级违规为空即过（warn 级不阻断）。"""
+
+
 class RewriteTask(TypedDict):
     """rewriter_loop 任务包：统包首写（draft）与纯改写（revise）两种模式。"""
 
@@ -121,6 +156,9 @@ class RewriteTask(TypedDict):
     materials: list[MaterialPayload]
     prev_chapter_summary: str
     revision_directives: NotRequired[list[RevisionDirectivePayload]]
+    """旧修订指令字段（ADR-0004）：与 ``revision_note`` 并存（expand），删除留 T3b。"""
+    revision_note: NotRequired[RevisionNotePayload]
+    """新分区式修订说明字段（ADR-0006）：本期仅落契约，rewriter 消费留 T3。"""
     current_text: NotRequired[str]
 
 
@@ -135,6 +173,33 @@ class RewriteResult(TypedDict):
     """回带任务包携带的文种：产物按哪套文种规则产出，随结果自证、供排障回放。"""
     doc_variant: str | None
     """回带任务包携带的变体，语义同 doc_type。"""
+
+
+class ReviewTask(TypedDict):
+    """chapter_reviewer 任务包：对一章成稿做章级评审（确定性 lint + 四维自审）。
+
+    输入齐备一章评审所需的全部上下文：章骨架（含 id/论点/假说）、章文本、素材、
+    摘要链（前章摘要）；revise 模式另携用户意见原文供修订说明的用户指令区逐字保留。
+    """
+
+    mode: Literal["review", "revise"]
+    doc_type: str
+    """文种：与写作任务包同源，经契约携带（ADR-0005），评审按文种加载校验与裁决项。"""
+    doc_variant: str | None
+    chapter_spec: ChapterSpecPayload
+    chapter_text: str
+    materials: list[MaterialPayload]
+    prev_chapter_summary: str
+    user_feedback: NotRequired[str]
+    """revise 时的用户意见原文：逐字进入修订说明的用户指令区，评审不改写。"""
+
+
+class ReviewResult(TypedDict):
+    """chapter_reviewer 评审结果：分区式修订说明 + 按引用类规则折叠的自检。"""
+
+    revision_note: RevisionNotePayload
+    self_check: SelfCheckPayload
+    """按引用类规则折叠：终态正文仍存引用类违规则 citations_ok=False，交全局终审裁决。"""
 
 
 @runtime_checkable

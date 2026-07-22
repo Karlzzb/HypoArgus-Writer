@@ -40,6 +40,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
+from agents.chapter_reviewer import make_chapter_reviewer
 from agents.contracts import Subagent
 from agents.rewriter_loop import make_rewriter_loop
 from agents.search_agent import make_search_agent
@@ -170,6 +171,7 @@ def build_graph(
     checkpointer: BaseCheckpointSaver | None = None,
     search_agent: Subagent | None = None,
     rewriter_loop: Subagent | None = None,
+    chapter_reviewer: Subagent | None = None,
     citation_max_retries: int | None = None,
     assembler_config: AssemblerConfig | None = None,
 ) -> CompiledStateGraph:
@@ -191,6 +193,11 @@ def build_graph(
     effective_rewriter_loop = observability.wrap_subagent(
         rewriter_loop or make_rewriter_loop(llm_factory)
     )
+    # chapter_reviewer 未注入时用真实现工厂（ADR-0006）：模型保持 plus（回落全局配置）。
+    # 本期只落契约与本体、接受构图注入（stub 可替换），修订自环消费其产物留 T3。
+    effective_chapter_reviewer = observability.wrap_subagent(
+        chapter_reviewer or make_chapter_reviewer(llm_factory)
+    )
 
     node_functions = {
         "framework_orchestrator": make_framework_orchestrator_node(
@@ -203,7 +210,10 @@ def build_graph(
             effective_rewriter_loop, assembler_config
         ),
         "writing_orchestrator": make_writing_orchestrator_node(
-            effective_rewriter_loop, effective_search_agent, assembler_config
+            effective_rewriter_loop,
+            effective_search_agent,
+            assembler_config,
+            effective_chapter_reviewer,
         ),
         "citation_validator": make_citation_validator_node(
             llm_factory,

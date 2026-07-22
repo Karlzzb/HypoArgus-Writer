@@ -20,8 +20,9 @@ writing_orchestrator 保留修订与终审回退的串行自环。"""
 SUBAGENT_UNITS: tuple[str, ...] = (
     "search_agent",
     "rewriter_loop",
+    "chapter_reviewer",
 )
-"""2 个业务子智能体。"""
+"""3 个业务子智能体（chapter_reviewer 为章级评审，ADR-0006）。"""
 
 RUNTIME_UNITS: tuple[str, ...] = MAIN_NODES + SUBAGENT_UNITS
-"""全部 8 个运行单元。"""
+"""全部 9 个运行单元。"""

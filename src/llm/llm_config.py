@@ -1,6 +1,6 @@
 """运行单元 LLM 配置读取与全局回落。
 
-8 个运行单元各自支持在环境变量中以「单元名前缀 + LLM_MODEL / LLM_BASE_URL /
+9 个运行单元各自支持在环境变量中以「单元名前缀 + LLM_MODEL / LLM_BASE_URL /
 LLM_API_KEY / LLM_ENABLE_THINKING」独立配置；某字段未配置（或为空字符串）时
 逐字段回落到无前缀的全局缺省变量。
 

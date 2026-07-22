@@ -244,23 +244,33 @@ def test_写作编排_空正文退化_跳过质检直接上报(draft_task: dict[
     assert progress[1]["attempts"] == 3
 
 
-def test_写作编排_无pass素材_跳过自审仍发裁决事件(draft_task: dict[str, Any]) -> None:
+def test_写作编排_无pass素材_仍审非依赖素材裁决项(draft_task: dict[str, Any]) -> None:
+    # 共用 audit_items（ADR-0006）后，通用层含两条不依赖素材的 warn 裁决项
+    # （章内连贯 / 摘要链一致）：pass 池为空时仍有适用裁决项，自审照常发起。
     events, record_hook = _make_recorder()
     fake = FakeWriterLlmClient(
         draft_script=[_envelope("本专业面向智能制造领域培养高素质人才。")],
+        audit_script=[AuditEnvelope()],
     )
-    # 全部素材判 fail：pass 池为空 → 跳过自审的模型调用。
     for material in draft_task["materials"]:
         material["verdict"] = "fail"
     run = make_writer_run(fake, event_hook=record_hook)
     result = asyncio.run(run(draft_task))
 
-    assert fake.audit_calls == []
+    # 自审被调用（非依赖素材裁决项适用）；空裁决 → 无违规、自检通过。
+    assert len(fake.audit_calls) == 1
     assert result["self_check"] == {"citations_ok": True, "issues": []}
-    # audit_done 仍发出（issues=0），但没有 audit 的 llm_call 事件对。
+    # 自审有真实 llm_call 事件对，随后 audit_done（issues=0）。
     progress = [payload for event_type, payload in events if event_type == SUBAGENT_PROGRESS]
     steps = [payload["step"] for payload in progress]
-    assert steps == ["llm_call_start", "llm_call_end", "lint_done", "audit_done"]
+    assert steps == [
+        "llm_call_start",
+        "llm_call_end",
+        "lint_done",
+        "llm_call_start",
+        "llm_call_end",
+        "audit_done",
+    ]
     audit_done = progress[steps.index("audit_done")]
     assert audit_done["issues"] == 0
     assert audit_done["degraded"] is False

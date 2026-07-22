@@ -321,9 +321,10 @@ def extract_user_feedback(
 # 两份配方共享一个较宽的摘要链预算覆盖；其余阈值沿用全局配置。
 _WRITING_BUDGET = BudgetOverride(summary_chain_max_chars=1200)
 
-# 按运行单元注册的装配配方；键覆盖 llm_config.RUNTIME_UNITS 全部 8 个单元。
+# 按运行单元注册的装配配方；键覆盖 llm_config.RUNTIME_UNITS 全部 9 个单元。
 # 写作各配方只留 RewriteTask 实际消费的段（摘要链与章节素材）；
-# chapter_drafter（并行首写）用规划摘要链替代实际摘要链，其余与写作配方一致。
+# chapter_drafter（并行首写）用规划摘要链替代实际摘要链，其余与写作配方一致；
+# chapter_reviewer（章级评审）消费同一批段（素材 + 摘要链 + 章文本）。
 RECIPES: dict[str, Recipe] = {
     "framework_orchestrator": Recipe(extractors=(extract_user_intent,)),
     "reference_orchestrator": Recipe(
@@ -339,6 +340,10 @@ RECIPES: dict[str, Recipe] = {
         budget=_WRITING_BUDGET,
     ),
     "rewriter_loop": Recipe(
+        extractors=(extract_summary_chain, extract_chapter_materials),
+        budget=_WRITING_BUDGET,
+    ),
+    "chapter_reviewer": Recipe(
         extractors=(extract_summary_chain, extract_chapter_materials),
         budget=_WRITING_BUDGET,
     ),

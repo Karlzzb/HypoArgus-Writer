@@ -26,6 +26,7 @@ from service.event_envelope import GRAPH_EVENT_TYPES, EventEnvelope
 from graph import build_graph, postgres_checkpointer
 from llm import observability
 from llm.llm_client import LLMFactory, default_llm_factory
+from agents.chapter_reviewer import make_chapter_reviewer
 from agents.contracts import HypothesisPayload, MaterialPayload, SearchTask, Subagent
 from agents.rewriter_loop import make_rewriter_loop
 from agents.search_agent import make_search_agent
@@ -221,6 +222,7 @@ def create_app(
     checkpointer: BaseCheckpointSaver | None = None,
     search_agent: Subagent | SubagentFactory | None = None,
     rewriter_loop: Subagent | SubagentFactory | None = None,
+    chapter_reviewer: Subagent | SubagentFactory | None = None,
     citation_max_retries: int | None = None,
     assembler_config: AssemblerConfig | None = None,
 ) -> FastAPI:
@@ -255,6 +257,11 @@ def create_app(
                 rewriter_loop=_resolve_subagent(
                     rewriter_loop,
                     lambda hook: make_rewriter_loop(llm_factory, hook),
+                    hook_dispatcher,
+                ),
+                chapter_reviewer=_resolve_subagent(
+                    chapter_reviewer,
+                    lambda hook: make_chapter_reviewer(llm_factory, hook),
                     hook_dispatcher,
                 ),
                 citation_max_retries=citation_max_retries,

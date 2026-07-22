@@ -24,6 +24,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from langgraph.types import Command
 
+from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.rewriter_loop import make_stub_rewriter_loop
 from agents.search_agent import make_stub_search_agent
 from domain.citation_reconciler import MARKER_PATTERN
@@ -783,6 +784,7 @@ def test_LLM调用次数与单元归属():
         checkpointer=InMemorySaver(serde=checkpoint_serializer()),
         search_agent=make_stub_search_agent(),
         rewriter_loop=make_stub_rewriter_loop(),
+        chapter_reviewer=make_stub_chapter_reviewer(),
     )
     config: RunnableConfig = {"configurable": {"thread_id": "e2e-llm-count"}}
     graph.invoke(initial_state("意图", "身份", "trace-llm"), config)

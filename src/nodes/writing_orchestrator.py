@@ -192,11 +192,16 @@ def make_writing_orchestrator_node(
     rewriter_loop: Subagent,
     search_agent: Subagent,
     assembler_config: AssemblerConfig | None = None,
+    chapter_reviewer: Subagent | None = None,
 ) -> WritingOrchestratorNode:
     """构造 writing_orchestrator 节点函数：注入 rewriter_loop 与 search_agent 适配器。
 
     assembler_config 为 None 时在节点执行时读取环境变量装配配置。
+    chapter_reviewer 为章级评审子智能体的注入接缝（ADR-0006）：本期（T2）只落
+    契约与子智能体本体、接受构图注入（stub 可替换），修订自环消费其修订说明留 T3。
     """
+    # T3 起于修订/终审回退分支消费评审修订说明；本期仅持有注入引用，保注入链贯通。
+    _reserved_chapter_reviewer = chapter_reviewer
 
     async def _draft_chapter(
         state: WritingAgentState, chapter: ChapterSpec, config: AssemblerConfig
