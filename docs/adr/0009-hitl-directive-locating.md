@@ -29,8 +29,12 @@
 `confirm` 仅在存在待确认清单时合法，确认后按清单执行；用户也可改提 `revise`（作废清单按新意见重新解析）或 `finalize`。
 动作全集以 `human_review_gate.RESUME_ACTIONS` 为单一事实源，服务层恢复值唯一产地 `task_service.build_resume_value` 与 HTTP 层 `ReviewRequest` 与之同形，契约测试（`tests/service/test_review_resume_contract.py`）锚定三处一致。
 
-节点重放语义的取舍：LangGraph 恢复时节点从头重放、既有 interrupt 按序返回历史恢复值，期间解析 LLM 调用会重复执行一次。
-程序在每次重放后都重新校验清单与确认条件（重放解析若转为回问或解析失败，confirm 按契约不符重新中断），绝不执行未经确认的清单；重放一次解析调用的成本是复用既有安全汇点模式的对价，接受。
+节点重放语义的取舍：LangGraph 恢复时节点从头重放、既有 interrupt 按序返回历史恢复值。
+若解析 LLM 调用在重放中重新执行，真实 LLM 的非确定性会使重放解析出的清单偏离用户确认的那份——可能执行一份用户从未回显确认的清单，甚至因重放解析恰好不再触发大扇出而绕过确认直接执行。
+为此意见解析的 LLM 调用包在 LangGraph `task`（durable execution）里、闭包捕获 `llm_factory` 保留测试桩注入点：调用结果随任务写入 checkpoint，重放时直接取缓存、不重复调用，保证 confirm 执行的清单严格等于确认中断时回显给用户的那份。
+任务只返回原始 JSON 负载（纯标量/字典/列表，可序列化），定位归结 `resolve_directives` 是确定性纯函数、在任务外重放执行，其结果随负载缓存天然一致。
+重放后程序仍重新校验清单与确认条件（重放负载若被人工改成回问或解析失败形态，confirm 按契约不符重新中断），绝不执行未经确认的清单。
+回归测试 `test_confirm执行的是确认时回显的清单_重放不因LLM非确定而漂移` 以两份不同应答锚定此性质：第二份永不被消费、执行的是第一份。
 
 附带修正：LangGraph 1.x 下同节点内重新中断后 `snapshot.next` 为空而中断仍挂在任务上，服务层 `_at_interrupt` 判定去掉了「next 非空」前置条件——否则错误重提、回问、确认三种重新中断在 HTTP 层全部误判 409。
 

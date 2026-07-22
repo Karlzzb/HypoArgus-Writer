@@ -120,11 +120,16 @@ class ChapterDraft(BaseModel):
     self_check: SelfCheck = SelfCheck()
 
 
+DirectiveType = Literal["rewrite_only", "evidence_augmented"]
+"""修订指令类型字面量的单一事实源：rewrite_only 纯改写；evidence_augmented 补充佐证。
+模型字段与意见解析归结的收窄断言共用。"""
+
+
 class RevisionDirective(BaseModel):
     """修订指令：用户意见解析出的结构化最小修订单位。"""
 
     target_chapter_id: str
-    type: Literal["rewrite_only", "evidence_augmented"]
+    type: DirectiveType
     """rewrite_only 纯改写；evidence_augmented 补充佐证。"""
     instruction: str
 

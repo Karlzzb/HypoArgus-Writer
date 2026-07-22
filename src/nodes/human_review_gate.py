@@ -19,13 +19,15 @@
 本节点是全流程唯一安全汇点：恢复值契约不符或意见解析不出任何有效指令时，
 不抛异常终止，而是携错误说明重新中断等待人工重新提交，保证系统永不转死。
 重新中断依赖 LangGraph 的节点重放语义：恢复时节点从头重放、既有 interrupt
-按序返回历史恢复值，期间的解析 LLM 调用会重复执行；程序在每次重放后都重新
-校验清单与确认条件，绝不执行未经确认的大扇出清单。
+按序返回历史恢复值。意见解析的 LLM 调用包在 LangGraph task（durable
+execution）里，结果随任务写入落 checkpoint——重放时直接取缓存、不重复调用，
+从而保证 confirm 执行的清单严格等于确认中断时回显给用户的那份解析结果。
 """
 
 import re
-from typing import Any, Protocol
+from typing import Any, Protocol, cast, get_args
 
+from langgraph.func import task
 from langgraph.types import interrupt
 
 from assembly.assembler_config import AssemblerConfig, load_assembler_config
@@ -37,14 +39,16 @@ from domain.citation_reconciler import MARKER_PATTERN
 from domain.state import (
     ChapterDraft,
     ChapterSpec,
+    DirectiveType,
     RevisionDirective,
     RevisionRound,
     WorkflowStatus,
     WritingAgentState,
 )
 
-# 修订指令类型的合法取值；类型不在其中的应答项被程序丢弃。
-DIRECTIVE_TYPES: tuple[str, ...] = ("rewrite_only", "evidence_augmented")
+# 修订指令类型的合法取值（取自 DirectiveType 字面量单一事实源）；
+# 类型不在其中的应答项被程序丢弃。
+DIRECTIVE_TYPES: tuple[str, ...] = get_args(DirectiveType)
 
 # 恢复值契约的合法动作全集：服务层与本节点共用的单一事实源（契约测试锚定）。
 RESUME_ACTIONS: tuple[str, ...] = ("finalize", "revise", "confirm")
@@ -162,10 +166,11 @@ def resolve_directives(
     questions: list[str] = []
 
     def _append(target: str, directive_type: str, instruction: str) -> None:
+        # 调用点已按 DIRECTIVE_TYPES 校验过 directive_type，此处收窄为字面量类型。
         directives.append(
             RevisionDirective(
                 target_chapter_id=target,
-                type=directive_type,  # type: ignore[arg-type]
+                type=cast(DirectiveType, directive_type),
                 instruction=instruction,
             )
         )
@@ -230,15 +235,10 @@ def resolve_directives(
     return deduped, questions
 
 
-def _parse_directives(
-    llm: LLM,
-    outline: list[ChapterSpec],
-    drafts: list[ChapterDraft],
-    chapter_digest: str,
-    revision_ledger: str,
-    feedback: str,
-) -> tuple[list[RevisionDirective], list[str]]:
-    """LLM 意见解析：把自然语言意见拆解为修订指令列表与回问问题。
+def _build_parse_messages(
+    chapter_digest: str, revision_ledger: str, feedback: str
+) -> tuple[str, str]:
+    """构造意见解析 prompt（system, user），纯函数。
 
     章节清单（含各章草稿摘要，供 LLM 判断意见落章）、历史修订台账、本轮意见
     均取自装配段（chapter_list、revision_ledger、user_feedback）。
@@ -268,11 +268,7 @@ def _parse_directives(
         f"{ledger_block}"
         f"本轮用户修改意见：{feedback}"
     )
-    payload = invoke_json(llm, "修订意见解析", system, user, list)
-    directives, questions = resolve_directives(payload, outline, drafts)
-    if not directives and not questions:
-        raise ValueError("用户意见解析不出任何有效修订指令，请人工确认意见内容")
-    return directives, questions
+    return system, user
 
 
 def make_human_review_gate_node(
@@ -282,6 +278,25 @@ def make_human_review_gate_node(
 
     assembler_config 为 None 时在节点执行时读取环境变量装配配置。
     """
+
+    @task
+    def _parse_feedback_task(
+        chapter_digest: str, revision_ledger: str, feedback: str
+    ) -> list[Any]:
+        """意见解析的 LLM 调用（durable execution）。
+
+        结果随任务写入落 checkpoint——confirm 恢复重放时直接取缓存、不重复
+        调用，从而保证执行清单严格等于确认中断时回显给用户的那份解析结果，
+        不因重放而漂移成另一份清单（真实 LLM 非确定，重放重解析会变）。
+        闭包捕获 llm_factory 以保留测试桩注入点；返回纯标量/字典/列表的
+        原始 JSON 负载，定位归结（resolve_directives）是确定性纯函数、在任务
+        外重放执行，其结果随负载缓存天然一致。
+        """
+        llm = llm_factory("human_review_gate")
+        system, user = _build_parse_messages(
+            chapter_digest, revision_ledger, feedback
+        )
+        return invoke_json(llm, "修订意见解析", system, user, list)
 
     def node(state: WritingAgentState) -> WritingAgentState:
         config = assembler_config
@@ -347,7 +362,6 @@ def make_human_review_gate_node(
             # action == "revise"：重新解析本轮意见，作废既有待确认清单与回问。
             questions = []
             pending = None
-            llm = llm_factory("human_review_gate")
             # 章节清单（含摘要）、历史台账、本轮意见经装配段现场取得（不失忆）。
             context = assemble(
                 state,
@@ -356,16 +370,21 @@ def make_human_review_gate_node(
                 feedback=feedback,
             )
             try:
-                directives, questions = _parse_directives(
-                    llm,
-                    outline,
-                    drafts,
+                # 解析的 LLM 调用包在 durable task 里（见 _parse_feedback_task
+                # docstring）：confirm 恢复重放时取缓存不重复调用，执行清单
+                # 严格等于确认时回显的那份，不因重放漂移而误执行。
+                parsed_payload = _parse_feedback_task(
                     context.text("chapter_list"),
                     context.text("revision_ledger"),
-                    context.text("user_feedback"),
-                )
+                    feedback,
+                ).result()
             except ValueError as exc:
                 error = str(exc)
+                continue
+            directives, questions = resolve_directives(parsed_payload, outline, drafts)
+            if not directives and not questions:
+                # 解析不出任何有效指令：回问用户，不猜测、不转死。
+                error = "用户意见解析不出任何有效修订指令，请人工确认意见内容"
                 continue
             if questions:
                 # 含混或定位失败：回问用户，不猜测、本轮不执行任何指令。
@@ -377,6 +396,9 @@ def make_human_review_gate_node(
                 continue
             break
 
+        # 解析 LLM 由 durable task 内部构造；此处仅取其配置元数据上报，
+        # 不触发真实调用（OpenAI 兼容客户端惰性建连，构造无网络开销）。
+        llm = llm_factory("human_review_gate")
         round_no = state.get("iteration_round", 0) + 1
         # 台账列表字段是整值覆盖语义，须带上既有旧轮次再追加新一轮。
         ledger = list(state.get("revision_ledger", [])) + [

@@ -110,7 +110,8 @@ def test_finalize恢复_定稿且不调LLM() -> None:
 
 def test_revise恢复_混合两类诉求解析为修订指令_经大扇出确认后执行() -> None:
     # 两章大纲全部受影响（2/2 > 一半）：先携解析清单重新中断待确认，confirm 后执行。
-    # 解析应答备两份：confirm 恢复时节点从头重放，意见解析 LLM 调用重复执行一次。
+    # 解析的 LLM 调用包在 durable task 里，confirm 恢复重放时取缓存不重复调用，
+    # 故解析应答只备一份；执行的清单严格等于确认时回显的那份。
     mixed = json.dumps(
         [
             {
@@ -126,7 +127,7 @@ def test_revise恢复_混合两类诉求解析为修订指令_经大扇出确认
         ],
         ensure_ascii=False,
     )
-    fake = FakeLLM([mixed, mixed])
+    fake = FakeLLM([mixed])
     graph = _build_graph(fake)
     config = _config()
     graph.invoke(_state(), config)
@@ -166,8 +167,68 @@ def test_revise恢复_混合两类诉求解析为修订指令_经大扇出确认
         "model": "fake-llm",
         "base_url": "fake://",
     }
-    # confirm 恢复时节点重放，意见解析共执行两次。
-    assert len(fake.calls) == 2
+    # confirm 恢复时节点重放取缓存，意见解析只执行一次（durable task）。
+    assert len(fake.calls) == 1
+
+
+def test_confirm执行的是确认时回显的清单_重放不因LLM非确定而漂移() -> None:
+    # 回归 issue #49 code review 发现的缺陷：confirm 恢复重放时若解析 LLM 重新
+    # 调用，真实 LLM 非确定，可能解析出与用户确认的清单 A 不同的清单 B 并执行 B。
+    # 解析包在 durable task 里后，重放取缓存、不重复调用，故第二份应答 B 永不被
+    # 消费，执行的清单严格等于回显确认的那份 A。
+    list_a = json.dumps(
+        [
+            {
+                "target_chapter_id": "ch1",
+                "type": "rewrite_only",
+                "instruction": "清单A：精炼引言",
+            },
+            {
+                "target_chapter_id": "ch2",
+                "type": "rewrite_only",
+                "instruction": "清单A：收束结论",
+            },
+        ],
+        ensure_ascii=False,
+    )
+    list_b = json.dumps(
+        [
+            {
+                "target_chapter_id": "ch1",
+                "type": "evidence_augmented",
+                "instruction": "清单B：补佐证",
+            },
+            {
+                "target_chapter_id": "ch2",
+                "type": "evidence_augmented",
+                "instruction": "清单B：补佐证",
+            },
+        ],
+        ensure_ascii=False,
+    )
+    fake = FakeLLM([list_a, list_b])
+    graph = _build_graph(fake)
+    config = _config()
+    graph.invoke(_state(), config)
+    confirm_request = graph.invoke(
+        Command(resume={"action": "revise", "feedback": "两章都改"}), config
+    )
+    confirmation = confirm_request["__interrupt__"][0].value["pending_confirmation"]
+    # 回显给用户的就是清单 A。
+    assert [d["instruction"] for d in confirmation["directives"]] == [
+        "清单A：精炼引言",
+        "清单A：收束结论",
+    ]
+
+    result = dict(graph.invoke(Command(resume={"action": "confirm"}), config))
+    # 执行的严格等于确认时回显的清单 A，而非重放可能漂移出的清单 B。
+    assert [d.instruction for d in result["pending_directives"]] == [
+        "清单A：精炼引言",
+        "清单A：收束结论",
+    ]
+    assert all(d.type == "rewrite_only" for d in result["pending_directives"])
+    # 第二份应答 B 永不被消费：解析只调用一次（durable task 缓存）。
+    assert len(fake.calls) == 1
 
 
 def test_revise解析过滤_非法条目被丢弃仅保留合法条目() -> None:
@@ -494,8 +555,9 @@ def test_引文定位失败_回问用户后重新提交可继续() -> None:
         ],
         ensure_ascii=False,
     )
-    # 回问后再提交时节点重放：首轮解析重复执行一次，故失败应答备两份。
-    fake = FakeLLM([quote_fail, quote_fail, ok])
+    # 回问后再提交时节点重放：首轮解析走 durable task 缓存不重复调用，
+    # 故失败应答只备一份；改提的新意见入参不同、缓存未命中，备 ok 应答一份。
+    fake = FakeLLM([quote_fail, ok])
     graph = _build_graph(fake)
     config = _config()
     graph.invoke(_state(chapter_drafts=DRAFTS), config)
@@ -540,7 +602,7 @@ def test_全局意见扇出为逐章指令_经大扇出确认后执行() -> None
         [{"locate": "global", "type": "rewrite_only", "instruction": "全篇口吻更克制"}],
         ensure_ascii=False,
     )
-    fake = FakeLLM([global_response, global_response])
+    fake = FakeLLM([global_response])
     graph = _build_graph(fake)
     config = _config()
     graph.invoke(_state(chapter_drafts=DRAFTS), config)
@@ -576,8 +638,9 @@ def test_大扇出确认时改提意见_作废清单按新意见执行() -> None
         ],
         ensure_ascii=False,
     )
-    # 改提意见时节点重放：全局解析重复执行一次，故全局应答备两份。
-    fake = FakeLLM([global_response, global_response, ch2_only])
+    # 改提意见时节点重放：全局解析走 durable task 缓存不重复调用，故全局
+    # 应答只备一份；改提的新意见是不同入参、缓存未命中，需备 ch2 应答一份。
+    fake = FakeLLM([global_response, ch2_only])
     graph = _build_graph(fake)
     config = _config()
     graph.invoke(_state(chapter_drafts=DRAFTS), config)

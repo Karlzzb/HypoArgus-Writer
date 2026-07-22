@@ -90,10 +90,9 @@ MIXED_DIRECTIVE_RESPONSE = json.dumps(
 # 端到端主干完整编排：首轮全量终审 + 混合意见解析 + 增量核查重审两章各一条
 # + 修订轮的篇级评审一条。混合意见影响 2/2 章（超过大纲一半），触发大扇出
 # 确认重新中断；confirm 恢复时 human_review_gate 节点从头重放、意见解析
-# LLM 调用重复执行一次，故解析应答备两份。
+# 走 durable task 缓存不重复调用，故解析应答只备一份。
 TRUNK_RESPONSES = [
     *FIRST_PASS_RESPONSES,
-    MIXED_DIRECTIVE_RESPONSE,
     MIXED_DIRECTIVE_RESPONSE,
     SEMANTIC_PASS,
     SEMANTIC_PASS,
