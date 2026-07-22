@@ -162,7 +162,7 @@ class RewriteTask(TypedDict):
     revision_directives: NotRequired[list[RevisionDirectivePayload]]
     """旧修订指令字段（ADR-0004）：与 ``revision_note`` 并存（expand），删除留 T3b。"""
     revision_note: NotRequired[RevisionNotePayload]
-    """新分区式修订说明字段（ADR-0006）：本期仅落契约，rewriter 消费留 T3。"""
+    """分区式修订说明字段（ADR-0006）：章级评审产物，rewriter revise 模式优先消费。"""
     current_text: NotRequired[str]
 
 

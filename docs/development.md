@@ -6,7 +6,7 @@
 ## 1. 项目定位
 
 纯 LangGraph（1.x）单一技术栈的结构化写作后端服务，只提供后端能力。
-核心链路：章节 → 论点 → 假说三层论证体系，6 个主节点主路径流水线（首写阶段经 `Send` 并行扇出）+ 3 个子智能体（rewriter_loop 与 search_agent 均为真实实现，chapter_reviewer 章级评审为 ADR-0006 落地本体、编排消费留 T3），人工审阅无限迭代闭环。
+核心链路：章节 → 论点 → 假说三层论证体系，6 个主节点主路径流水线（首写阶段经 `Send` 并行扇出）+ 3 个子智能体（rewriter_loop、search_agent、chapter_reviewer 均为真实实现，章级写→评→重写循环见 ADR-0006），人工审阅无限迭代闭环。
 LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server。
 
 ## 2. 代码布局

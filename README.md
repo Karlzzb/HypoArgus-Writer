@@ -15,7 +15,7 @@ framework_orchestrator → reference_orchestrator → chapter_drafter → writin
 检索与首写两段均经 `Send` 并行扇出：reference_orchestrator 每个待检索章节一个分支、只回写单章素材，引文库经合并 reducer 汇入并跨章按 URL 去重；chapter_drafter 每个未写章节一个分支，各分支承接前章规划摘要链、只回写单章草稿；修订与终审回退仍由 writing_orchestrator 串行自环处理。
 
 - 论证体系三层结构：章节 1—n 论点，论点 1—N 假说；假说可证伪、可检索验证，是检索任务的直接驱动源。
-- 两个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作与循环润色）以黑盒适配层接入，均为真实实现且是缺省装配。
+- 三个业务子智能体 search_agent（检索与素材相关性校验）、rewriter_loop（章节写作）、chapter_reviewer（章级评审）以黑盒适配层接入，均为真实实现且是缺省装配。
 search_agent 经薄适配层调用 fork 进本项目的 SearchAgent V12 检索引擎（火山联网 / Bisheng 知识库 / Doris 结构化三通道），打桩同包保留供测试注入。
 检索过程逐检索项上报进度事件（正反向检索、通道调用、证据裁决 x/y、补漏轮次），经既有事件通道进 SSE；引擎诊断计数/耗时全量进 Langfuse span，摘要子集随子智能体结束事件上报。
 - 引用采用「正文角标 + 结构化引文库」分离方案；最终交付可按任意书目格式渲染，格式与内容解耦。
@@ -41,14 +41,14 @@ cp .env.example .env          # 按下文约定填写
 
 ### LLM 配置（单元前缀 + 全局回落）
 
-全部 8 个运行单元支持独立配置，未配置项逐字段回落无前缀的全局缺省变量。
+全部 9 个运行单元支持独立配置，未配置项逐字段回落无前缀的全局缺省变量。
 
 | 变量 | 说明 |
 | --- | --- |
 | `LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY` | 全局缺省，必填 |
 | `<单元前缀>_LLM_MODEL` 等三项 | 单元独立配置，可选 |
 
-单元前缀共 8 个：`FRAMEWORK_ORCHESTRATOR`、`REFERENCE_ORCHESTRATOR`、`CHAPTER_DRAFTER`、`WRITING_ORCHESTRATOR`、`CITATION_VALIDATOR`、`HUMAN_REVIEW_GATE`、`SEARCH_AGENT`、`REWRITER_LOOP`。
+单元前缀共 9 个：`FRAMEWORK_ORCHESTRATOR`、`REFERENCE_ORCHESTRATOR`、`CHAPTER_DRAFTER`、`WRITING_ORCHESTRATOR`、`CITATION_VALIDATOR`、`HUMAN_REVIEW_GATE`、`SEARCH_AGENT`、`REWRITER_LOOP`、`CHAPTER_REVIEWER`。
 所有模型统一按 OpenAI 兼容接口封装，`base_url` 止于兼容根路径（不要带 `/chat/completions`）。
 
 ### 持久化与可观测
@@ -113,7 +113,7 @@ python scripts/demo.py --real    # 与生产一致的演示：真实 LLM + Postg
 - `LANGFUSE_PUBLIC_KEY` 与 `LANGFUSE_SECRET_KEY` 齐备即启用；未配置时完全无副作用。
 - 启用与否在服务启动（构图）时确定，修改 Langfuse 配置后需重启服务。
 - 每次图运行一条 trace，关联 `thread_id` / `session_id` / `execution_trace_id`。
-- trace 覆盖全部 8 个运行单元：6 个主节点为 `node:*` span，2 个子智能体为 `subagent:*` span，每次 LLM 调用自动上报 generation（输入输出、token 用量、耗时、成本）。
+- trace 覆盖全部 9 个运行单元：6 个主节点为 `node:*` span，3 个子智能体为 `subagent:*` span，每次 LLM 调用自动上报 generation（输入输出、token 用量、耗时、成本）。
 - 人工中断点的正常中断不会被标记为错误 span。
 
 ## ulmen 压缩 serde 实验结论：不启用
