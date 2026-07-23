@@ -32,7 +32,7 @@ from langgraph.types import interrupt
 
 from assembly.assembler_config import AssemblerConfig, load_assembler_config
 from assembly.context_assembler import assemble, digest_of_round
-from llm.llm_client import LLM, LLMFactory
+from llm.llm_client import LLMFactory
 from llm.llm_json import JSON_ONLY_RULE
 from llm.llm_json import invoke_json
 from domain.citation_reconciler import MARKER_PATTERN

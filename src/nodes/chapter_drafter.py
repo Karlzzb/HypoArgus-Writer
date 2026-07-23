@@ -22,7 +22,6 @@ from assembly.assembler_config import AssemblerConfig, load_assembler_config
 from assembly.context_assembler import assemble
 from domain.doc_types import carried_doc_facts
 from domain.state import (
-    ChapterDraft,
     WorkflowStatus,
     WritingAgentState,
 )
