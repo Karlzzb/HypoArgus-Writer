@@ -132,11 +132,13 @@ class TaskManager:
         graph_hub: EventHub,
         loop: asyncio.AbstractEventLoop,
         hook_dispatcher: SubagentHookDispatcher,
+        epoch: str,
     ) -> None:
         self._graph = graph
         self._graph_hub = graph_hub
         self._loop = loop
         self._hook_dispatcher = hook_dispatcher
+        self._epoch = epoch
         self._tasks: dict[str, _TaskEntry] = {}
 
     # ---- 对外操作 ----
@@ -151,7 +153,7 @@ class TaskManager:
             thread_id=thread_id,
             trace_id=trace_id,
             session_id=session_id,
-            hub=EventHub(self._loop),
+            hub=self._new_hub(thread_id),
         )
         self._tasks[thread_id] = entry
 
@@ -360,6 +362,24 @@ class TaskManager:
         """取任务的业务事件枢纽（SSE 订阅入口）。"""
         return self._require_entry(thread_id).hub
 
+    def shutdown(self) -> None:
+        """服务关停时优雅关流：取消在跑图运行并关闭全部业务枢纽。
+
+        枢纽关闭后订阅队列收到结束哨兵，SSE 生成器正常收尾，客户端连接
+        随之收束；REST 真相源（检查点）不受影响。
+        """
+        for entry in self._tasks.values():
+            run_task = entry.run_task
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+            entry.hub.close()
+
+    def _new_hub(self, thread_id: str) -> EventHub:
+        """为任务建一条业务通道枢纽：带本进程世代 id 与带 thread_id 的 reconcile 载荷。"""
+        return EventHub(
+            self._loop, epoch=self._epoch, thread_id=thread_id
+        )
+
     # ---- 内部实现 ----
 
     def _require_entry(self, thread_id: str) -> _TaskEntry:
@@ -380,7 +400,7 @@ class TaskManager:
             thread_id=thread_id,
             trace_id=str(snapshot.values.get("execution_trace_id", "")),
             session_id=session_id,
-            hub=EventHub(self._loop),
+            hub=self._new_hub(thread_id),
         )
         self._tasks[thread_id] = entry
         return entry
@@ -435,10 +455,13 @@ class TaskManager:
     def _publish_business(
         self, entry: _TaskEntry, event_type: str, data: dict[str, Any]
     ) -> None:
-        """向业务通道发布一条轻量业务事件（线程安全）。"""
+        """向业务通道发布一条轻量业务事件（线程安全）。
+
+        事件 id（``{epoch}-{seq}``）与 ts 由枢纽在入站时分配盖戳，调用方
+        只负责语义载荷；payload 形如 ``{event_id, type, thread_id, ts, data}``。
+        """
         entry.hub.publish(
             {
-                "event_id": uuid.uuid4().hex,
                 "type": event_type,
                 "thread_id": entry.thread_id,
                 "ts": datetime.now(timezone.utc).isoformat(),

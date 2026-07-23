@@ -16,12 +16,13 @@ from contextlib import ExitStack, asynccontextmanager
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, field_validator, model_validator
+from sse_starlette.sse import EventSourceResponse
 
 from assembly.assembler_config import AssemblerConfig
-from service.event_broker import EventHub
+from service.event_broker import EventHub, new_epoch
 from service.event_envelope import GRAPH_EVENT_TYPES, EventEnvelope
 from graph import build_graph, postgres_checkpointer
 from llm import observability
@@ -50,7 +51,10 @@ from service.task_service import (
     TaskNotFound,
 )
 
-_SSE_HEADERS = {"Cache-Control": "no-cache"}
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+# SSE keepalive ping 缺省间隔（秒）：长连接不被中间网关掐断的保活心跳。
+_DEFAULT_PING_INTERVAL = 15
 
 SubagentFactory = Callable[[EventHook], Subagent]
 """子智能体工厂形态：以应用内部事件分发器实例化（工厂签名与打桩/真实现一致）。"""
@@ -238,13 +242,24 @@ def _make_domain_error_handler(
     return handler
 
 
-def _sse_frame(event_id: str, event_type: str, data: dict[str, Any]) -> str:
-    """按 SSE 规范拼一帧：id / event / data 三行加空行分隔。"""
-    return (
-        f"id: {event_id}\n"
-        f"event: {event_type}\n"
-        f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-    )
+def _format_event(epoch: str, seq: int, item: Any) -> dict[str, str]:
+    """把枢纽产出的 (seq, item) 拼成 EventSourceResponse 的帧 dict。
+
+    业务事件与 reconcile_required 是 dict 载荷（type/data 自带）；
+    可视化通道的 EventEnvelope 取其 type 与 model_dump（信封 event_id
+    为拓扑 uuid，传输 id 仍取 ``{epoch}-{seq}``）。
+    """
+    if isinstance(item, EventEnvelope):
+        event = item.type
+        data = item.model_dump()
+    else:
+        event = item["type"]
+        data = item
+    return {
+        "id": f"{epoch}-{seq}",
+        "event": event,
+        "data": json.dumps(data, ensure_ascii=False),
+    }
 
 
 def create_app(
@@ -256,6 +271,8 @@ def create_app(
     chapter_reviewer: Subagent | SubagentFactory | None = None,
     document_review_max_retries: int | None = None,
     assembler_config: AssemblerConfig | None = None,
+    epoch: str | None = None,
+    ping_interval: int | None = None,
 ) -> FastAPI:
     """构建 FastAPI 应用：全部依赖在 lifespan 里装配。
 
@@ -264,7 +281,15 @@ def create_app(
     真实现工厂（make_search_agent / make_rewriter_loop），事件钩子
     经线程本地分发器按运行动态路由；注入工厂形态时同样以内部分发器实例化
     （保留事件旁路），注入实例形态时调用方自管事件钩子。
+
+    epoch 为进程（应用实例）启动标识，用于 SSE 事件 id ``{epoch}-{seq}``
+    与 Last-Event-ID 续传的世代裁决；缺省每次建应用新生成一个。测试注入
+    固定值以复现世代失配。ping_interval 为 SSE keepalive 心跳间隔秒数，
+    缺省 15。
     """
+
+    app_epoch = epoch if epoch is not None else new_epoch()
+    app_ping = ping_interval if ping_interval is not None else _DEFAULT_PING_INTERVAL
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -298,19 +323,25 @@ def create_app(
                 document_review_max_retries=document_review_max_retries,
                 assembler_config=assembler_config,
             )
-            graph_hub = EventHub(loop)
+            graph_hub = EventHub(loop, epoch=app_epoch)
             app.state.graph_hub = graph_hub
             app.state.search_agent = observability.wrap_subagent(
                 resolved_search_agent
             )
             app.state.hook_dispatcher = hook_dispatcher
-            app.state.manager = TaskManager(
+            manager = TaskManager(
                 graph=graph,
                 graph_hub=graph_hub,
                 loop=loop,
                 hook_dispatcher=hook_dispatcher,
+                epoch=app_epoch,
             )
+            app.state.manager = manager
             yield
+        # 服务关停：取消在跑图运行并关闭全部事件枢纽，SSE 生成器收到结束
+        # 哨兵后正常收尾，连接随之优雅关流（REST 真相源不受影响）。
+        manager.shutdown()
+        graph_hub.close()
 
     app = FastAPI(title="HypoArgus-Writer", lifespan=lifespan)
     for exc_type, status_code in _DOMAIN_ERROR_STATUS:
@@ -425,25 +456,42 @@ def create_app(
         return _manager().list_checkpoints(thread_id)
 
     @app.get("/tasks/{thread_id}/stream")
-    async def stream_task(thread_id: str) -> StreamingResponse:
-        """业务数据 SSE 通道：任务定稿或失败后流正常结束。"""
+    async def stream_task(thread_id: str, request: Request) -> EventSourceResponse:
+        """业务数据 SSE 通道：Last-Event-ID 续传、keepalive 保活、断线检测。
+
+        不带 Last-Event-ID 的新订阅只收实时事件（不回放）；带 Last-Event-ID
+        续传只补该 id 之后仍保留在缓冲内的事件；世代失配或位置已丢弃时
+        立即下发 reconcile_required 控制事件后转实时。任务定稿或失败后流
+        正常结束（枢纽关闭，订阅收到结束哨兵）。
+        """
         hub = _manager().business_hub(thread_id)
+        last_event_id = request.headers.get("last-event-id")
+        epoch = hub.epoch
 
-        async def generate() -> AsyncIterator[str]:
-            async for item in hub.subscribe():
-                yield _sse_frame(item["event_id"], item["type"], item)
+        async def generate() -> AsyncIterator[dict[str, str]]:
+            async for seq, item in hub.subscribe(last_event_id):
+                yield _format_event(epoch, seq, item)
 
-        return StreamingResponse(
-            generate(), media_type="text/event-stream", headers=_SSE_HEADERS
+        return EventSourceResponse(
+            generate(),
+            headers=_SSE_HEADERS,
+            ping=app_ping,
+            sep="\n",
         )
 
     @app.get("/graph_events")
     async def graph_events(
+        request: Request,
         thread_id: str | None = Query(default=None),
         session_id: str | None = Query(default=None),
         types: str | None = Query(default=None),
-    ) -> StreamingResponse:
-        """graph_event 可视化 SSE 通道：全局流，按参数过滤，由客户端断开。"""
+    ) -> EventSourceResponse:
+        """graph_event 可视化 SSE 通道：全局流，按参数过滤，由客户端断开。
+
+        传输层与业务通道一致（sse-starlette + 世代 id + Last-Event-ID 续传
+        + keepalive + 断线检测）；12 个事件类型与元数据专用性质不变，
+        ``state_snapshot`` 仍只含计数枚举不放正文。全局流永不主动关闭。
+        """
         type_filter: frozenset[str] | None = None
         if types is not None:
             requested = frozenset(
@@ -457,23 +505,28 @@ def create_app(
                 )
             type_filter = requested
         hub: EventHub = app.state.graph_hub
+        last_event_id = request.headers.get("last-event-id")
+        epoch = hub.epoch
 
-        async def generate() -> AsyncIterator[str]:
-            async for envelope in hub.subscribe():
-                if not isinstance(envelope, EventEnvelope):
+        async def generate() -> AsyncIterator[dict[str, str]]:
+            async for seq, item in hub.subscribe(last_event_id):
+                if not isinstance(item, EventEnvelope):
+                    # reconcile_required：全局通道无可重取 REST，原样下发。
+                    yield _format_event(epoch, seq, item)
                     continue
-                if thread_id is not None and envelope.thread_id != thread_id:
+                if thread_id is not None and item.thread_id != thread_id:
                     continue
-                if session_id is not None and envelope.session_id != session_id:
+                if session_id is not None and item.session_id != session_id:
                     continue
-                if type_filter is not None and envelope.type not in type_filter:
+                if type_filter is not None and item.type not in type_filter:
                     continue
-                yield _sse_frame(
-                    envelope.event_id, envelope.type, envelope.model_dump()
-                )
+                yield _format_event(epoch, seq, item)
 
-        return StreamingResponse(
-            generate(), media_type="text/event-stream", headers=_SSE_HEADERS
+        return EventSourceResponse(
+            generate(),
+            headers=_SSE_HEADERS,
+            ping=app_ping,
+            sep="\n",
         )
 
     return app
