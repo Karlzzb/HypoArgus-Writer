@@ -1,7 +1,8 @@
 """引文对账纯程序逻辑：提取全文角标与引文库互查，不调 LLM。
 
 三类程序性错误：
-- orphan_marker 无来源的标注：角标 id 在引文库中不存在；
+- orphan_marker 无来源的标注：角标 id 在引文库中不存在（含真实 writer 在
+  素材池为空时臆造的中文占位角标如 [素材id-1]，由独立扫描捕获，见下文）；
 - cross_chapter 跨章误引：角标指向的素材存在但归属其他章节；
 - unused_material 未被引用的素材：verdict=pass 的素材未在所属章节正文出现。
 """
@@ -12,6 +13,13 @@ from domain.state import ChapterDraft, CitationIssue, Material
 
 # 正文角标形如 [素材id]；id 只含字母数字、下划线、连字符，避免误匹配中文方括号内容。
 MARKER_PATTERN = re.compile(r"\[([A-Za-z0-9_\-]+)\]")
+
+# 臆造占位角标：真实 writer 在素材池为空时偶发臆造的中文方括号占位形
+# （如 [素材id-1]、[素材1]）。MARKER_PATTERN 刻意只匹配 ASCII id 以免误匹配
+# 正文里合法的中文方括号内容（如 [待补充：专业名称]），故这类占位角标对其
+# 隐形——此处独立扫描作为纵深防御，把它们报为 orphan_marker（warn），
+# 不触碰 ASCII 提取与书目重编号路径，既有契约不变。
+_PLACEHOLDER_MARKER_PATTERN = re.compile(r"\[(素材[^\]]*)\]")
 
 
 def reconcile(
@@ -31,6 +39,9 @@ def reconcile(
         if scope_chapter_ids is not None and draft.chapter_id not in scope_chapter_ids:
             continue
         markers = set(MARKER_PATTERN.findall(draft.text))
+        # 臆造占位角标与 ASCII 角标合并按 id 升序报 orphan_marker；占位角标
+        # 永不在引文库（库内 id 恒为 ASCII），故只可能落 orphan 分支。
+        markers |= set(_PLACEHOLDER_MARKER_PATTERN.findall(draft.text))
 
         # 角标类问题：无来源的标注与跨章误引。
         for marker in sorted(markers):

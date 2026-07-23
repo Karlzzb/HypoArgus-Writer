@@ -132,6 +132,32 @@ def test_真实适配器_弱佐证素材分组渲染并进提示词(draft_task: 
     assert "弱佐证素材" in system
 
 
+def test_真实适配器_素材池为空_注入禁角标令且不渲染素材池块(
+    draft_task: dict[str, Any],
+) -> None:
+    """根因修复（issue #62 收口发现）：素材池为空时上下文块显式禁角标。
+
+    旧实现 materials 为空时整段省略 material_block，系统提示词「引用角标
+    （仅当传入了素材池时）」留下语义缝隙，真实模型在无池时臆造 [素材id-N]
+    占位角标——既无来源又对 reconcile 的 ASCII 角标模式隐形。根因修复：无池
+    时显式告知 writer 不得出现任何角标、不臆造素材 id。
+    """
+    draft_task["materials"] = []
+    llm = FakeLLM(responses=[_writer_json("## 一、示例章节\n定性陈述正文。")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    [messages] = llm.calls
+    user = messages[1]["content"]
+    # 显式禁令到位：不得出现角标、不臆造素材 id。
+    assert "不得出现任何" in user and "角标" in user
+    assert "不得臆造素材 id" in user
+    # 无池时不渲染素材池块与假说列表块（避免给模型一堆无 id 可引的假说）。
+    assert "仅可引用池内 id" not in user
+    assert "假说列表" not in user
+    # 不残留任何 ASCII 素材 id（无池本就无 id）。
+    assert "m-" not in user
+
+
 def test_真实适配器_draft解析失败_重试后成功(draft_task: dict[str, Any]) -> None:
     llm = FakeLLM(responses=["这不是 JSON", _writer_json("正文。")])
     envelope = _make_client(llm).draft(draft_task, _STYLE_PROSE)

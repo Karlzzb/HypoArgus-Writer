@@ -30,6 +30,39 @@ def test_角标模式只匹配字母数字下划线连字符() -> None:
     assert MARKER_PATTERN.findall(text) == ["m-1_a2"]
 
 
+def test_臆造占位角标报orphan且不误匹配合法中文方括号() -> None:
+    """issue #62 收口发现：writer 在素材池为空时臆造 [素材id-N] 占位角标，
+    MARKER_PATTERN 对其隐形（正文残留角注、书目为空、无 orphan 警告）。
+    纵深防御：独立扫描把 [素材...] 占位形报为 orphan_marker（warn），
+    不触碰 ASCII MARKER_PATTERN——合法中文方括号内容仍不匹配。"""
+    text = "无可引素材时模型臆造占位[素材id-1]，合法中文方括号[待补充：专业名称]不应报。"
+    issues = reconcile([_draft("ch1", text)], [])
+    orphans = [
+        i for i in issues
+        if i.kind == "orphan_marker" and i.material_id == "素材id-1"
+    ]
+    assert len(orphans) == 1
+    assert orphans[0].chapter_id == "ch1"
+    assert orphans[0].detail
+    # 合法中文方括号内容不被误报。
+    assert not any(
+        i.kind == "orphan_marker" and "待补充" in i.material_id
+        for i in issues
+    )
+
+
+def test_臆造占位角标与ASCII孤儿同章按id升序混合排序() -> None:
+    """占位角标与 ASCII 孤角标同章并存时，按 material_id 升序确定性排序。"""
+    issues = reconcile([_draft("ch1", "先[素材id-2]再[m404]后[素材id-1]")], [])
+    assert [
+        (i.kind, i.material_id) for i in issues if i.kind == "orphan_marker"
+    ] == [
+        ("orphan_marker", "m404"),
+        ("orphan_marker", "素材id-1"),
+        ("orphan_marker", "素材id-2"),
+    ]
+
+
 def test_识别无来源的标注() -> None:
     issues = reconcile([_draft("ch1", "正文[m404]结尾")], [])
     assert len(issues) == 1

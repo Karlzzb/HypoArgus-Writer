@@ -203,12 +203,21 @@ def _build_context_block(task: dict[str, Any]) -> str:
         else "（首章，无上一章摘要，无需承上启下）"
     )
     materials = citable_materials(task)
-    material_block = ""
     if materials:
         material_block = (
             f"\n假说列表（每条有稳定 id，角标须落在支撑对应假说的句子处）：\n"
             f"{_format_hypotheses(spec['hypotheses'])}\n"
             f"素材池（仅可引用池内 id，禁止杜撰/篡改来源）：\n{_format_materials(materials)}\n"
+        )
+    else:
+        # 素材池为空时仍须显式告知 writer：本章无可引素材，正文不得出现任何
+        # 角标。否则系统提示词「引用角标（仅当传入了素材池时）」的条件句留
+        # 下语义缝隙，真实模型会在无池时臆造 [素材id-N] 等占位角标——既无来源
+        # 又对 reconcile 的 ASCII 角标模式隐形（正文残留角注、书目为空、无警告）。
+        # 根因修复：堵住源头，让模型在无可引素材时以定性陈述展开、不臆造角标。
+        material_block = (
+            "\n本章无可引素材（素材池为空）：正文不得出现任何 `[...]` 角标，"
+            "不得臆造素材 id 或来源；无可引数据的论点按定性陈述展开，不得杜撰数值。\n"
         )
     word_count_section = f"{word_count_block}\n" if word_count_block else ""
     return f"""文种：{doc_type}
