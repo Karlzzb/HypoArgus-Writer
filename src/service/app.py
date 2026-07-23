@@ -14,7 +14,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, asynccontextmanager
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -57,6 +57,10 @@ from service.task_service import (
     TaskManager,
     TaskNotFound,
 )
+from service.mock_stack import build_mock_graph
+
+if TYPE_CHECKING:
+    from service.mock_scenarios import MockScenario
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
@@ -90,6 +94,7 @@ class CreateTaskRequest(BaseModel):
     user_intent: str
     user_identity: str = ""
     session_id: str = ""
+    mock: bool = False
 
     @field_validator("user_intent")
     @classmethod
@@ -105,6 +110,7 @@ class CreateTaskResponse(BaseModel):
 
     thread_id: str
     execution_trace_id: str
+    mock: bool = False
 
 
 class ReviewRequest(BaseModel):
@@ -297,6 +303,7 @@ def create_app(
     epoch: str | None = None,
     ping_interval: int | None = None,
     max_queue: int | None = None,
+    mock_scenario: "MockScenario | None" = None,
 ) -> FastAPI:
     """构建 FastAPI 应用：全部依赖在 lifespan 里装配。
 
@@ -311,6 +318,7 @@ def create_app(
     固定值以复现世代失配。ping_interval 为 SSE keepalive 心跳间隔秒数，
     缺省 15。max_queue 为每订阅者 SSE 队列容量（慢消费者两级丢弃背压），
     缺省读环境变量 SSE_MAX_QUEUE、未设置回落 _DEFAULT_MAX_QUEUE。
+    ``mock_scenario`` 注入 mock 栈场景；缺省 None 时 mock 图用 DEFAULT_SCENARIO。
     """
 
     app_epoch = epoch if epoch is not None else new_epoch()
@@ -355,6 +363,13 @@ def create_app(
                 document_review_max_retries=document_review_max_retries,
                 assembler_config=assembler_config,
             )
+            mock_graph = build_mock_graph(
+                checkpointer=saver,
+                hook_dispatcher=hook_dispatcher,
+                scenario=mock_scenario,
+                document_review_max_retries=document_review_max_retries,
+                assembler_config=assembler_config,
+            )
             graph_hub = EventHub(
                 loop, epoch=app_epoch, max_queue=app_max_queue
             )
@@ -364,7 +379,9 @@ def create_app(
             )
             app.state.hook_dispatcher = hook_dispatcher
             manager = TaskManager(
-                graph=graph,
+                real_graph=graph,
+                mock_graph=mock_graph,
+                saver=saver,
                 graph_hub=graph_hub,
                 loop=loop,
                 hook_dispatcher=hook_dispatcher,
@@ -392,9 +409,14 @@ def create_app(
     async def create_task(request: CreateTaskRequest) -> CreateTaskResponse:
         """创建写作任务并启动首跑。"""
         thread_id, trace_id = _manager().create_task(
-            request.user_intent, request.user_identity, request.session_id
+            request.user_intent,
+            request.user_identity,
+            request.session_id,
+            mock=request.mock,
         )
-        return CreateTaskResponse(thread_id=thread_id, execution_trace_id=trace_id)
+        return CreateTaskResponse(
+            thread_id=thread_id, execution_trace_id=trace_id, mock=request.mock
+        )
 
     @app.post("/retrieval", response_model=RetrievalResponse)
     async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:

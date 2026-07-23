@@ -38,6 +38,7 @@ from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START
 from service.app import create_app
 from service.event_broker import EventHub
 from service.event_envelope import GRAPH_EVENT_TYPES
+from service.mock_scenarios import DEFAULT_SCENARIO, DEGRADATION_SCENARIO, MockScenario
 from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
 from domain.state import ChapterDraft, SelfCheck, initial_state
@@ -70,6 +71,7 @@ def _make_app(
     epoch: str = TEST_EPOCH,
     ping_interval: int = 3600,
     max_queue: int | None = None,
+    mock_scenario: MockScenario | None = None,
 ) -> FastAPI:
     """带 FakeLLM 与 InMemorySaver 构建应用。
 
@@ -82,6 +84,10 @@ def _make_app(
     epoch 固定为 TEST_EPOCH，便于用 ``{epoch}-0`` 续传从流首回放整段历史
     （替代旧"订阅先全量回放"语义）；ping_interval 默认拉高以避免 keepalive
     ping 干扰断言，ping 专项用例单独调小。
+    mock_scenario 透传 create_app 的 mock 栈场景；缺省 None 时 mock 图用
+    DEFAULT_SCENARIO（自带 FakeLLM + 打桩子智能体，与真栈 FakeLLM 互不
+    干涉）。真栈仍由注入的 responses/keyed FakeLLM 驱动；mock 任务按
+    thread_id 前缀路由到 mock 图，与真任务共享同一 checkpointer。
     """
     fake = FakeLLM(
         list(responses),
@@ -102,6 +108,7 @@ def _make_app(
         epoch=epoch,
         ping_interval=ping_interval,
         max_queue=max_queue,
+        mock_scenario=mock_scenario,
         **subagent_kwargs,
     )
 
@@ -2505,5 +2512,316 @@ def test_逐字流_合并粒度可配且stub链路不逐字流():
                 last_event_id=FROM_START,
             )
             assert _content_delta_payloads(business) == []
+
+    asyncio.run(main())
+
+
+# ---- mock 档（issue #61）：双栈装配 + 形如真场景库 + 清理 ----
+
+import re
+
+_SNAKE_CASE_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _assert_snake_case(obj: Any) -> None:
+    """递归断言 dict/list 的所有键名皆为 snake_case（小写+下划线，无 camelCase）。"""
+    if isinstance(obj, dict):
+        for key in obj:
+            assert isinstance(key, str), f"键非字符串类型：{key!r}"
+            assert _SNAKE_CASE_KEY.match(key), f"键非 snake_case：{key!r}"
+            _assert_snake_case(obj[key])
+    elif isinstance(obj, list):
+        for item in obj:
+            _assert_snake_case(item)
+
+
+async def _create_mock_task(
+    client: httpx.AsyncClient, session_id: str = "sess-mock"
+) -> tuple[str, str]:
+    """创建 mock 任务（``mock:true``），返回（thread_id, trace_id）。"""
+    response = await client.post(
+        "/tasks",
+        json={
+            "user_intent": "写一篇人才培养方案",
+            "user_identity": "专业撰稿人",
+            "session_id": session_id,
+            "mock": True,
+        },
+    )
+    assert response.status_code == 201
+    body = response.json()
+    return body["thread_id"], body["execution_trace_id"]
+
+
+def test_mock档_秒回审阅门且事件序列与真实档同形字段snake_case():
+    """mock 任务秒级走完到审阅门：业务/可视化双通道事件类型与真栈同形，
+    所有业务帧 data 递归键名皆为 snake_case；状态/审阅包 REST 带 mock 标记。"""
+
+    async def main() -> None:
+        # 真栈 FakeLLM 给足应答（本用例只跑 mock 栈）；mock 栈用 DEFAULT_SCENARIO。
+        app = _make_app([*FIRST_PASS_RESPONSES, *REVISE_ROUND_RESPONSES])
+        async with _client(app) as client:
+            tid, _ = await _create_mock_task(client, "sess-mock-shape")
+            assert tid.startswith("mock-")
+
+            # 并发消费两条 SSE：业务流等 review_required、可视化流等 gate_blocked。
+            (business, _), (graph_frames, _) = await asyncio.gather(
+                _read_sse(
+                    client,
+                    f"/tasks/{tid}/stream",
+                    _stop_on_review_count(1),
+                    last_event_id=FROM_START,
+                ),
+                _read_sse(
+                    client,
+                    f"/graph_events?thread_id={tid}",
+                    _stop_on_types({"gate_blocked"}),
+                    last_event_id=FROM_START,
+                ),
+            )
+
+            # 业务流事件类型集 ⊆ 真栈同形集合（逐字流在真 rewriter 下可能出现
+            # content_delta；DEFAULT_SCENARIO 的 flush_chars 缺省 64、草稿短，
+            # 出现与否均合规，断言其若出现则字段 snake_case 即可）。
+            business_types = {f["event"] for f in business}
+            allowed = {"status", "product", "content_delta",
+                       "review_pack_ready", "review_required"}
+            assert business_types <= allowed, (
+                f"业务流事件类型超出允许集：{business_types - allowed}"
+            )
+
+            # 所有业务帧 data 递归键名皆 snake_case（与真栈 HTTP 契约同形）。
+            for frame in business:
+                _assert_snake_case(frame["data"])
+
+            # 可视化帧 data 同样要求 snake_case（事件信封字段已定型）。
+            for frame in graph_frames:
+                _assert_snake_case(frame["data"])
+
+            # 收到 review_required：路由元数据含 chapter_ids == ["ch1","ch2"]。
+            review = next(f for f in business if f["event"] == "review_required")
+            assert review["data"]["data"]["chapter_ids"] == ["ch1", "ch2"]
+
+            # 收到 product 事件：kind 落在四类产物分支之一。
+            product_kinds = {
+                f["data"]["data"]["kind"]
+                for f in business
+                if f["event"] == "product"
+            }
+            assert product_kinds <= {
+                "outline_ready", "materials_ready",
+                "chapter_ready", "review_pack_ready",
+            }
+            assert product_kinds, "mock 任务到门须至少发一类 product 事件"
+
+            # 状态 REST：停审阅门、带 mock 标记。
+            status = (await client.get(f"/tasks/{tid}")).json()
+            assert status["status"] == "AWAIT_USER_REVIEW"
+            assert status["awaiting_review"] is True
+            assert status["mock"] is True
+
+            # 审阅包 REST：2 章、正文含角标、篇级 warn 非空、带 mock 标记。
+            pack = (await client.get(f"/tasks/{tid}/review")).json()
+            assert [c["chapter_id"] for c in pack["chapters"]] == ["ch1", "ch2"]
+            assert all("[m-ch1-p1-h1]" in pack["chapters"][0]["text"]
+                       or "[m-ch2-p1-h1]" in c["text"]
+                       for c in pack["chapters"])
+            assert "[m-ch1-p1-h1]" in pack["chapters"][0]["text"]
+            assert "[m-ch2-p1-h1]" in pack["chapters"][1]["text"]
+            assert pack["review_warnings"], "篇级终审 warn 须非空"
+            assert pack["mock"] is True
+
+    asyncio.run(main())
+
+
+def test_mock档_thread_id带前缀且状态响应带mock标记():
+    """mock 与真任务 thread_id 前缀区分；状态/产物/审阅包响应的 mock 字段
+    按前缀正确回填 True/False。"""
+
+    async def main() -> None:
+        app = _make_app([*FIRST_PASS_RESPONSES, *REVISE_ROUND_RESPONSES])
+        async with _client(app) as client:
+            mock_tid, _ = await _create_mock_task(client, "sess-prefix-mock")
+            real_tid, _ = await _create_task(client, "sess-prefix-real")
+
+            assert mock_tid.startswith("mock-")
+            assert not real_tid.startswith("mock-")
+
+            # mock 任务到门（秒回）。
+            await _read_sse(
+                client,
+                f"/tasks/{mock_tid}/stream",
+                _stop_on_review_count(1),
+                last_event_id=FROM_START,
+            )
+
+            mock_status = (await client.get(f"/tasks/{mock_tid}")).json()
+            assert mock_status["mock"] is True
+
+            real_status = (await client.get(f"/tasks/{real_tid}")).json()
+            assert real_status["mock"] is False
+
+            # 产物快照与审阅包的 mock 字段按前缀路由回填。
+            mock_products = (await client.get(f"/tasks/{mock_tid}/products")).json()
+            assert mock_products["mock"] is True
+
+            mock_pack = (await client.get(f"/tasks/{mock_tid}/review")).json()
+            assert mock_pack["mock"] is True
+
+    asyncio.run(main())
+
+
+def test_mock档与真实档共享checkpointer_重启后可查可回滚可续跑():
+    """mock 任务与真任务共享同一 checkpointer：进程重启（TaskManager 内存
+    登记丢失）后按检查点自动重建；rollback 返回 202 并重新中断在审阅门；
+    resume 补发 review_required（停在原中断点不重跑图）。"""
+
+    async def main() -> None:
+        saver = InMemorySaver(serde=checkpoint_serializer())
+        # app1：跑一个 mock 任务到门后丢弃，模拟进程死亡。
+        app1 = _make_app([], checkpointer=saver)
+        async with _client(app1) as client:
+            tid, _ = await _create_mock_task(client, "sess-restart-1")
+            await _read_sse(
+                client,
+                f"/tasks/{tid}/stream",
+                _stop_on_review_count(1),
+                last_event_id=FROM_START,
+            )
+
+        # app2：同 saver 重启；登记按检查点自动重建。
+        app2 = _make_app([], checkpointer=saver)
+        async with _client(app2) as client:
+            # 重启后状态可查、mock 标记保留。
+            status = (await client.get(f"/tasks/{tid}")).json()
+            assert status["status"] == "AWAIT_USER_REVIEW"
+            assert status["awaiting_review"] is True
+            assert status["mock"] is True
+
+            # 检查点清单可列：找到停门的历史检查点。
+            checkpoints = (await client.get(f"/tasks/{tid}/checkpoints")).json()
+            target = next(
+                c for c in checkpoints
+                if "human_review_gate" in c["next"]
+                and c["status"] == "AWAIT_USER_REVIEW"
+            )
+
+            # rollback 到该检查点 → 202；重放后重新中断在审阅门。
+            rollback = await client.post(
+                f"/tasks/{tid}/rollback",
+                json={"checkpoint_id": target["checkpoint_id"]},
+            )
+            assert rollback.status_code == 202
+            # 等待 rollback 重放产生的 review_required（兜底应答仍走完状态机到门）；
+            # 超时即视作回滚后直接停在门，校验状态即可。
+            try:
+                await _read_sse(
+                    client,
+                    f"/tasks/{tid}/stream",
+                    _stop_on_review_count(1),
+                    last_event_id=FROM_START,
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                pass
+            post_rollback_status = (await client.get(f"/tasks/{tid}")).json()
+            assert post_rollback_status["status"] == "AWAIT_USER_REVIEW"
+            assert post_rollback_status["mock"] is True
+
+            # resume 补发：停在原中断点不重跑图，状态仍 AWAIT_USER_REVIEW。
+            resume = await client.post(
+                f"/tasks/{tid}/resume", json={"session_id": "sess-restart-2"}
+            )
+            assert resume.status_code == 200
+            # resume 后业务流再收到 review_required（停门补发）。
+            await _read_sse(
+                client,
+                f"/tasks/{tid}/stream",
+                _stop_on_review_count(1),
+                last_event_id=FROM_START,
+            )
+            final_status = (await client.get(f"/tasks/{tid}")).json()
+            assert final_status["status"] == "AWAIT_USER_REVIEW"
+            assert final_status["mock"] is True
+
+    asyncio.run(main())
+
+
+def test_mock档场景库_多章大纲角标正文篇级warn与退化重试attempt递增():
+    """场景库双分支覆盖：(a) DEFAULT_SCENARIO 多章大纲/角标正文/篇级 warn；
+    (b) DEGRADATION_SCENARIO + 小 flush 阈值触发 ch1 退化重试 attempt 1→2、
+    sequence 复位。"""
+
+    async def main() -> None:
+        # (a) 默认场景：不开 env 覆盖。
+        app = _make_app([], mock_scenario=DEFAULT_SCENARIO)
+        async with _client(app) as client:
+            tid, _ = await _create_mock_task(client, "sess-scen-default")
+            await _read_sse(
+                client,
+                f"/tasks/{tid}/stream",
+                _stop_on_review_count(1),
+                last_event_id=FROM_START,
+            )
+            pack = (await client.get(f"/tasks/{tid}/review")).json()
+            assert [c["chapter_id"] for c in pack["chapters"]] == ["ch1", "ch2"]
+            assert "[m-ch1-p1-h1]" in pack["chapters"][0]["text"]
+            assert "[m-ch2-p1-h1]" in pack["chapters"][1]["text"]
+            assert pack["review_warnings"], "篇级 transition warn 须非空"
+            assert any(
+                "章间衔接" in w for w in pack["review_warnings"]
+            ), "篇级 warn 须含章间衔接"
+
+        # (b) 退化场景：env 小阈值 + DEGRADATION_SCENARIO（ch1 键控序列已覆盖
+        # [malformed, valid draft, valid revise]）。
+        with _EnvOverride(WRITER_DELTA_FLUSH_CHARS="4", WRITER_DELTA_FLUSH_MS="0"):
+            app = _make_app([], mock_scenario=DEGRADATION_SCENARIO)
+            async with _client(app) as client:
+                tid, _ = await _create_mock_task(client, "sess-scen-degrade")
+                business, _ = await _read_sse(
+                    client,
+                    f"/tasks/{tid}/stream",
+                    _stop_on_review_count(1),
+                    last_event_id=FROM_START,
+                )
+                deltas = _content_delta_payloads(business)
+                ch1_draft = [
+                    p for p in deltas
+                    if p["chapter_id"] == "ch1" and p["mode"] == "draft"
+                ]
+                attempts = {p["attempt"] for p in ch1_draft}
+                assert {1, 2} <= attempts, (
+                    f"ch1 draft 退化重试 attempt 须见 1 与 2，实际 {attempts}"
+                )
+                attempt2_seq0 = [
+                    p for p in ch1_draft if p["attempt"] == 2
+                ][0]["sequence"] == 0
+                assert attempt2_seq0, "新 attempt 的 sequence 须从 0 复位"
+
+    asyncio.run(main())
+
+
+def test_mock档清理策略_按前缀清mock线程():
+    """``purge_mock_threads`` 按 ``mock-`` 前缀清理检查点线程：清后该任务
+    GET 返回 404（检查点已删、_ensure_entry 重建时无检查点 → TaskNotFound）。"""
+
+    async def main() -> None:
+        saver = InMemorySaver(serde=checkpoint_serializer())
+        app = _make_app([], checkpointer=saver, mock_scenario=DEFAULT_SCENARIO)
+        async with _client(app) as client:
+            tid, _ = await _create_mock_task(client, "sess-purge")
+            await _read_sse(
+                client,
+                f"/tasks/{tid}/stream",
+                _stop_on_review_count(1),
+                last_event_id=FROM_START,
+            )
+            # lifespan 启动后 manager 落在 app.state.manager。
+            manager = app.state.manager
+            n = manager.purge_mock_threads()
+            assert n >= 1, "至少清理掉本用例创建的 mock 任务"
+            # 清理后 GET 状态返回 404（检查点已删）。
+            resp = await client.get(f"/tasks/{tid}")
+            assert resp.status_code == 404
 
     asyncio.run(main())

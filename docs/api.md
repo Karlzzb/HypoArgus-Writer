@@ -19,6 +19,7 @@
 | 任务状态 | `IDLE` / `FRAMEWORK_BUILDING` / `REFERENCE_FETCHING` / `ARTICLE_WRITING` / `CITATION_CHECKING` / `AWAIT_USER_REVIEW` / `FINISHED` / `ERROR_FAILED` |
 | 人工审阅 | 任务写完一轮后停在人工中断点（`awaiting_review=true`），调用方提交 `finalize`（定稿）或 `revise`（携修订意见再迭代一轮），可无限迭代；`revise` 触及超过大纲一半章节时系统先回显解析清单，需提交 `confirm` 确认后才执行 |
 | 检查点 | 每个关键步骤持久化到 Postgres；支持崩溃恢复与回滚到任意历史检查点 |
+| mock 任务 | `POST /tasks` 带 `mock:true` 触发的确定性 mock 栈任务，`thread_id` 带 `mock-` 前缀，与真任务共享同一检查点存档器；状态/产物/审阅包/书目响应均带 `mock:true` 标记，供集成测试与联调秒回审阅门 |
 
 ### 1.2 典型调用时序
 
@@ -75,6 +76,7 @@ Java 端                                  HypoArgus-Writer
 | `user_intent` | string | 是 | 写作意图，不允许空白 |
 | `user_identity` | string | 否 | 用户身份标识，缺省 `""` |
 | `session_id` | string | 否 | 调用方会话标识，缺省 `""`，只透传 |
+| `mock` | boolean | 否 | 缺省 `false`；`true` 时走确定性 mock 栈，秒回审阅门，`thread_id` 带 `mock-` 前缀，供集成测试与联调 |
 
 ```json
 { "user_intent": "写一篇论证国产数据库替代可行性的行业白皮书", "user_identity": "u-1001", "session_id": "sess-abc" }
@@ -86,6 +88,8 @@ Java 端                                  HypoArgus-Writer
 { "thread_id": "9f3c...32位hex", "execution_trace_id": "1d2e...32位hex" }
 ```
 
+`mock:true` 时响应体额外带 `"mock": true`，且 `thread_id` 形如 `mock-<32位hex>`。
+
 ### 2.2 查询任务状态
 
 `GET /tasks/{thread_id}` → `200 OK`
@@ -96,7 +100,8 @@ Java 端                                  HypoArgus-Writer
   "status": "AWAIT_USER_REVIEW",
   "iteration_round": 1,
   "awaiting_review": true,
-  "running": false
+  "running": false,
+  "mock": false
 }
 ```
 
@@ -106,6 +111,7 @@ Java 端                                  HypoArgus-Writer
 | `iteration_round` | int | 当前迭代轮次，从 0 起 |
 | `awaiting_review` | bool | 是否停在人工中断点（true 时才能提交审阅） |
 | `running` | bool | 是否有图运行正在进行 |
+| `mock` | bool | 是否 mock 任务（`thread_id` 带 `mock-` 前缀），真任务为 `false` |
 
 错误：任务不存在 → 404。
 
@@ -322,6 +328,30 @@ Java 端                                  HypoArgus-Writer
 调用方在收到 SSE `review_pack_ready` 摘要或 `review_required` 路由信号后取此全文审阅；
 SSE 摘要丢了靠此 REST 对账重取。
 `review_required` 只携路由元数据，引文警告与篇级 warn 全文只走本接口。
+
+### 2.10 mock 档与清理策略
+
+mock 档是确定性的「形如真」场景栈，供集成测试与联调秒回审阅门，无需真实模型链路。
+mock 栈在 `create_app` 的 lifespan 期装配：FakeLLM（场景库提供顺序/键控应答）
++ 真改写器（`make_rewriter_loop`，逐字流与退化重试与真栈同口径）
++ 打桩 `search_agent`/`chapter_reviewer`（零 LLM、恒通过）；
+与真栈共用同一 checkpointer，故 mock 任务的检查点、崩溃恢复、回滚与真任务同形。
+
+场景库（`src/service/mock_scenarios.py`）单点登记四类分支覆盖：
+`DEFAULT_SCENARIO`（多章大纲解析 / 角标正文 / 篇级 transition warn）、
+`DEGRADATION_SCENARIO`（ch1 写作键控序列含 malformed JSON，配小 flush 阈值触发 attempt 1 失败、attempt 2 成功的退化重试）。
+新增场景只在此单点登记，装配档只认 `MockScenario` 一个类型。
+
+mock 任务的 `thread_id` 带 `mock-` 前缀，`TaskManager` 按前缀路由到 mock 图；
+`GET /tasks/{id}`、`GET /tasks/{id}/products`、`GET /tasks/{id}/review`、
+`GET /tasks/{id}/bibliography` 的响应均带 `mock: true` 标记，真任务带 `mock: false`。
+mock 任务可在任意环境触发（含线上），已知并接受；其检查点与真任务混存于同一存档器。
+
+生产环境定期清理 mock 检查点线程，避免 mock 残留占用存档空间：
+脚本 `scripts/cleanup_mock_tasks.py` 读 `HYPOARGUS_PG_DSN` 连接 Postgres，
+按 `thread_id LIKE 'mock-%'` 删除 `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` 三表；
+保留窗口由环境变量 `MOCK_CLEANUP_DAYS` 控制，缺省 7 天。
+运行期清理亦可通过 `TaskManager.purge_mock_threads()` 触发（枚举存档器中 `mock-` 前缀 thread_id，逐个 `delete_thread` 并摘除内存登记）。
 
 ## 3. SSE 通道
 

@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
@@ -218,14 +219,18 @@ class TaskManager:
     def __init__(
         self,
         *,
-        graph: CompiledStateGraph,
+        real_graph: CompiledStateGraph,
+        mock_graph: CompiledStateGraph,
+        saver: BaseCheckpointSaver,
         graph_hub: EventHub,
         loop: asyncio.AbstractEventLoop,
         hook_dispatcher: SubagentHookDispatcher,
         epoch: str,
         max_queue: int,
     ) -> None:
-        self._graph = graph
+        self._real_graph = real_graph
+        self._mock_graph = mock_graph
+        self._saver = saver
         self._graph_hub = graph_hub
         self._loop = loop
         self._hook_dispatcher = hook_dispatcher
@@ -233,13 +238,32 @@ class TaskManager:
         self._max_queue = max_queue
         self._tasks: dict[str, _TaskEntry] = {}
 
+    @staticmethod
+    def _is_mock(thread_id: str) -> bool:
+        """是否 mock- 前缀线程（路由到 mock 图）。"""
+        return thread_id.startswith("mock-")
+
+    def _graph_for(self, thread_id: str) -> CompiledStateGraph:
+        """按 thread_id 前缀路由到对应编译图：mock- 走 mock 图，其余走真图。"""
+        return self._mock_graph if self._is_mock(thread_id) else self._real_graph
+
     # ---- 对外操作 ----
 
     def create_task(
-        self, user_intent: str, user_identity: str, session_id: str
+        self,
+        user_intent: str,
+        user_identity: str,
+        session_id: str,
+        *,
+        mock: bool = False,
     ) -> tuple[str, str]:
-        """创建写作任务并启动首跑，返回（thread_id, trace_id）。"""
-        thread_id = uuid.uuid4().hex
+        """创建写作任务并启动首跑，返回（thread_id, trace_id）。
+
+        ``mock=True`` 时 thread_id 加 ``mock-`` 前缀，运行路由到 mock 图
+        （FakeLLM + 打桩子智能体），与真栈共享同一 checkpointer，故后续
+        ``get_status`` / ``submit_review`` 等按 thread_id 前缀自动路由。
+        """
+        thread_id = ("mock-" + uuid.uuid4().hex) if mock else uuid.uuid4().hex
         trace_id = uuid.uuid4().hex
         entry = _TaskEntry(
             thread_id=thread_id,
@@ -271,7 +295,7 @@ class TaskManager:
         resume_value = build_resume_value(action, feedback)
 
         config = self._thread_config(thread_id)
-        snapshot = self._graph.get_state(config)
+        snapshot = self._graph_for(thread_id).get_state(config)
         if not self._at_interrupt(snapshot):
             raise TaskConflict(f"任务 {thread_id} 未停在人工中断点，不能提交审阅")
 
@@ -299,7 +323,7 @@ class TaskManager:
             entry.session_id = session_id
 
         config = self._thread_config(thread_id)
-        snapshot = self._graph.get_state(config)
+        snapshot = self._graph_for(thread_id).get_state(config)
         if not snapshot.values and not snapshot.next:
             raise TaskNotFound(f"任务不存在：{thread_id}（无检查点）")
 
@@ -345,7 +369,9 @@ class TaskManager:
             raise TaskConflict(f"任务 {thread_id} 已有运行在进行中")
 
         target = None
-        for snapshot in self._graph.get_state_history(self._thread_config(thread_id)):
+        for snapshot in self._graph_for(thread_id).get_state_history(
+            self._thread_config(thread_id)
+        ):
             if snapshot.config["configurable"].get("checkpoint_id") == checkpoint_id:
                 target = snapshot
                 break
@@ -374,7 +400,9 @@ class TaskManager:
         """检查点元数据清单（新到旧）：绝不含正文。"""
         self._ensure_entry(thread_id)
         checkpoints: list[dict[str, Any]] = []
-        for snapshot in self._graph.get_state_history(self._thread_config(thread_id)):
+        for snapshot in self._graph_for(thread_id).get_state_history(
+            self._thread_config(thread_id)
+        ):
             values = snapshot.values
             checkpoints.append(
                 {
@@ -396,7 +424,7 @@ class TaskManager:
     def get_status(self, thread_id: str) -> dict[str, Any]:
         """任务当前状态摘要。"""
         entry = self._ensure_entry(thread_id)
-        snapshot = self._graph.get_state(self._thread_config(thread_id))
+        snapshot = self._graph_for(thread_id).get_state(self._thread_config(thread_id))
         return {
             "thread_id": thread_id,
             "status": status_text(
@@ -405,6 +433,7 @@ class TaskManager:
             "iteration_round": snapshot.values.get("iteration_round", 0),
             "awaiting_review": self._at_interrupt(snapshot),
             "running": entry.running,
+            "mock": self._is_mock(thread_id),
         }
 
     def get_products(self, thread_id: str) -> dict[str, Any]:
@@ -419,7 +448,9 @@ class TaskManager:
         ChapterSpec.id 映射，materials 按章分组、draft 未完成时为 null。
         """
         self._ensure_entry(thread_id)
-        values = self._graph.get_state(self._thread_config(thread_id)).values
+        values = self._graph_for(thread_id).get_state(
+            self._thread_config(thread_id)
+        ).values
         outline = values.get("outline", [])
         drafts_by_id = {
             draft.chapter_id: draft for draft in values.get("chapter_drafts", [])
@@ -453,6 +484,7 @@ class TaskManager:
             "status": status_text(values.get("status"), WorkflowStatus.IDLE.value),
             "iteration_round": values.get("iteration_round", 0),
             "chapters": chapters,
+            "mock": self._is_mock(thread_id),
         }
 
     def get_review_pack(self, thread_id: str) -> dict[str, Any]:
@@ -465,7 +497,7 @@ class TaskManager:
         """
         self._ensure_entry(thread_id)
         config = self._thread_config(thread_id)
-        snapshot = self._graph.get_state(config)
+        snapshot = self._graph_for(thread_id).get_state(config)
         if not self._at_interrupt(snapshot):
             raise TaskConflict(f"任务 {thread_id} 未停在人工中断点，审阅包不可取")
         values = snapshot.values
@@ -476,6 +508,7 @@ class TaskManager:
             "status": status_text(values.get("status"), WorkflowStatus.IDLE.value),
             "iteration_round": iteration_round,
             "pack_version": _review_pack_version(content, iteration_round),
+            "mock": self._is_mock(thread_id),
             **content,
         }
 
@@ -486,7 +519,9 @@ class TaskManager:
         尚无章节正文（框架或检索阶段）时不可渲染。
         """
         self._ensure_entry(thread_id)
-        values = self._graph.get_state(self._thread_config(thread_id)).values
+        values = self._graph_for(thread_id).get_state(
+            self._thread_config(thread_id)
+        ).values
         drafts = values.get("chapter_drafts", [])
         if not drafts:
             raise TaskConflict(f"任务 {thread_id} 尚无章节正文，不能渲染书目")
@@ -506,6 +541,7 @@ class TaskManager:
                 }
                 for entry in rendered.entries
             ],
+            "mock": self._is_mock(thread_id),
         }
 
     def business_hub(self, thread_id: str) -> EventHub:
@@ -523,6 +559,45 @@ class TaskManager:
             if run_task is not None and not run_task.done():
                 run_task.cancel()
             entry.hub.close()
+
+    def purge_mock_threads(
+        self, *, older_than: datetime | None = None
+    ) -> int:
+        """按 ``mock-`` 前缀清理检查点线程：枚举存档器中所有 mock- 前缀 thread_id，
+        经 ``delete_thread`` 逐个删除，并从内存登记摘除。``older_than`` 给定时
+        只删最新检查点 ``created_at`` 早于该时刻的线程。返回实际删除数。
+
+        用 ``saver.list(config=None)`` 枚举全部 CheckpointTuple，取其
+        thread_id（``config['configurable']['thread_id']``），筛 mock- 前缀去重；
+        ``older_than`` 非空时按每 thread 最新 ``tuple.created_at`` 过滤。枚举完成后
+        对每个 thread_id 调 ``self._saver.delete_thread(thread_id)``，并
+        ``self._tasks.pop(thread_id, None)``。"""
+        seen: set[str] = set()
+        latest: dict[str, datetime] = {}
+        for tpl in self._saver.list(config=None):
+            cfg = tpl.config or {}
+            tid = (cfg.get("configurable") or {}).get("thread_id")
+            if not tid or not tid.startswith("mock-"):
+                continue
+            seen.add(tid)
+            created = getattr(tpl, "created_at", None)
+            if created is None:
+                continue
+            prev = latest.get(tid)
+            if prev is None or created > prev:
+                latest[tid] = created
+        if older_than is not None:
+            targets = [
+                tid
+                for tid in seen
+                if tid in latest and latest[tid] < older_than
+            ]
+        else:
+            targets = list(seen)
+        for tid in targets:
+            self._saver.delete_thread(tid)
+            self._tasks.pop(tid, None)
+        return len(targets)
 
     def _new_hub(self, thread_id: str) -> EventHub:
         """为任务建一条业务通道枢纽：带本进程世代 id 与带 thread_id 的 reconcile 载荷。"""
@@ -546,7 +621,7 @@ class TaskManager:
         entry = self._tasks.get(thread_id)
         if entry is not None:
             return entry
-        snapshot = self._graph.get_state(self._thread_config(thread_id))
+        snapshot = self._graph_for(thread_id).get_state(self._thread_config(thread_id))
         if not snapshot.values and not snapshot.next:
             raise TaskNotFound(f"任务不存在：{thread_id}（无检查点）")
         entry = _TaskEntry(
@@ -728,7 +803,7 @@ class TaskManager:
                 session_id=entry.session_id,
                 trace_id=entry.trace_id,
             ):
-                for mode, chunk in self._graph.stream(
+                for mode, chunk in self._graph_for(entry.thread_id).stream(
                     graph_input, config, stream_mode=["updates", "debug"]
                 ):
                     emitter.handle(mode, chunk)
@@ -837,11 +912,15 @@ class TaskManager:
     def _finish_run(self, entry: _TaskEntry, emitter: GraphRunEmitter) -> None:
         """运行正常结束后的收尾：中断转审阅门双发，终态发布定稿全文。"""
         if emitter.interrupt_payload is not None:
-            values = self._graph.get_state(self._thread_config(entry.thread_id)).values
+            values = self._graph_for(entry.thread_id).get_state(
+                self._thread_config(entry.thread_id)
+            ).values
             self._publish_review_gate(entry, emitter.interrupt_payload, values)
             return
         if emitter.last_status is WorkflowStatus.FINISHED:
-            values = self._graph.get_state(self._thread_config(entry.thread_id)).values
+            values = self._graph_for(entry.thread_id).get_state(
+                self._thread_config(entry.thread_id)
+            ).values
             chapters = [
                 {
                     "chapter_id": draft.chapter_id,
