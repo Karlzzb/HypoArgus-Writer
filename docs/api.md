@@ -329,7 +329,86 @@ Java 端                                  HypoArgus-Writer
 SSE 摘要丢了靠此 REST 对账重取。
 `review_required` 只携路由元数据，引文警告与篇级 warn 全文只走本接口。
 
-### 2.10 mock 档与清理策略
+### 2.10 运行中产物快照
+
+`GET /tasks/{thread_id}/products` → `200 OK`
+
+任意状态可调的只读检查点快照：目录/假说/各章素材/已完成章正文，章级粒度。
+纯只读检查点 state，不引入新状态、不加写路径；SSE 丢帧（`product` / `content_delta`）靠此 REST 对账重取。
+与 §2.2 状态查询同属只读探态，但本接口额外给运行中内容。
+与 §2.9 审阅包携带的是同一份检查点 state，但分形不同：§2.9 把大纲（`outline`，含 `points`/`hypotheses`）、各章正文（`chapters`，仅 `chapter_id`/`text`/`summary`）、引文库（`citation_library`，扁平素材）分字段平铺且仅在停门可取；本接口把它们按章聚合成 `chapters[]`（每章内嵌 `points`/`materials`/`draft`）。两者取数边界对比：
+
+- §2.9 `/review` 仅 `awaiting_review=true` 可取，否则 409（不返回半成品）；
+- 本接口**任意状态可取**，未完成部分由字段值表达边界——章未检索时 `materials` 为空、未写完时 `draft` 为 `null`、刚创建尚无大纲时 `chapters` 为空列表，**不返回 409**。
+
+任务不存在 → 404。
+mock 任务响应带 `mock: true`，真任务 `mock: false`（见 §2.11）。
+
+响应体：
+
+```json
+{
+  "thread_id": "9f3c...",
+  "status": "ARTICLE_WRITING",
+  "iteration_round": 0,
+  "mock": false,
+  "chapters": [
+    {
+      "chapter_id": "ch1",
+      "title": "国产数据库替代的现状",
+      "subsections": ["1.1 渗透率", "1.2 替代路径"],
+      "chapter_type": "骨架章标题原文或 null",
+      "planned_summary": "本章预判一句话概要",
+      "points": [
+        {
+          "id": "p1",
+          "text": "国产数据库替代能力的现状与边界",
+          "hypotheses": [
+            { "id": "h1", "text": "...", "refute_condition": "...", "angle": "假设" }
+          ]
+        }
+      ],
+      "materials": [
+        {
+          "id": "m-ch1-h1-cit-1",
+          "hypothesis_id": "h1",
+          "chapter_id": "ch1",
+          "source": "来源名称",
+          "url": "https://example.com/evidence",
+          "source_kind": "web",
+          "excerpt": "证据摘录……",
+          "relevance_score": 0.9,
+          "verdict": "pass"
+        }
+      ],
+      "draft": {
+        "chapter_id": "ch1",
+        "text": "正文……含原位素材 id 角标",
+        "summary": "本章一句话摘要",
+        "self_check": { "citations_ok": true, "issues": [] }
+      }
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `status` / `iteration_round` / `mock` | string / int / bool | 与 §2.2 `GET /tasks/{id}` 同源（同检查点 state 派生） |
+| `chapters` | array | 章级快照，逐章对齐大纲；刚创建尚无大纲时为空列表 |
+| `chapters[].chapter_id` | string | 由 `ChapterSpec.id` 映射 |
+| `chapters[].chapter_type` | string\|null | 骨架章标题原文；自由结构模式为 `null` |
+| `chapters[].points` | array | `ArgumentPoint`：`{id, text, hypotheses:[...]}` |
+| `chapters[].points[].hypotheses` | array | `Hypothesis`：`{id, text, refute_condition, angle}` |
+| `chapters[].materials` | array | 该章已落库素材（按章分组）；未检索为空 |
+| `chapters[].materials[]` | object | `Material` 全字段：`id`/`hypothesis_id`/`chapter_id`/`source`/`url`/`source_kind`/`excerpt`/`relevance_score`/`verdict`；`url` 仅联网来源必带，余者可为 `null`；`source_kind` 三值 `web`/`knowledge_base`/`structured_data`；`verdict` 三值 `pass`/`inconclusive`/`fail` |
+| `chapters[].draft` | object\|null | `ChapterDraft`：`{chapter_id, text, summary, self_check}`；未写完为 `null`，调用方据此判本章是否已落正文 |
+| `chapters[].draft.self_check` | object | `SelfCheck`：`{citations_ok: bool, issues: [string]}` |
+
+说明：本接口 `chapters[].draft` 与 §3.1 `chapter_ready` 事件的 `draft` 载荷严格同构（`{chapter_id, text, summary, self_check}`），`chapters[].materials` 与 `materials_ready` 事件的 `materials` 同构（`Material` 全字段），章级骨架（`title`/`subsections`/`chapter_type`/`planned_summary`/`points`/`hypotheses`）与 `outline_ready` 事件的 `outline[]` 同构（仅章标识在事件载荷记为 `id`、本接口记为 `chapter_id`，同源 `ChapterSpec.id`）——SSE 丢帧后按 REST 取回同等内容。
+`draft.text` 含原位素材 id 角标（未重编号）；重编号正文 + 配套书目走 §2.7 `GET /tasks/{id}/bibliography`。
+
+### 2.11 mock 档与清理策略
 
 mock 档是确定性的「形如真」场景栈，供集成测试与联调秒回审阅门，无需真实模型链路。
 mock 栈在 `create_app` 的 lifespan 期装配：FakeLLM（场景库提供顺序/键控应答）
