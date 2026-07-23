@@ -61,6 +61,7 @@ from nodes.reference_orchestrator import (
 from nodes.writing_orchestrator import (
     make_writing_orchestrator_node,
     next_writing_step,
+    revision_send_payloads,
 )
 
 PG_DSN_ENV = "HYPOARGUS_PG_DSN"
@@ -148,13 +149,21 @@ def route_after_writing_orchestrator(state: WritingAgentState) -> str:
     return "document_reviewer"
 
 
-def route_after_document_reviewer(state: WritingAgentState) -> str:
-    """终审后的路由：失败且未超限定向回退写作，通过或超限进入人工中断点。
+def route_after_document_reviewer(state: WritingAgentState) -> str | list[Send]:
+    """终审后的路由：失败且未超限并行回退重写，通过或超限进入人工中断点。
 
     判定信号是 document_reviewer 显式写入的状态机值：CITATION_CHECKING
-    表示还有重试预算、回退重写；AWAIT_USER_REVIEW 表示通过或超限交人工。
+    表示还有重试预算与待修订失败章——为每个本轮未修订的失败章各发一个 Send
+    到 writing_orchestrator 并行回退（对齐首写扇出，回退各章数据独立、
+    只依赖本轮前 state + 共享 citation_report），全分支完成后汇合经
+    route_after_writing_orchestrator 前进终审；AWAIT_USER_REVIEW 表示通过
+    或超限交人工。无待修订载荷时回落串行 writing_orchestrator（防御，
+    正常路径不达——CITATION_CHECKING 必伴非空 failed_chapter_ids）。
     """
     if state.get("status") == WorkflowStatus.CITATION_CHECKING:
+        payloads = revision_send_payloads(state)
+        if payloads:
+            return [Send("writing_orchestrator", payload) for payload in payloads]
         return "writing_orchestrator"
     return "human_review_gate"
 

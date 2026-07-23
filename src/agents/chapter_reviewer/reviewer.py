@@ -35,8 +35,10 @@ from llm.llm_client import LLMFactory
 MAX_CONCURRENT_CALLS_ENV = "CHAPTER_REVIEWER_MAX_CONCURRENT_CALLS"
 """评审外部 LLM 调用总并发阈值的环境变量名。"""
 
-DEFAULT_MAX_CONCURRENT_CALLS = 2
-"""并发阈值缺省值：与检索子智能体同口径，从紧避免并行章节评审击穿模型限流。"""
+DEFAULT_MAX_CONCURRENT_CALLS = 4
+"""并发阈值缺省值：首写 8 章并行扇出时把章级评审压成 2 波而非 4 波，
+仍远低于模型限流；与检索子智能体分口径（检索外层从紧、评审适度放宽），
+可在 --real 运行时按模型限流实情经环境变量下调。"""
 
 
 def make_reviewer_run(

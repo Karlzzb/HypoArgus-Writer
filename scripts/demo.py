@@ -147,17 +147,48 @@ class ArchiveRecorder:
             return None
         archive_path = self.resolve_path()
         path = archive_path.with_name(f"{archive_path.stem}-article.md")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            self._article_text(chapters, rendered.get("bibliography") or []),
+            encoding="utf-8",
+        )
+        return path
+
+    def write_round_article(
+        self, round_no: int, rendered: dict[str, Any]
+    ) -> Path | None:
+        """人工反馈前/各中断点的初稿快照单独落盘，供人在反馈前审阅当版全文。
+
+        路径为过程档案同名加 -article-rN 后缀；第 1 次中断点即人工反馈前
+        的那一版原文。无章节可渲染时不落盘，返回 None。
+        """
+        chapters = (rendered or {}).get("chapters") or []
+        if not chapters:
+            return None
+        archive_path = self.resolve_path()
+        path = archive_path.with_name(
+            f"{archive_path.stem}-article-r{round_no}.md"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            self._article_text(chapters, rendered.get("bibliography") or []),
+            encoding="utf-8",
+        )
+        return path
+
+    @staticmethod
+    def _article_text(
+        chapters: list[dict[str, Any]], bibliography: list[dict[str, Any]]
+    ) -> str:
+        """正文 + 参考文献的纯文本拼装，成品与各轮初稿快照共用。"""
         lines: list[str] = []
         for chapter in chapters:
             lines += [chapter["text"], ""]
-        bibliography = rendered.get("bibliography") or []
         if bibliography:
             lines += ["## 参考文献", ""]
             lines += [f"{entry['text']}" for entry in bibliography]
             lines.append("")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines), encoding="utf-8")
-        return path
+        return "\n".join(lines)
 
     # ---- 渲染 ----
 
@@ -589,13 +620,48 @@ async def _snapshot_round(
             f"/tasks/{thread_id}/bibliography?format=markdown"
         )
         response.raise_for_status()
-        recorder.record_round_snapshot(round_no, response.json())
+        rendered = response.json()
+        recorder.record_round_snapshot(round_no, rendered)
+        # 人工反馈前/各中断点的初稿独立落盘，供人在反馈前审阅当版全文。
+        article = recorder.write_round_article(round_no, rendered)
+        if article is not None:
+            print(f"  [档案] 第 {round_no} 轮初稿已落盘：{article}")
     except httpx.HTTPError as exc:
         print(f"  [档案] 第 {round_no} 轮渲染快照抓取失败（不影响主流程）：{exc}")
 
 
+def _print_review_commands(thread_id: str, port: int) -> None:
+    """人工模式下到达中断点时，打印可用的 REST 提交指令。
+
+    服务端在 LangGraph interrupt 处阻塞等待 resume，本进程不自动提交；
+    人在另一终端 curl 后，续跑产生的事件会经同一业务流回到本进程。
+    """
+    base = f"http://127.0.0.1:{port}"
+    print(f"[人工] 服务阻塞于中断点，请在另一终端自行提交审阅动作（base={base}）：")
+    print(
+        f'  修订：curl -sX POST {base}/tasks/{thread_id}/review'
+        ' -H "Content-Type: application/json"'
+        ' -d \'{"action":"revise","feedback":"<你的修订意见>"}\''
+    )
+    print(
+        f'  确认：curl -sX POST {base}/tasks/{thread_id}/review'
+        ' -H "Content-Type: application/json"'
+        ' -d \'{"action":"confirm"}\'   # 大扇出清单确认'
+    )
+    print(
+        f'  定稿：curl -sX POST {base}/tasks/{thread_id}/review'
+        ' -H "Content-Type: application/json"'
+        ' -d \'{"action":"finalize"}\'   # 跳过修订直接定稿'
+    )
+    print("[人工] 提交后服务端自动续跑，本进程将在此等待下一事件。")
+
+
 async def _drive(
-    client: httpx.AsyncClient, recorder: ArchiveRecorder, task_path: Path
+    client: httpx.AsyncClient,
+    recorder: ArchiveRecorder,
+    task_path: Path,
+    auto_review: bool,
+    port: int,
 ) -> None:
     """驱动一遍完整闭环并渲染书目。"""
     response = await client.post("/tasks", json=load_baseline_task(task_path))
@@ -615,18 +681,27 @@ async def _drive(
         if "pending_confirmation" in data:
             confirmation = data["pending_confirmation"]
             print(
-                f"[演示] 修订清单待确认（受影响章节 {confirmation['affected_chapter_ids']}"
-                f"/共 {confirmation['total_chapters']} 章），提交确认"
+                f"[业务] 修订清单待确认（受影响章节 {confirmation['affected_chapter_ids']}"
+                f"/共 {confirmation['total_chapters']} 章）"
             )
-            recorder.record_review_action({"action": "confirm"})
-            await client.post(
-                f"/tasks/{thread_id}/review", json={"action": "confirm"}
-            )
+            if auto_review:
+                print("[演示] 自动提交确认")
+                recorder.record_review_action({"action": "confirm"})
+                await client.post(
+                    f"/tasks/{thread_id}/review", json={"action": "confirm"}
+                )
+            else:
+                _print_review_commands(thread_id, port)
             return
         review_round += 1
-        if data["citation_warnings"]:
+        if data.get("citation_warnings"):
             print(f"[业务] 未决引文警告：{data['citation_warnings']}")
+        if data.get("review_warnings"):
+            print(f"[业务] 篇级评审提示：{data['review_warnings']}")
         await _snapshot_round(client, thread_id, recorder, review_round)
+        if not auto_review:
+            _print_review_commands(thread_id, port)
+            return
         if not reviewed:
             reviewed = True
             print(f"[演示] 提交混合修订意见：{MIXED_FEEDBACK}")
@@ -668,11 +743,17 @@ async def _drive(
             print(entry["text"])
 
 
-async def _main(real: bool, archive_path: str | None, task_path: Path) -> None:
+async def _main(
+    real: bool,
+    archive_path: str | None,
+    task_path: Path,
+    auto_review: bool,
+    bind_port: int,
+) -> None:
     recorder = ArchiveRecorder(real, archive_path)
     app = _build_app(real)
     config = uvicorn.Config(
-        app, host="127.0.0.1", port=0, log_level="warning",
+        app, host="127.0.0.1", port=bind_port, log_level="warning",
         timeout_graceful_shutdown=3,
     )
     server = uvicorn.Server(config)
@@ -683,14 +764,16 @@ async def _main(real: bool, archive_path: str | None, task_path: Path) -> None:
             while not server.started:
                 await asyncio.sleep(0.02)
         port = server.servers[0].sockets[0].getsockname()[1]
-        print(f"服务已就绪：http://127.0.0.1:{port}（{'生产同构' if real else '空转'}模式）")
+        mode = "生产同构" if real else "空转"
+        gate_mode = "自动模拟人工门" if auto_review else "人工门（需自行 curl）"
+        print(f"服务已就绪：http://127.0.0.1:{port}（{mode}模式，{gate_mode}）")
         async with httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}",
             # SSE 长连接不设 read timeout：业务阶段可能长时间无事件，
             # 靠 _consume_business 的整体超时兜底。
             timeout=httpx.Timeout(100.0, read=None),
         ) as client:
-            await _drive(client, recorder, task_path)
+            await _drive(client, recorder, task_path, auto_review, port)
     finally:
         server.should_exit = True
         thread.join(timeout=100)
@@ -724,5 +807,21 @@ if __name__ == "__main__":
         default=BASELINE_TASK_PATH,
         help="任务基准输入路径（缺省人培汇报基准；其他文种见 scripts/baselines/<文种>/）",
     )
+    parser.add_argument(
+        "--auto-review",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否自动模拟人工门（缺省开）：到达中断点时脚本自动提交"
+        " revise→confirm→finalize；传 --no-auto-review 改为人工模式，"
+        "仅打印 REST 指令，由人自行 curl 提交，服务端续跑后本进程继续等待。",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="服务监听端口（缺省 0=随机分配；人工模式建议固定以便 curl）",
+    )
     args = parser.parse_args()
-    asyncio.run(_main(args.real, args.archive, args.task))
+    asyncio.run(
+        _main(args.real, args.archive, args.task, args.auto_review, args.port)
+    )

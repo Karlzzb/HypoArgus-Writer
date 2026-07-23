@@ -28,9 +28,11 @@ from domain.state import (
 )
 from agents.contracts import MaterialPayload, SubagentAdapter
 from nodes.writing_orchestrator import (
+    REVISION_CHAPTER_ID_KEY,
     WritingOrchestratorNode,
     make_writing_orchestrator_node,
     next_writing_step,
+    revision_send_payloads,
 )
 
 
@@ -761,3 +763,50 @@ def test_State缺文种字段_任务包回落通用公文兑底():
     _drive_to_completion(node, _make_state())
     assert all(task["doc_type"] == "通用公文" for task in rewriter.tasks)
     assert all(task["doc_variant"] is None for task in rewriter.tasks)
+
+
+def test_回退并行扇出载荷_每个未修订失败章各一载荷且素材按章过滤():
+    """route_after_document_reviewer 据此发 Send：每个本轮未修订的失败章一个载荷，
+    引文库按章过滤；本轮已修订的章不再发。"""
+    state = _make_fallback_state(["ch1", "ch3"])
+    state["citation_library"] = [
+        _material("m1", "h1", "ch1", "pass"),
+        _material("m3", "h3", "ch3", "pass"),
+        _material("m2", "h2", "ch2", "pass"),
+    ]
+    payloads = revision_send_payloads(state)
+    assert [p[REVISION_CHAPTER_ID_KEY] for p in payloads] == ["ch1", "ch3"]
+    ch1 = next(p for p in payloads if p[REVISION_CHAPTER_ID_KEY] == "ch1")
+    assert [m.id for m in ch1["citation_library"]] == ["m1"]
+    ch3 = next(p for p in payloads if p[REVISION_CHAPTER_ID_KEY] == "ch3")
+    assert [m.id for m in ch3["citation_library"]] == ["m3"]
+    # 载荷携带共享终审报告与全部草稿（summary_chain / _existing_draft 所需）
+    assert ch1["citation_report"] is state["citation_report"]
+    assert [d.chapter_id for d in ch1["chapter_drafts"]] == ["ch1", "ch2", "ch3"]
+    # 本轮已修订的章不再发
+    state["revised_chapter_ids"] = ["ch1"]
+    assert [p[REVISION_CHAPTER_ID_KEY] for p in revision_send_payloads(state)] == ["ch3"]
+    # 通过或无失败章时无载荷
+    passed = _make_fallback_state(["ch1"])
+    passed["citation_report"] = CitationReport(passed=True)
+    assert revision_send_payloads(passed) == []
+
+
+def test_回退并行扇出分支_单章改写回写单元素列表():
+    """Send 载荷指定单章时走并行回退分支：只改写该章、回写单元素列表
+    （chapter_drafts=[new_draft]、revised_chapter_ids=[chapter_id]），
+    交合并 reducer 汇入，避免并行分支各回写整表互相覆盖。"""
+    rewriter = 记录式假改写适配器()
+    node = make_writing_orchestrator_node(rewriter, 记录式假检索适配器())
+    state = _make_fallback_state(["ch2"])
+    state[REVISION_CHAPTER_ID_KEY] = "ch2"
+    result = node(state)
+    assert [task["chapter_spec"]["id"] for task in rewriter.tasks] == ["ch2"]
+    assert [task["mode"] for task in rewriter.tasks] == ["revise"]
+    # 回写单元素列表，交合并 reducer 汇入
+    assert [d.chapter_id for d in result["chapter_drafts"]] == ["ch2"]
+    assert result["chapter_drafts"][0].text == "ch2 修订后正文"
+    assert result["revised_chapter_ids"] == ["ch2"]
+    assert result["status"] == WorkflowStatus.ARTICLE_WRITING
+    assert result["current_node_llm_config"]["unit"] == "writing_orchestrator"
+

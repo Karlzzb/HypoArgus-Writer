@@ -247,6 +247,24 @@ def keep_last(existing: object, new: object) -> object:
     return new
 
 
+def merge_revised_ids(
+    existing: list[str] | None, new: list[str] | None
+) -> list[str]:
+    """revised_chapter_ids 的 reducer：并行回退扇出各分支只回写本章节 id，
+    并集汇入并按章序排序；空列表写入时清空本轮修订集。
+
+    本字段语义为「本轮被修改章节集」：空列表即「本轮无人被修改」=清空，
+    document_reviewer 在核查完毕后据此写空列表重置、使下一轮从空集起计；
+    非空列表则并集累加。并行回退扇出各分支恒写非空单元素 ``[chapter_id]``，
+    故空列表清空语义不会被并行分支意外触发——只有显式的轮次重置写空列表。
+    串行节点回写完整累积列表时与整值覆盖语义等价（并集不增不减、去重）。
+    """
+    if not new:
+        return []
+    merged = set(existing or []) | set(new)
+    return sorted(merged, key=_chapter_order_key)
+
+
 class WritingAgentState(TypedDict, total=False):
     """LangGraph 图状态：全流程唯一事实源，经 Postgres 存档器持久化。"""
 
@@ -268,8 +286,9 @@ class WritingAgentState(TypedDict, total=False):
     revision_ledger: list[RevisionRound]
     pending_directives: list[RevisionDirective]
     """本轮待执行的修订指令；writing_orchestrator 执行完毕后清空。"""
-    revised_chapter_ids: list[str]
-    """本轮被修改章节；document_reviewer 据此做增量核查，核查完毕后清空。"""
+    revised_chapter_ids: Annotated[list[str], merge_revised_ids]
+    """本轮被修改章节；并行回退扇出各分支只回写本章节 id，经合并 reducer 并集汇入；
+    document_reviewer 据此做增量核查，核查完毕后写空列表清空（见 reducer）。"""
     citation_report: CitationReport | None
     """最近一次终审结论。"""
     citation_retry_count: int
