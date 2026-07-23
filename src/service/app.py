@@ -455,6 +455,15 @@ def create_app(
         """查询任务当前状态摘要。"""
         return _manager().get_status(thread_id)
 
+    @app.get("/tasks/{thread_id}/products")
+    async def get_task_products(thread_id: str) -> dict[str, Any]:
+        """运行中产物只读快照：目录/假说/各章素材与已完成章正文，章级粒度。
+
+        纯只读检查点 state，不引入新状态、不加写路径；SSE 丢帧靠此 REST 对账。
+        任务不存在返回 404；刚创建尚无产物时返回空快照（chapters 为空）。
+        """
+        return _manager().get_products(thread_id)
+
     @app.post("/tasks/{thread_id}/review", status_code=202)
     async def submit_review(thread_id: str, request: ReviewRequest) -> dict[str, str]:
         """提交人工审阅决定（定稿或修订），从中断点恢复运行。"""

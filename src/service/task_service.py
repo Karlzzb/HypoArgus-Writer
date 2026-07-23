@@ -329,6 +329,54 @@ class TaskManager:
             "running": entry.running,
         }
 
+    def get_products(self, thread_id: str) -> dict[str, Any]:
+        """运行中产物只读快照：目录/假说/各章素材与已完成章正文，章级粒度。
+
+        纯只读检查点 state，不引入新状态、不加写路径；SSE 丢帧靠此 REST
+        对账。任务不存在抛 TaskNotFound（与 get_status 一致）；刚创建尚无
+        产物时返回空快照（outline 为空 → chapters 为空列表）。
+
+        形状与章级 checkpoint 对齐：points / materials / draft 直接取对应
+        pydantic 模型 model_dump，不做字段改名；章条目的 chapter_id 由
+        ChapterSpec.id 映射，materials 按章分组、draft 未完成时为 null。
+        """
+        self._ensure_entry(thread_id)
+        values = self._graph.get_state(self._thread_config(thread_id)).values
+        outline = values.get("outline", [])
+        drafts_by_id = {draft.chapter_id: draft for draft in values.get("chapter_drafts", [])}
+        materials_by_chapter: dict[str, list[Any]] = {}
+        for material in values.get("citation_library", []):
+            materials_by_chapter.setdefault(material.chapter_id, []).append(material)
+        chapters: list[dict[str, Any]] = []
+        for spec in outline:
+            chapters.append(
+                {
+                    "chapter_id": spec.id,
+                    "title": spec.title,
+                    "subsections": list(spec.subsections),
+                    "chapter_type": spec.chapter_type,
+                    "planned_summary": spec.planned_summary,
+                    "points": [point.model_dump() for point in spec.points],
+                    "materials": [
+                        material.model_dump()
+                        for material in materials_by_chapter.get(spec.id, [])
+                    ],
+                    "draft": (
+                        drafts_by_id[spec.id].model_dump()
+                        if spec.id in drafts_by_id
+                        else None
+                    ),
+                }
+            )
+        return {
+            "thread_id": thread_id,
+            "status": status_text(
+                values.get("status"), WorkflowStatus.IDLE.value
+            ),
+            "iteration_round": values.get("iteration_round", 0),
+            "chapters": chapters,
+        }
+
     def render_bibliography(self, thread_id: str, format: str) -> dict[str, Any]:
         """按书目格式渲染最终交付：重编号正文 + 书目列表。
 

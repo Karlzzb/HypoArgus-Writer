@@ -38,7 +38,7 @@ from service.app import create_app
 from service.event_broker import EventHub
 from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
-from domain.state import initial_state
+from domain.state import ChapterDraft, SelfCheck, initial_state
 from tests.llm_response_plans import (
     DOCUMENT_REVIEW_PASS,
     FIRST_PASS_RESPONSES,
@@ -1658,5 +1658,344 @@ def test_stats端点可观测背压():
                     break
                 await asyncio.sleep(0.02)
             assert after["subscriber_count"] == 0
+
+    asyncio.run(main())
+
+
+# ---- 运行中产物快照（issue #56）：GET /tasks/{id}/products REST 真相源 ----
+
+
+def _drive_to_framework_complete(saver: Any, thread_id: str) -> Any:
+    """手工驱动同款图到框架完成检查点后停止，返回图对象供断言对照。
+
+    与 test_断点续跑_图运行中途死亡后resume续跑至中断点 同款范式：共享
+    存档器 + FakeLLM + 打桩子智能体，断点取 reference_orchestrator 待执行
+    的检查点（框架已完成、检索与写作未开始）。
+    """
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
+    graph = build_graph(
+        llm_factory=lambda unit: fake,
+        checkpointer=saver,
+        search_agent=make_stub_search_agent(),
+        rewriter_loop=make_stub_rewriter_loop(),
+        chapter_reviewer=make_stub_chapter_reviewer(),
+    )
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    for mode, chunk in graph.stream(
+        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-framework"),
+        config,
+        stream_mode=["updates", "debug"],
+    ):
+        if (
+            mode == "debug"
+            and isinstance(chunk, dict)
+            and chunk.get("type") == "checkpoint"
+            and "reference_orchestrator" in (chunk["payload"].get("next") or [])
+        ):
+            break
+    return graph
+
+
+def _drive_to_review_gate(saver: Any, thread_id: str) -> Any:
+    """手工驱动同款图到人工审阅中断点后停止，返回图对象供断言对照。
+
+    检查点停在 human_review_gate：目录/假说/各章素材/已完成章正文齐全。
+    """
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
+    graph = build_graph(
+        llm_factory=lambda unit: fake,
+        checkpointer=saver,
+        search_agent=make_stub_search_agent(),
+        rewriter_loop=make_stub_rewriter_loop(),
+        chapter_reviewer=make_stub_chapter_reviewer(),
+    )
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    graph.invoke(
+        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-gate"), config
+    )
+    assert graph.get_state(config).next == ("human_review_gate",)
+    return graph
+
+
+def test_产物快照_空快照与未知任务404():
+    """(a) 刚创建 IDLE 无产物 → 空快照；(e) 不存在 thread_id → 404。"""
+    saver = InMemorySaver(serde=checkpoint_serializer())
+    thread_id = "products-idle"
+    # 手工驱动到首个检查点（初始状态：IDLE、outline 为空）即停，模拟刚创建。
+    fake = FakeLLM(
+        list(FIRST_PASS_RESPONSES), keyed_responses=FRAMEWORK_KEYED_RESPONSES
+    )
+    graph = build_graph(
+        llm_factory=lambda unit: fake,
+        checkpointer=saver,
+        search_agent=make_stub_search_agent(),
+        rewriter_loop=make_stub_rewriter_loop(),
+        chapter_reviewer=make_stub_chapter_reviewer(),
+    )
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    for mode, chunk in graph.stream(
+        initial_state("写一篇人才培养方案", "专业撰稿人", "trace-idle"),
+        config,
+        stream_mode=["updates", "debug"],
+    ):
+        if (
+            mode == "debug"
+            and isinstance(chunk, dict)
+            and chunk.get("type") == "checkpoint"
+            and "framework_orchestrator"
+            in (chunk["payload"].get("next") or [])
+        ):
+            break
+    # 初始检查点：IDLE、outline 为空。
+    snapshot = graph.get_state(config)
+    assert snapshot.values.get("status") == "IDLE"
+
+    async def main() -> None:
+        app = _make_app([], checkpointer=saver)
+        async with _client(app) as client:
+            # (a) 空快照：chapters=[]，status=IDLE，iteration_round=0。
+            response = await client.get(f"/tasks/{thread_id}/products")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["thread_id"] == thread_id
+            assert body["status"] == "IDLE"
+            assert body["iteration_round"] == 0
+            assert body["chapters"] == []
+
+            # (e) 不存在 thread_id → 404。
+            response = await client.get("/tasks/nope/products")
+            assert response.status_code == 404
+
+    asyncio.run(main())
+
+
+def test_产物快照_框架完成无草稿素材标注未产出():
+    """(b) 框架完成、尚无草稿/素材 → 目录/假说齐全，materials=[]、draft=null。"""
+    saver = InMemorySaver(serde=checkpoint_serializer())
+    thread_id = "products-framework"
+    graph = _drive_to_framework_complete(saver, thread_id)
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    snapshot = graph.get_state(config)
+    assert snapshot.next == ("reference_orchestrator", "reference_orchestrator")
+
+    async def main() -> None:
+        app = _make_app(
+            [SEMANTIC_PASS, SEMANTIC_PASS, DOCUMENT_REVIEW_PASS],
+            checkpointer=saver,
+        )
+        async with _client(app) as client:
+            response = await client.get(f"/tasks/{thread_id}/products")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["thread_id"] == thread_id
+            assert body["status"] == "FRAMEWORK_BUILDING"
+            assert body["iteration_round"] == 0
+            chapters = body["chapters"]
+            assert len(chapters) == 2
+            # 每章目录与假说齐全，且无素材、无草稿（draft=null 标注未产出）。
+            for chapter in chapters:
+                assert chapter["chapter_id"] in {"ch1", "ch2"}
+                assert chapter["title"]
+                assert isinstance(chapter["subsections"], list)
+                assert isinstance(chapter["chapter_type"], (str, type(None)))
+                assert isinstance(chapter["planned_summary"], str)
+                assert chapter["materials"] == []
+                assert chapter["draft"] is None
+                assert len(chapter["points"]) >= 1
+                for point in chapter["points"]:
+                    assert point["id"]
+                    assert point["text"]
+                    assert isinstance(point["hypotheses"], list)
+                    for hyp in point["hypotheses"]:
+                        assert {"id", "text", "refute_condition", "angle"} <= set(
+                            hyp
+                        )
+
+            # 与检查点 state 逐字段一致：outline 的 ChapterSpec 与 products 的章条目。
+            outline = snapshot.values.get("outline", [])
+            assert [c["chapter_id"] for c in chapters] == [
+                spec.id for spec in outline
+            ]
+            for chapter, spec in zip(chapters, outline):
+                assert chapter["title"] == spec.title
+                assert chapter["subsections"] == list(spec.subsections)
+                assert chapter["chapter_type"] == spec.chapter_type
+                assert chapter["points"] == [p.model_dump() for p in spec.points]
+
+    asyncio.run(main())
+
+
+def test_产物快照_部分章完成未完成章标注未产出():
+    """验收标准1的"部分章完成"态：已写完的章正文出现，未完成章 draft=null。
+
+    并行首写在单一超步内完成全部章草稿，committed 检查点观察不到部分草稿
+    态；故以 graph.update_state 在框架完成态（无草稿）上确定性注入单章草稿，
+    构造"ch1 已完成、ch2 未完成"检查点，直接验证章级标记逻辑。
+    """
+    saver = InMemorySaver(serde=checkpoint_serializer())
+    thread_id = "products-partial"
+    graph = _drive_to_framework_complete(saver, thread_id)
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    # 框架完成态：outline 含 ch1/ch2，无草稿。
+    pre_outline = graph.get_state(config).values.get("outline", [])
+    assert {spec.id for spec in pre_outline} == {"ch1", "ch2"}
+    assert graph.get_state(config).values.get("chapter_drafts", []) == []
+
+    # 注入单章草稿：merge_chapter_drafts 在空库上接受 [ch1_draft] → 仅 ch1 有草稿。
+    graph.update_state(
+        config,
+        {
+            "chapter_drafts": [
+                ChapterDraft(
+                    chapter_id="ch1",
+                    text="第一章已写完的正文。",
+                    summary="第一章摘要。",
+                    self_check=SelfCheck(),
+                )
+            ]
+        },
+    )
+    drafts = graph.get_state(config).values.get("chapter_drafts", [])
+    assert [d.chapter_id for d in drafts] == ["ch1"]
+
+    async def main() -> None:
+        app = _make_app([], checkpointer=saver)
+        async with _client(app) as client:
+            response = await client.get(f"/tasks/{thread_id}/products")
+            assert response.status_code == 200
+            chapters = {c["chapter_id"]: c for c in response.json()["chapters"]}
+            # ch1：已完成，正文/摘要出现。
+            assert chapters["ch1"]["draft"] is not None
+            assert chapters["ch1"]["draft"]["text"] == "第一章已写完的正文。"
+            assert chapters["ch1"]["draft"]["summary"] == "第一章摘要。"
+            # ch2：未完成，明确标注未产出（draft=null），目录/假说仍在。
+            assert chapters["ch2"]["draft"] is None
+            assert chapters["ch2"]["title"]
+            assert chapters["ch2"]["materials"] == []
+
+    asyncio.run(main())
+
+
+def test_产物快照_审阅门产物与检查点及finalized事件一致并定稿后正文齐全():
+    """(c) 停在审阅门 → 产物与检查点一致且与 finalized 事件正文/摘要一致；
+    (d) 定稿后 status=FINISHED、各章正文齐全。"""
+    saver = InMemorySaver(serde=checkpoint_serializer())
+    thread_id = "products-gate"
+    graph = _drive_to_review_gate(saver, thread_id)
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    snapshot = graph.get_state(config)
+    checkpoint_drafts = snapshot.values.get("chapter_drafts", [])
+    checkpoint_library = snapshot.values.get("citation_library", [])
+    checkpoint_outline = snapshot.values.get("outline", [])
+
+    async def main() -> None:
+        # 续跑只备定稿后所需：finalize 不调 LLM，故空应答即可。
+        app = _make_app([], checkpointer=saver)
+        async with _client(app) as client:
+            # 先 resume 让 HTTP 进程登记任务（停在审阅门，不重跑图）。
+            response = await client.post(
+                f"/tasks/{thread_id}/resume", json={"session_id": "sess-gate"}
+            )
+            assert response.status_code == 200
+            assert response.json()["status"] == "AWAIT_USER_REVIEW"
+
+            # (c) 审阅门产物快照：目录/假说/各章素材/已完成章正文齐全。
+            response = await client.get(f"/tasks/{thread_id}/products")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["thread_id"] == thread_id
+            assert body["status"] == "AWAIT_USER_REVIEW"
+            assert body["iteration_round"] == 0
+            chapters = body["chapters"]
+            assert len(chapters) == len(checkpoint_outline)
+
+            # 素材按章分组、与检查点引文库逐字段一致。
+            for chapter, spec in zip(chapters, checkpoint_outline):
+                assert chapter["chapter_id"] == spec.id
+                assert chapter["title"] == spec.title
+                assert chapter["subsections"] == list(spec.subsections)
+                assert chapter["points"] == [p.model_dump() for p in spec.points]
+                expected_materials = [
+                    m.model_dump()
+                    for m in checkpoint_library
+                    if m.chapter_id == spec.id
+                ]
+                assert chapter["materials"] == expected_materials
+                # 该章已完成正文：draft 非空且与检查点草稿逐字段一致。
+                expected_draft = next(
+                    d for d in checkpoint_drafts if d.chapter_id == spec.id
+                )
+                assert chapter["draft"] == expected_draft.model_dump()
+
+            # 定稿：finalized 事件正文/摘要与快照 draft 一致。
+            response = await client.post(
+                f"/tasks/{thread_id}/review", json={"action": "finalize"}
+            )
+            assert response.status_code == 202
+            business, ended = await _read_sse(
+                client,
+                f"/tasks/{thread_id}/stream",
+                lambda frames: False,
+                last_event_id=FROM_START,
+            )
+            assert ended
+            finalized = next(f for f in business if f["event"] == "finalized")
+            finalized_chapters = {
+                c["chapter_id"]: c for c in finalized["data"]["data"]["chapters"]
+            }
+            for chapter in chapters:
+                fc = finalized_chapters[chapter["chapter_id"]]
+                assert chapter["draft"]["text"] == fc["text"]
+                assert chapter["draft"]["summary"] == fc["summary"]
+
+            # (d) 定稿后 status=FINISHED，各章正文齐全。
+            response = await client.get(f"/tasks/{thread_id}/products")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] == "FINISHED"
+            for chapter in body["chapters"]:
+                assert chapter["draft"] is not None
+                assert chapter["draft"]["text"]
+
+    asyncio.run(main())
+
+
+def test_产物快照_并发读不影响图运行():
+    """(f) 运行中并发 GET /products 不影响图运行：全部 200、形状一致、图照常到审阅门。"""
+    async def main() -> None:
+        app = _make_app([*FIRST_PASS_RESPONSES, *REVISE_ROUND_RESPONSES])
+        async with _client(app) as client:
+            thread_id, _ = await _create_task(client, "sess-concurrent")
+
+            # 边消费 SSE（图在跑）边并发发多个 GET /products。
+            sse_task = asyncio.create_task(
+                _read_sse(
+                    client,
+                    f"/tasks/{thread_id}/stream",
+                    _stop_on_review_count(1),
+                    last_event_id=FROM_START,
+                )
+            )
+            # 等图运行起来再并发读。
+            await asyncio.sleep(0.1)
+
+            responses = await asyncio.gather(
+                *(client.get(f"/tasks/{thread_id}/products") for _ in range(5))
+            )
+            assert all(r.status_code == 200 for r in responses)
+            bodies = [r.json() for r in responses]
+            # 形状一致：thread_id 正确、字段齐全、chapters 为列表。
+            for body in bodies:
+                assert body["thread_id"] == thread_id
+                assert "status" in body
+                assert "iteration_round" in body
+                assert isinstance(body["chapters"], list)
+            # 图运行照常到达审阅门（review_required 仍收到）。
+            business, _ = await sse_task
+            assert any(f["event"] == "review_required" for f in business)
 
     asyncio.run(main())
