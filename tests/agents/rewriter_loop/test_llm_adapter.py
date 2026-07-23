@@ -6,14 +6,16 @@ from typing import Any
 import pytest
 
 from agents.rewriter_loop import LlmWriterClient, Violation
-from llm.llm_client import FakeLLM, Message
+from domain.events import CONTENT_DELTA
+from llm.llm_client import FakeLLM, Message, StreamChunk
 from llm.llm_json import JSON_ONLY_RULE
 
 _STYLE_PROSE = "风格指南散文片段：公文范式与子风格约束。"
 
 
-def _make_client(llm: Any) -> LlmWriterClient:
-    return LlmWriterClient(llm)
+def _make_client(llm: Any, **kwargs: Any) -> LlmWriterClient:
+    """构造客户端：默认无事件钩子；逐字流测试传 event_hook / flush_chars。"""
+    return LlmWriterClient(llm, **kwargs)
 
 
 def _writer_json(text: str, summary: str = "一行摘要") -> str:
@@ -21,7 +23,11 @@ def _writer_json(text: str, summary: str = "一行摘要") -> str:
 
 
 class _RaisingLLM:
-    """每次调用都抛异常的假 LLM：验证异常重试与重抛路径。"""
+    """每次调用都抛异常的假 LLM：验证异常重试与重抛路径。
+
+    draft/revise 经 stream 消费，audit 经 invoke 消费——两路都抛同款异常，
+    保证全异常路径在流式形态下仍触发退化重试与重抛。
+    """
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -33,6 +39,38 @@ class _RaisingLLM:
     def invoke(self, messages: list[Message]) -> str:
         self.call_count += 1
         raise RuntimeError(f"模拟网络故障 #{self.call_count}")
+
+    def stream(self, messages: list[Message]):  # type: ignore[no-untyped-def]
+        self.call_count += 1
+        raise RuntimeError(f"模拟网络故障 #{self.call_count}")
+
+
+class _ThinkingLLM:
+    """确定性吐思考 + 正文的假 LLM：思考片段不进 JSON 抽取、正文片段进。
+
+    用于验证逐字流能区分 content / thinking 两 kind：思考由 DeltaMerger
+    单独缓冲外发、正文经 JsonFieldExtractor 抽出纯值后外发。
+    """
+
+    def __init__(self, content_json: str, thinking: str = "推理片段。") -> None:
+        self._content_json = content_json
+        self._thinking = thinking
+
+    @property
+    def metadata(self) -> dict[str, str]:
+        return {"model": "thinking-llm", "base_url": "fake://"}
+
+    def stream(self, messages: list[Message]):  # type: ignore[no-untyped-def]
+        # 思考整段先吐、再吐正文 JSON（与真实思考开启模型的片段顺序一致）。
+        if self._thinking:
+            yield StreamChunk("thinking", self._thinking)
+        # 正文按 8 字符切片吐，模拟真实流式分块。
+        for start in range(0, len(self._content_json), 8):
+            yield StreamChunk("content", self._content_json[start : start + 8])
+
+    def invoke(self, messages: list[Message]) -> str:
+        # audit 路径不进本类；保留以满足 LLM 协议形态，本测试不调用。
+        return self._content_json
 
 
 def test_真实适配器_draft正常_信封字段与提示词内容合规(draft_task: dict[str, Any]) -> None:
@@ -455,3 +493,146 @@ def test_真实适配器_任务包缺文种字段_回落通用公文与缺省层
     user = llm.calls[0][1]["content"]
     assert "文种：通用公文" in user
     assert "层次：本科" in user
+
+
+# ---- 逐字流 content_delta（issue #59）：流式 draft/revise 上网线契约 ----
+
+
+def _capture_hook() -> tuple[list[tuple[str, dict]], Any]:
+    """构造捕获钩子与事件列表：(event_type, payload) 入列。"""
+    events: list[tuple[str, dict]] = []
+    return events, (lambda etype, payload: events.append((etype, dict(payload))))
+
+
+def test_逐字流_draft上网线载荷字段齐全且content拼接为正文(
+    draft_task: dict[str, Any],
+) -> None:
+    """draft 经 stream 消费：content_delta 帧载荷字段齐全、拼接 == chapter_text。
+
+    FakeLLM 默认 chunk_size=8，故 8 字符一切；flush_chars 设小以保证多帧。
+    """
+    chapter_text = "## 一、示例章节\n正文。[m-h-1]"
+    llm = FakeLLM(responses=[_writer_json(chapter_text)])
+    events, hook = _capture_hook()
+    envelope = _make_client(
+        llm, flush_chars=4, flush_ms=0, event_hook=hook
+    ).draft(draft_task, _STYLE_PROSE)
+
+    deltas = [p for et, p in events if et == CONTENT_DELTA]
+    assert deltas, "draft 调用须发 content_delta 事件"
+    # 每帧载荷字段齐全。
+    for payload in deltas:
+        assert payload["unit"] == "rewriter_loop"
+        assert payload["chapter_id"] == draft_task["chapter_spec"]["id"]
+        assert payload["mode"] == "draft"
+        assert payload["kind"] == "content"
+        assert payload["attempt"] == 1
+    # sequence 在 attempt 内单调递增、从 0 起。
+    seqs = [p["sequence"] for p in deltas]
+    assert seqs == sorted(seqs)
+    assert seqs[0] == 0
+    # 拼接所有 content 帧的 delta == 终态信封 chapter_text（与 chapter_ready 整块一致）。
+    joined = "".join(p["delta"] for p in deltas)
+    assert joined == envelope.chapter_text == chapter_text
+
+
+def test_逐字流_revise同样上网线mode为revise(draft_task: dict[str, Any]) -> None:
+    """revise 经 stream 消费：content_delta 的 mode==revise、拼接为改写后正文。"""
+    draft_task["mode"] = "revise"
+    draft_task["revision_note"] = {
+        "user_directives": "精简第一段",
+        "rule_violations": [],
+        "conflict_hints": [],
+        "passed": True,
+    }
+    draft_task["current_text"] = "现有正文初稿。[m-h-1]"
+    llm = FakeLLM(responses=[_writer_json("改后正文。[m-h-1]")])
+    events, hook = _capture_hook()
+    envelope = _make_client(
+        llm, flush_chars=4, flush_ms=0, event_hook=hook
+    ).revise(draft_task, _STYLE_PROSE)
+
+    deltas = [p for et, p in events if et == CONTENT_DELTA]
+    assert deltas
+    assert all(p["mode"] == "revise" for p in deltas)
+    assert all(p["chapter_id"] == draft_task["chapter_spec"]["id"] for p in deltas)
+    joined = "".join(p["delta"] for p in deltas)
+    assert joined == envelope.chapter_text == "改后正文。[m-h-1]"
+
+
+def test_逐字流_退化重试attempt递增且旧帧丢弃重建(draft_task: dict[str, Any]) -> None:
+    """流中途 finish 抛 FieldExtractionError → 本轮退化 → 下轮 attempt+1。
+
+    第 1 轮：chapter_text 值未闭合（``{"chapter_text": "部分``），finish 抛错；
+    第 2 轮：合法 JSON，成功。两轮都发 content_delta，但 attempt 不同——
+    调用方按更高 attempt 丢弃旧增量、从零重建：第 2 轮 sequence 从 0 复位、
+    拼接 == 终态正文（丢弃重建语义）。
+    """
+    # 第 1 轮 JSON 不闭合 → extractor.finish 抛 FieldExtractionError；
+    # 第 2 轮合法 → 成功。
+    bad_response = '{"chapter_text": "部分未闭合'
+    good_response = _writer_json("重建后正文。[m-h-1]")
+    llm = FakeLLM(responses=[bad_response, good_response])
+    events, hook = _capture_hook()
+    envelope = _make_client(
+        llm, max_attempts=2, flush_chars=4, flush_ms=0, event_hook=hook
+    ).draft(draft_task, _STYLE_PROSE)
+
+    deltas = [p for et, p in events if et == CONTENT_DELTA]
+    # 两轮都发了帧（第 1 轮在 finish 抛错前已 flush 部分 content 帧）。
+    attempt1_deltas = [p for p in deltas if p["attempt"] == 1]
+    attempt2_deltas = [p for p in deltas if p["attempt"] == 2]
+    assert attempt1_deltas, "第 1 轮退化前应有 content_delta 帧"
+    assert attempt2_deltas, "第 2 轮成功应有 content_delta 帧"
+    # 第 2 轮 sequence 从 0 复位（新 attempt 重建）。
+    assert attempt2_deltas[0]["sequence"] == 0
+    assert [p["sequence"] for p in attempt2_deltas] == sorted(
+        p["sequence"] for p in attempt2_deltas
+    )
+    # 调用方按第 2 轮重建：拼接 attempt==2 的 content 帧 == 终态正文。
+    joined = "".join(p["delta"] for p in attempt2_deltas)
+    assert joined == envelope.chapter_text == "重建后正文。[m-h-1]"
+    # attempts 回填总轮次 2。
+    assert envelope.attempts == 2
+
+
+def test_逐字流_思考kind可区分且正文仍拼接一致(draft_task: dict[str, Any]) -> None:
+    """思考开启模型：thinking 与 content 两 kind 都上网线、可区分。
+
+    思考片段不进 JsonFieldExtractor 抽取（推理 CoT 不在 chapter_text 字段内），
+    故 thinking 帧与 content 帧分别由 DeltaMerger 攒帧外发；sequence 在
+    同一 attempt 内跨 kind 共享、单调递增。
+    """
+    content_json = _writer_json("正文。", "摘要。")
+    llm = _ThinkingLLM(content_json=content_json, thinking="推理 CoT 片段。")
+    events, hook = _capture_hook()
+    envelope = _make_client(
+        llm, flush_chars=2, flush_ms=0, event_hook=hook
+    ).draft(draft_task, _STYLE_PROSE)
+
+    deltas = [p for et, p in events if et == CONTENT_DELTA]
+    thinking_deltas = [p for p in deltas if p["kind"] == "thinking"]
+    content_deltas = [p for p in deltas if p["kind"] == "content"]
+    # 两 kind 都有帧且可区分。
+    assert thinking_deltas, "思考帧须上网线"
+    assert content_deltas, "正文帧须上网线"
+    # 思考帧拼接 == 原始思考文本。
+    assert "".join(p["delta"] for p in thinking_deltas) == "推理 CoT 片段。"
+    # 正文帧拼接 == 终态信封 chapter_text。
+    assert "".join(p["delta"] for p in content_deltas) == envelope.chapter_text == "正文。"
+    # sequence 跨 kind 在同一 attempt 内单调递增（共享计数器）。
+    seqs = [p["sequence"] for p in deltas]
+    assert seqs == sorted(seqs)
+    assert seqs[0] == 0
+
+
+def test_逐字流_audit不上网线保持invoke(draft_task: dict[str, Any]) -> None:
+    """audit 仍走 invoke、不发任何 content_delta（逐字流只覆盖 draft/revise）。"""
+    llm = FakeLLM(responses=[json.dumps({"issues": []})])
+    events, hook = _capture_hook()
+    _make_client(llm, flush_chars=4, flush_ms=0, event_hook=hook).audit(
+        "本章正文。", draft_task
+    )
+    assert [et for et, _ in events if et == CONTENT_DELTA] == []
+    # audit 仍经 invoke（FakeLLM.calls 记录的是 _dispatch 调用，invoke/stream 共用）。
+    assert len(llm.calls) == 1

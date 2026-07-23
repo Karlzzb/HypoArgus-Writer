@@ -340,6 +340,7 @@ data: <JSON>
 |---|---|---|
 | `status` | `{"status": "...", "iteration_round": n, "node": "节点名"}` | 状态机推进 |
 | `product` | `{"kind": "outline_ready"\|"materials_ready"\|"chapter_ready", ...}` | 结构化产物整块事件，按产出顺序推送；属可丢级，丢了靠 `GET /tasks/{id}/products` 对账重取（见下） |
+| `content_delta` | `{"chapter_id": "...", "mode": "draft"\|"revise", "kind": "content"\|"thinking", "delta": "...", "attempt": <int>, "sequence": <int>}` | 写作中正文逐字增量（`kind=content` 为纯正文，非 JSON 语法碎片；思考开启时 `kind=thinking` 随正文一并逐字推送）；仅 writer draft/revise 产生，其他运行单元不逐字流。属可丢级，丢了不影响终态——`chapter_ready` 整块是持久锚，逐字流非持久化 |
 | `review_required` | `{"iteration_round": n, "chapter_ids": [...], "citation_warnings": [...], "review_warnings": [...], "error"?: "...", "clarification_questions"?: [...], "pending_confirmation"?: {...}}` | 停在人工中断点，等待调用方提交审阅；`error` 仅在上次提交契约不符或解析失败时出现；`clarification_questions` 为意见含混/定位失败时的回问问题列表；`pending_confirmation` 为大扇出待确认清单：`{"affected_chapter_ids": [...], "total_chapters": n, "directives": [{"target_chapter_id", "type", "instruction"}]}` |
 | `reconcile_required` | `{"reason": "epoch_mismatch"\|"position_dropped"\|"malformed", "last_event_id": "...", "reconcile_via": ["GET /tasks/{id}", ...]}` | 续传失效控制事件：世代失配或所求位置已被淘汰，调用方须走 REST 对账而非静默错位续推；随后转实时推送 |
 | `finalized` | `{"chapters": [{"chapter_id", "text", "summary"}], "citation_warnings": [...]}` | 定稿全文（原始角标）；发出后流结束 |
@@ -354,7 +355,13 @@ data: <JSON>
 | `chapter_ready` | `{"kind": "chapter_ready", "chapter_id": "ch1", "draft": {chapter_id, text, summary, self_check}}` | 该章正文写完；草稿文本变化时推送，载荷为该章整块草稿 |
 
 `product` 事件载荷与 `GET /tasks/{id}/products` 章级快照逐字段同构——丢帧后按 REST 取回同等内容。
-（逐字流 `content_delta` 与审阅包摘要 `review_pack_ready` 属后续票据，不在本类。）
+（审阅包摘要 `review_pack_ready` 属后续票据，不在本类。）
+
+`content_delta` 逐字流语义：
+
+- `attempt`：退化重试开启新一轮流式；同一 `(chapter_id, mode)` 下更高 `attempt` 意味着调用方须丢弃之前所有 delta、从零重建；`sequence` 在每个 attempt 内独立从 0 单调递增。
+- 合并粒度（时间窗口 / 字符数）可配（环境变量 `WRITER_DELTA_FLUSH_CHARS` / `WRITER_DELTA_FLUSH_MS`），合帧在工作线程侧完成后才过线程边界，避免逐 token 跨线程调度。
+- `content_delta` 非持久化、不入 `graph_events` 可视化通道；`chapter_ready` 整块是持久锚，丢了逐字帧靠该整块对账。
 
 ### 3.2 可视化通道 `GET /graph_events`
 

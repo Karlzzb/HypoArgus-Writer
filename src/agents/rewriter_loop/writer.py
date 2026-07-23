@@ -15,6 +15,7 @@ rewriter_loop 收束为**纯写作 + 空稿短路**：一次写作调用（draft
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Coroutine, Sequence
 from typing import Any
 
@@ -27,6 +28,7 @@ from agents.rewriter_loop.writer_client import (
     WriterLlmClient,
 )
 from domain.doc_types import carried_doc_facts
+from domain.env_config import read_nonnegative_int, read_positive_int
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook
 from llm.llm_client import LLMFactory
 
@@ -127,7 +129,22 @@ def make_writer_run(
 def make_rewriter_loop(
     llm_factory: LLMFactory, event_hook: EventHook = noop_hook
 ) -> SubagentAdapter:
-    """构造 rewriter_loop 真实现适配器：文种与变体逐任务取自任务包，工厂无环境配置。"""
-    client = LlmWriterClient(llm_factory(UNIT))
+    """构造 rewriter_loop 真实现适配器：文种与变体逐任务取自任务包，工厂无环境配置。
+
+    逐字流合并粒度（字符数 / 时间窗口）经环境变量配置：``WRITER_DELTA_FLUSH_CHARS``
+    为单帧字符数阈值（缺省 64，正整数），``WRITER_DELTA_FLUSH_MS`` 为时间窗口
+    毫秒数（缺省 50，非负整数、设 0 关闭时间窗口）。同一 ``event_hook``
+    同时承载 ``SUBAGENT_PROGRESS`` 进度事件与 ``CONTENT_DELTA`` 逐字流——
+    后者由 ``LlmWriterClient`` 在 draft/revise 流式消费时直接经此钩子上网线，
+    编排层 ``make_writer_run`` 仍零感知（只调 ``client.draft/revise``）。
+    """
+    flush_chars = read_positive_int(os.environ, "WRITER_DELTA_FLUSH_CHARS", 64)
+    flush_ms = read_nonnegative_int(os.environ, "WRITER_DELTA_FLUSH_MS", 50)
+    client = LlmWriterClient(
+        llm_factory(UNIT),
+        flush_chars=flush_chars,
+        flush_ms=flush_ms,
+        event_hook=event_hook,
+    )
     run = make_writer_run(client, event_hook=event_hook)
     return SubagentAdapter(UNIT, run, event_hook)

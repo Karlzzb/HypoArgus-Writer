@@ -479,12 +479,22 @@ class TaskManager:
         )
 
     def _new_emitter(self, entry: _TaskEntry) -> GraphRunEmitter:
-        """为一次运行构造事件翻译器，发布到全局 graph_event 枢纽。"""
+        """为一次运行构造事件翻译器，发布到全局 graph_event 枢纽。
+
+        ``publish_business`` 把逐字流 ``CONTENT_DELTA`` 翻译为业务通道事件
+        发布到该任务 ``entry.hub``：子智能体在工作线程发 CONTENT_DELTA →
+        ``_publish_business`` → ``entry.hub.publish`` 经 call_soon_threadsafe
+        调度到 loop 线程；合并已在 ``_stream_once`` 工作线程侧由 DeltaMerger
+        完成，跨线程只传合并后的帧，避免逐 token 调度。
+        """
         return GraphRunEmitter(
             publish=self._graph_hub.publish,
             trace_id=entry.trace_id,
             session_id=entry.session_id,
             thread_id=entry.thread_id,
+            publish_business=lambda event_type, data: self._publish_business(
+                entry, event_type, data
+            ),
         )
 
     @staticmethod

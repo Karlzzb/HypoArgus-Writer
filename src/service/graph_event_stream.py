@@ -32,7 +32,13 @@ from typing import Any
 from service.event_envelope import EventEnvelope, new_envelope
 from domain.units import MAIN_NODES
 from domain.state import WorkflowStatus, status_text
-from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START, EventHook
+from domain.events import (
+    CONTENT_DELTA,
+    SUBAGENT_END,
+    SUBAGENT_PROGRESS,
+    SUBAGENT_START,
+    EventHook,
+)
 
 # 条件路由节点 → 按状态机值判定的路由去向与理由。
 _BRANCH_RULES: dict[str, dict[WorkflowStatus, tuple[str, str]]] = {
@@ -96,6 +102,10 @@ def make_standalone_subagent_hook(
                 emit("progress", unit, dict(payload), start_ids.get(key))
             elif event_type == SUBAGENT_END:
                 emit("subagent_end", unit, dict(payload), start_ids.pop(key, None))
+            # CONTENT_DELTA 不出现在独立检索（写作子智能体才会发逐字流）；
+            # 显式忽略以防误触可视化信封发布（逐字流只走业务通道，不入 graph_events）。
+            elif event_type == CONTENT_DELTA:
+                return
 
     return hook
 
@@ -110,11 +120,23 @@ class GraphRunEmitter:
         trace_id: str,
         session_id: str,
         thread_id: str,
+        publish_business: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
+        """构造一次图运行的翻译器。
+
+        ``publish`` 把可视化信封发布到全局 ``graph_hub``；
+        ``publish_business`` 把逐字流 ``CONTENT_DELTA`` 翻译为业务通道事件
+        发布到该任务的 ``entry.hub``（载荷剥离 ``unit`` 字段，避免与业务通道
+        事件契约重复——业务事件 ``data`` 块按 ``content_delta`` 票据契约
+        只带 chapter_id / mode / kind / delta / attempt / sequence）。
+        ``publish_business`` 缺省 None 时 ``CONTENT_DELTA`` 被静默丢弃
+        （独立检索等无业务通道的场景；图运行路径总会注入）。
+        """
         self._publish = publish
         self._trace_id = trace_id
         self._session_id = session_id
         self._thread_id = thread_id
+        self._publish_business = publish_business
         self._root_id: str | None = None
         self._lock = threading.RLock()
         """并行首写时子智能体钩子在执行器线程发事件、流块在驱动线程处理，
@@ -214,7 +236,20 @@ class GraphRunEmitter:
     def _handle_subagent_event(
         self, event_type: str, payload: dict[str, Any]
     ) -> None:
-        """子智能体事件 → 信封：成对键为（单元名, chapter_id），并行实例互不覆盖。"""
+        """子智能体事件 → 信封：成对键为（单元名, chapter_id），并行实例互不覆盖。
+
+        ``CONTENT_DELTA`` 例外：逐字流只走业务通道（``publish_business``），
+        永不进可视化信封（ADR-0001：可视化通道只放元数据，逐字流正文属
+        可丢级业务载荷）；``publish_business`` 缺省时静默丢弃（独立检索等
+        无业务通道场景，但写作子智能体不会走 standalone 钩子）。
+        """
+        if event_type == CONTENT_DELTA:
+            if self._publish_business is not None:
+                self._publish_business(
+                    "content_delta",
+                    {k: v for k, v in payload.items() if k != "unit"},
+                )
+            return
         unit = str(payload.get("unit", "subagent"))
         chapter_id = payload.get("chapter_id")
         key = (unit, chapter_id if isinstance(chapter_id, str) else None)

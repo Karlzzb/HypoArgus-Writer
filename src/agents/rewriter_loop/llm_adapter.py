@@ -23,12 +23,14 @@ from collections.abc import Sequence
 from typing import Any
 
 from agents.contracts import MaterialPayload
+from agents.rewriter_loop.delta_merger import DeltaMerger
 from agents.rewriter_loop.style_linter import (
     AuditItem,
     Violation,
     audit_items_for,
     word_count_prompt_block,
 )
+from agents.rewriter_loop.stub import UNIT
 from agents.rewriter_loop.writer_client import (
     AuditEnvelope,
     AuditIssue,
@@ -36,8 +38,10 @@ from agents.rewriter_loop.writer_client import (
     citable_materials,
 )
 from domain.doc_types import carried_doc_facts, tier_from_variant
+from domain.events import CONTENT_DELTA, EventHook, noop_hook
 from llm.llm_client import LLM
 from llm.llm_json import JSON_ONLY_RULE, parse_json
+from llm.stream_json import JsonFieldExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -282,11 +286,30 @@ def _build_audit_user(chapter_text: str, task: dict[str, Any]) -> str:
 
 
 class LlmWriterClient:
-    """写作 LLM 注入点的真实适配器：纯文本 JSON-in-text 调用注入的 LLM 协议。"""
+    """写作 LLM 注入点的真实适配器：纯文本 JSON-in-text 调用注入的 LLM 协议。
 
-    def __init__(self, llm: LLM, *, max_attempts: int = 3) -> None:
+    draft / revise 经 ``llm.stream`` 逐片段消费：正文片段经 ``JsonFieldExtractor``
+    从 JSON-in-text 增量抽出 chapter_text 纯正文、推理片段按 ``thinking`` kind
+    原样外发，两 kind 经 ``DeltaMerger`` 合并后通过 ``EventHook`` 上网线为
+    ``CONTENT_DELTA`` 事件（可丢级、不入可视化信封）；终态 ``WriterEnvelope``
+    契约不变（``attempts`` / ``degraded`` 口径与旧非流式版一致）。
+    audit 仍走 ``llm.invoke``（逐字流只覆盖写作 draft/revise 两路）。
+    """
+
+    def __init__(
+        self,
+        llm: LLM,
+        *,
+        max_attempts: int = 3,
+        flush_chars: int = 64,
+        flush_ms: int = 50,
+        event_hook: EventHook = noop_hook,
+    ) -> None:
         self._llm = llm
         self._max_attempts = max_attempts
+        self._flush_chars = flush_chars
+        self._flush_ms = flush_ms
+        self._event_hook = event_hook
 
     def draft(
         self,
@@ -295,8 +318,9 @@ class LlmWriterClient:
         *,
         fix_violations: Sequence[Violation] | None = None,
     ) -> WriterEnvelope:
+        chapter_id = task["chapter_spec"]["id"]
         user = _build_draft_user(task, fix_violations=fix_violations)
-        return self._write_with_retry("draft", style_prose, user)
+        return self._write_with_retry("draft", style_prose, user, chapter_id)
 
     def revise(
         self,
@@ -305,10 +329,17 @@ class LlmWriterClient:
         *,
         fix_violations: Sequence[Violation] | None = None,
     ) -> WriterEnvelope:
+        chapter_id = task["chapter_spec"]["id"]
         user = _build_revise_user(task, fix_violations=fix_violations)
-        return self._write_with_retry("revise", style_prose, user)
+        return self._write_with_retry("revise", style_prose, user, chapter_id)
 
-    def _write_with_retry(self, step: str, style_prose: str, user: str) -> WriterEnvelope:
+    def _write_with_retry(
+        self,
+        step: str,
+        style_prose: str,
+        user: str,
+        chapter_id: str,
+    ) -> WriterEnvelope:
         """draft / revise 共用的退化重试：合法信封 = dict 且正文/摘要皆为 str。
 
         退化（异常 / 解析失败 / 结构非法 / 空正文）→ 重试至 ``max_attempts``；
@@ -316,6 +347,11 @@ class LlmWriterClient:
         ``degraded=True``）；从未拿到信封但抛过异常 → 重抛最后一个异常；
         否则返回空信封 ``degraded=True``。``attempts`` 回填实际执行的总轮次
         （末次退化可能发生在拿到信封之后，故以循环终止时的轮次为准）。
+
+        每轮经 ``_stream_once`` 逐片段消费流式应答：流中途或 ``finish`` 抛
+        ``FieldExtractionError`` 即本轮退化（与旧非流式 ``parse_json`` 失败
+        等价）；已 flush 的逐字帧仍带本轮 attempt 号，调用方在更高 attempt
+        须丢弃重建（契约见 ``CONTENT_DELTA``）。
         """
         messages = [
             {"role": "system", "content": _system_content(_SYSTEM_INSTRUCTIONS, style_prose)},
@@ -325,7 +361,7 @@ class LlmWriterClient:
         last_exc: BaseException | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
-                raw = self._llm.invoke(messages)
+                raw = self._stream_once(step, messages, attempt, chapter_id)
                 payload = parse_json(raw, step)
             except Exception as exc:
                 last_exc = exc
@@ -369,6 +405,68 @@ class LlmWriterClient:
         return WriterEnvelope(
             chapter_text="", chapter_summary="", attempts=self._max_attempts, degraded=True
         )
+
+    def _stream_once(
+        self,
+        step: str,
+        messages: list[dict[str, str]],
+        attempt: int,
+        chapter_id: str,
+    ) -> str:
+        """单轮流式消费：逐片段抽正文/推理，合并后上网线，返回完整原始 JSON 文本。
+
+        - 正文片段（``kind=content``）原样累积到 ``raw_parts``，并喂入
+          ``JsonFieldExtractor`` 增量抽出 chapter_text 纯正文外发逐字流；
+          抽取失败（非法转义 / 非字符串值）即抛 ``FieldExtractionError``，
+          由 ``_write_with_retry`` 的 try/except 捕获判本轮退化。
+        - 推理片段（``kind=thinking``）直接喂入合并器外发，不进 JSON 抽取
+          （推理 CoT 不在 chapter_text 字段内）。
+        - 流结束调 ``extractor.finish`` 校验目标字段完整闭合；未闭合 / 未找到
+          抛 ``FieldExtractionError``（同样判本轮退化）。
+        - 错误路径不调 ``flush_remaining``：残余片段随本轮 attempt 丢弃，
+          与「更高 attempt 须从零重建」契约一致；已 flush 帧仍带本轮 attempt 号。
+        - ``sequence`` 在本轮内单调递增（content / thinking 共享同一计数器），
+          新 attempt 复位为 0（每次 ``_stream_once`` 独立 seq 列表）。
+        """
+        extractor = JsonFieldExtractor("chapter_text")
+        # 单元素列表当可变计数器：闭包内自增免 nonlocal，本流内 content /
+        # thinking 共享同一 sequence，新 attempt 自然从 0 复位（本函数局部）。
+        seq = [0]
+
+        def on_flush(kind: str, text: str) -> None:
+            payload = {
+                "unit": UNIT,
+                "chapter_id": chapter_id,
+                "mode": step,
+                "kind": kind,
+                "delta": text,
+                "attempt": attempt,
+                "sequence": seq[0],
+            }
+            seq[0] += 1
+            self._event_hook(CONTENT_DELTA, payload)
+
+        merger = DeltaMerger(
+            on_flush,
+            flush_chars=self._flush_chars,
+            flush_ms=self._flush_ms,
+        )
+        raw_parts: list[str] = []
+        for chunk in self._llm.stream(messages):
+            if chunk.kind == "thinking":
+                merger.feed("thinking", chunk.text)
+                continue
+            raw_parts.append(chunk.text)
+            # 抽取器吃原始 JSON 片段（非纯正文）：可能抛 FieldExtractionError，
+            # 任其传播到 _write_with_retry 的 try/except 判本轮退化。
+            prose = extractor.feed(chunk.text)
+            if prose:
+                merger.feed("content", prose)
+        # finish 在目标字段未闭合/未找到时抛错：错误路径不 flush_remaining，
+        # 残余缓冲随 attempt 丢弃；已 flush 帧仍属本轮 attempt 号。
+        extractor.finish()
+        merger.flush_remaining()
+        return "".join(raw_parts)
 
     def audit(self, chapter_text: str, task: dict[str, Any]) -> AuditEnvelope:
         """自审裁决；``issues: []`` 合法非退化（不重试）。

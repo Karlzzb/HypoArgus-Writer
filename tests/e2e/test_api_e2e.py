@@ -14,6 +14,7 @@ FakeLLM 响应计划复用 test_graph_e2e 的编排方式；
 
 import asyncio
 import json
+import os
 import threading
 from contextlib import ExitStack, asynccontextmanager
 from typing import Any, AsyncIterator, Callable
@@ -2189,5 +2190,203 @@ def test_产物流_产物事件载荷与products快照逐字段对账():
                 for f in full
                 if f["event"] == "product"
             )
+
+    asyncio.run(main())
+
+
+# ---- 逐字流 content_delta（issue #59）：HTTP 级别验收 ----
+
+
+class _EnvOverride:
+    """临时覆盖 os.environ 键值对，退出时恢复（测试用、非线程安全）。"""
+
+    def __init__(self, **overrides: str) -> None:
+        self._overrides = overrides
+        self._saved: dict[str, str | None] = {}
+
+    def __enter__(self) -> "_EnvOverride":
+        for key, value in self._overrides.items():
+            self._saved[key] = os.environ.get(key)
+            os.environ[key] = value
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        for key, original in self._saved.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+
+
+def _content_delta_payloads(frames: list[dict]) -> list[dict[str, Any]]:
+    """从业务帧列表提取 content_delta 事件的 data 块。"""
+    return [
+        f["data"]["data"]
+        for f in frames
+        if f["event"] == "content_delta"
+    ]
+
+
+def test_逐字流_content_delta拼接一致与退化重试attempt递增():
+    """mock 真链路（rewriter_stub=False）：业务 SSE 收 content_delta 帧，
+    拼接 == chapter_ready 整块正文；退化重试 attempt 递增、sequence 复位；
+    content_delta 不出现在可视化通道。"""
+
+    async def main() -> None:
+        # ch1 draft 前插一段未闭合 JSON 强制退化重试：attempt 1 失败、attempt 2 成功。
+        bad_ch1_draft = '{"chapter_text": "部分未闭合'
+        keyed = {
+            **FRAMEWORK_KEYED_RESPONSES,
+            **WRITER_KEYED_RESPONSES,
+            # 覆盖 ch1 的 draft 键控序列：malformed 在前、valid draft 在后。
+            "- 标题：第一章": [
+                bad_ch1_draft,
+                WRITER_KEYED_RESPONSES["- 标题：第一章"][0],
+                WRITER_KEYED_RESPONSES["- 标题：第一章"][1],
+            ],
+        }
+        # 小阈值 + 关时间窗口：确定性多帧、便于拼接断言。
+        # env 须覆盖整个 async with _client 区间：make_rewriter_loop 在 lifespan
+        # 启动期（uvicorn 起服务时）才读 env，_make_app 只构建 FastAPI 对象。
+        with _EnvOverride(WRITER_DELTA_FLUSH_CHARS="4", WRITER_DELTA_FLUSH_MS="0"):
+            app = _make_app(
+                [*FIRST_PASS_RESPONSES, *REVISE_ROUND_RESPONSES],
+                keyed=keyed,
+                rewriter_stub=False,
+            )
+            async with _client(app) as client:
+                thread_id, _ = await _create_task(client, "sess-delta")
+
+                business, _ = await _read_sse(
+                    client,
+                    f"/tasks/{thread_id}/stream",
+                    _stop_on_review_count(1),
+                    last_event_id=FROM_START,
+                )
+
+                deltas = _content_delta_payloads(business)
+                assert deltas, "draft/revise 期间须发 content_delta 事件"
+                # 每帧字段齐全：chapter_id / mode / kind / delta / attempt / sequence。
+                for payload in deltas:
+                    assert payload["chapter_id"] in {"ch1", "ch2"}
+                    assert payload["mode"] in {"draft", "revise"}
+                    assert payload["kind"] in {"content", "thinking"}
+                    assert isinstance(payload["delta"], str)
+                    assert isinstance(payload["attempt"], int)
+                    assert isinstance(payload["sequence"], int)
+
+                # 退化重试：ch1 draft 的 attempt 1（malformed）有帧、attempt 2（valid）有帧；
+                # attempt 2 的 sequence 从 0 复位（丢弃重建语义）。
+                ch1_draft_deltas = [
+                    p for p in deltas
+                    if p["chapter_id"] == "ch1" and p["mode"] == "draft"
+                ]
+                attempt1 = [p for p in ch1_draft_deltas if p["attempt"] == 1]
+                attempt2 = [p for p in ch1_draft_deltas if p["attempt"] == 2]
+                assert attempt1, "ch1 draft 退化重试 attempt 1 须有 content_delta 帧"
+                assert attempt2, "ch1 draft 退化重试 attempt 2 须有 content_delta 帧"
+                assert attempt2[0]["sequence"] == 0, "新 attempt 的 sequence 须从 0 复位"
+                # attempt 内 sequence 单调递增。
+                assert [p["sequence"] for p in attempt2] == sorted(
+                    p["sequence"] for p in attempt2
+                )
+
+                # 拼接 ch1 draft 最终 attempt 的 content 帧 == chapter_ready 整块正文。
+                ch1_ready = next(
+                    f["data"]["data"]
+                    for f in business
+                    if f["event"] == "product"
+                    and f["data"]["data"]["kind"] == "chapter_ready"
+                    and f["data"]["data"]["chapter_id"] == "ch1"
+                )
+                ch1_final_attempt = max(p["attempt"] for p in ch1_draft_deltas)
+                ch1_final_content = "".join(
+                    p["delta"]
+                    for p in ch1_draft_deltas
+                    if p["attempt"] == ch1_final_attempt and p["kind"] == "content"
+                )
+                assert ch1_final_content == ch1_ready["draft"]["text"], (
+                    "逐字流最终 attempt 拼接须与 chapter_ready 整块正文一致"
+                )
+
+                # ch2 draft（无退化）：拼接 == chapter_ready 正文。
+                ch2_draft_deltas = [
+                    p for p in deltas
+                    if p["chapter_id"] == "ch2" and p["mode"] == "draft"
+                ]
+                ch2_ready = next(
+                    f["data"]["data"]
+                    for f in business
+                    if f["event"] == "product"
+                    and f["data"]["data"]["kind"] == "chapter_ready"
+                    and f["data"]["data"]["chapter_id"] == "ch2"
+                )
+                ch2_final_attempt = max(p["attempt"] for p in ch2_draft_deltas)
+                ch2_final_content = "".join(
+                    p["delta"]
+                    for p in ch2_draft_deltas
+                    if p["attempt"] == ch2_final_attempt and p["kind"] == "content"
+                )
+                assert ch2_final_content == ch2_ready["draft"]["text"]
+
+                # 可视化通道不出 content_delta（逐字流只走业务通道）。
+                graph_frames, _ = await _read_sse(
+                    client,
+                    f"/graph_events?thread_id={thread_id}",
+                    _stop_on_types({"gate_blocked"}),
+                    last_event_id=FROM_START,
+                )
+                graph_types = {f["event"] for f in graph_frames}
+                assert "content_delta" not in graph_types
+                assert graph_types <= GRAPH_EVENT_TYPES
+
+    asyncio.run(main())
+
+
+def test_逐字流_合并粒度可配且stub链路不逐字流():
+    """合并粒度（字符数阈值）经 WRITER_DELTA_FLUSH_CHARS 配置：
+    小阈值→多帧、大阈值→少帧；rewriter_stub=True 的桩链路不逐字流。"""
+
+    async def run_once(flush_chars: str) -> list[dict]:
+        keyed = {**FRAMEWORK_KEYED_RESPONSES, **WRITER_KEYED_RESPONSES}
+        with _EnvOverride(
+            WRITER_DELTA_FLUSH_CHARS=flush_chars, WRITER_DELTA_FLUSH_MS="0"
+        ):
+            app = _make_app(
+                [*FIRST_PASS_RESPONSES, *REVISE_ROUND_RESPONSES],
+                keyed=keyed,
+                rewriter_stub=False,
+            )
+            async with _client(app) as client:
+                thread_id, _ = await _create_task(client, f"sess-granule-{flush_chars}")
+                business, _ = await _read_sse(
+                    client,
+                    f"/tasks/{thread_id}/stream",
+                    _stop_on_review_count(1),
+                    last_event_id=FROM_START,
+                )
+                return _content_delta_payloads(business)
+
+    async def main() -> None:
+        small = await run_once("4")
+        large = await run_once("10000")
+        assert len(small) > len(large), (
+            f"小阈值帧数 {len(small)} 须多于大阈值帧数 {len(large)}"
+        )
+        # 大阈值下 content_delta 帧数仍 ≥ 2（ch1 + ch2 draft 至少各一帧，由
+        # flush_remaining 兜底）。
+        assert len(large) >= 2
+
+        # stub 链路不逐字流：rewriter_stub=True 时桩改写器不调 LLM、不发 content_delta。
+        app = _make_app([*FIRST_PASS_RESPONSES, *REVISE_ROUND_RESPONSES])
+        async with _client(app) as client:
+            thread_id, _ = await _create_task(client, "sess-stub-no-delta")
+            business, _ = await _read_sse(
+                client,
+                f"/tasks/{thread_id}/stream",
+                _stop_on_review_count(1),
+                last_event_id=FROM_START,
+            )
+            assert _content_delta_payloads(business) == []
 
     asyncio.run(main())
