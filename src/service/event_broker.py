@@ -1,4 +1,5 @@
-"""SSE 事件发布订阅枢纽：世代 id、Last-Event-ID 续传、reconcile_required。
+"""SSE 事件发布订阅枢纽：世代 id、Last-Event-ID 续传、reconcile_required、
+慢消费者两级丢弃背压。
 
 LangGraph 图在工作线程中同步执行并从那里发布事件，SSE 订阅者在服务的
 asyncio 事件循环中消费。因此 publish/close 走 call_soon_threadsafe 调度到
@@ -14,6 +15,14 @@ loop 线程，所有内部状态变更都只在 loop 线程内发生，无需加
 - 有界环形缓冲保留近期事件供续传；超限淘汰最旧并累加 ``dropped`` 计数。
 - ``reconcile_required`` 是每订阅者的控制事件，不入缓冲、不广播给其他订阅者，
   但占用一个单调 seq（不与任何真实事件 id 冲突）。
+
+背压语义（issue #55 两级丢弃——信号必达，产物可丢可取）：
+- 每订阅者一条有界队列（``max_queue``）。慢消费者灌满时按两级丢弃挤位：
+  可丢级（``content_delta`` / ``product`` 整块，REST 可对账）淘汰最旧一条并
+  累加 ``dropped``；不可丢控制信号（``review_required`` / ``finalized`` /
+  ``error`` / ``reconcile_required``）满时挤掉可丢级帧为其让位，全队列无可丢
+  级可挤时强制超容入队——信号体积极小、罕见，保信号必达，无内存风险。
+- ``dropped`` 累计历史缓冲淘汰与订阅者队列丢弃两部分，供运维观测背压健康。
 """
 
 from __future__ import annotations
@@ -21,11 +30,23 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 # 结束哨兵：投入订阅队列表示枢纽已关闭，订阅迭代到此正常结束。
 _CLOSE_SENTINEL: Any = object()
+
+# 可丢级事件类型：业务通道的逐字帧与产物整块，丢了靠 REST 对账重取。
+# 其余类型（status / review_required / finalized / error / reconcile_required
+# 等控制信号、可视化信封）一律不可丢——契约一句话：信号必达，产物可丢可取。
+_DROPPABLE_TYPES: frozenset[str] = frozenset({"content_delta", "product"})
+
+# 每订阅者队列的缺省容量：正常速率消费者不丢不重，慢消费者灌满后丢最旧可丢级。
+_DEFAULT_MAX_QUEUE = 256
+
+# 容量可经同名环境变量覆盖（由 app 装配时读取），具体阈值据线上负载调定。
+_DEFAULT_MAX_QUEUE_ENV = "SSE_MAX_QUEUE"
 
 # reconcile_required 载荷里指明的对账 REST 口子（issue #54 时点已存在的只读通道）。
 _RECONCILE_VIA_BUSINESS: tuple[str, ...] = (
@@ -52,6 +73,88 @@ def parse_event_id(event_id: str) -> tuple[str, int]:
     return epoch, int(seq_str)
 
 
+def _is_droppable(item: Any) -> bool:
+    """是否可丢级：业务通道的 ``content_delta`` 与 ``product`` 整块（REST 可对账）。
+
+    dict 业务事件按 ``type`` 判定；EventEnvelope（可视化信封）、哨兵等非 dict
+    载荷一律不可丢——可视化通道元数据专用、必达。
+    """
+    return isinstance(item, dict) and item.get("type") in _DROPPABLE_TYPES
+
+
+class _BackpressureQueue:
+    """单订阅者有界队列 + 两级丢弃背压（单消费者：一条 SSE 流）。
+
+    契约：信号必达，产物可丢可取。
+    - 满时挤位只淘汰最旧的可丢级帧（``content_delta`` / ``product``），绝不淘汰
+      信号；经 ``on_drop`` 回调上交枢纽累计 ``dropped``。
+    - 无可丢级可挤时：可丢级 incoming 直接丢弃（产物可丢）；不可丢信号强制
+      超容入队（保必达，信号体积极小、罕见，无内存风险）。
+    - 消费者挂起等待（缓冲空）时直接交付，不经缓冲、不占位、不触发背压。
+    - 入队永不阻塞（``put_nowait``）；取空时 ``get`` 挂起 Future 等 put 唤醒。
+    """
+
+    def __init__(
+        self, maxsize: int, on_drop: Callable[[int], None]
+    ) -> None:
+        self._buf: deque = deque()
+        self._maxsize = maxsize
+        self._on_drop = on_drop
+        self._getter: asyncio.Future[Any] | None = None
+
+    def put_nowait(self, value: Any) -> None:
+        """入队一条 (seq, item) 或结束哨兵；永不阻塞。"""
+        # 有消费者挂起等待：直接交付，不经缓冲（不占位、不触发背压）。
+        getter = self._getter
+        if getter is not None and not getter.done():
+            self._getter = None
+            getter.set_result(value)
+            return
+        if value is _CLOSE_SENTINEL:
+            self._buf.append(value)
+            return
+        if len(self._buf) >= self._maxsize:
+            if not self._evict_oldest_droppable():
+                # 无可丢级可挤
+                if _is_droppable(value):
+                    self._on_drop(1)  # 丢弃 incoming 可丢级
+                    return
+                # 不可丢信号：强制超容入队，保必达
+        self._buf.append(value)
+
+    def _evict_oldest_droppable(self) -> bool:
+        """淘汰缓冲内最旧的可丢级帧，返回是否淘汰成功。"""
+        for i, entry in enumerate(self._buf):
+            # 仅 (seq, item) 元组可判级；结束哨兵是裸对象，跳过（且哨兵入队后
+            # 枢纽必已关闭，不会再有 publish 触发淘汰，此处仅作防御）。
+            if isinstance(entry, tuple) and _is_droppable(entry[1]):
+                del self._buf[i]
+                self._on_drop(1)
+                return True
+        return False
+
+    async def get(self) -> Any:
+        """取下一条（(seq, item) 或哨兵）；空时挂起等待 put 直接交付。"""
+        if self._buf:
+            return self._buf.popleft()
+        # 缓冲空：登记 Future 等 put 直接交付。先存局部变量再 await——
+        # put_nowait 在 set_result 前即清空 self._getter，取消路径须凭局部
+        # future 判断是否已交付、归还缓冲，否则交付而未取的帧会丢（违信号必达）。
+        fut = asyncio.get_running_loop().create_future()
+        self._getter = fut
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            # 消费者被取消：若 future 已被交付但未取走，归还缓冲以免丢帧。
+            if fut.done() and not fut.cancelled():
+                value = fut.result()
+                if value is not _CLOSE_SENTINEL:
+                    self._buf.appendleft(value)
+            raise
+        finally:
+            self._getter = None
+
+
 class EventHub:
     """单通道事件枢纽：载荷类型不限，事件 id 与续传语义由本类负责。
 
@@ -70,13 +173,15 @@ class EventHub:
         epoch: str,
         thread_id: str | None = None,
         max_history: int = 10000,
+        max_queue: int = _DEFAULT_MAX_QUEUE,
     ) -> None:
         self._loop = loop
         self._epoch = epoch
         self._thread_id = thread_id
         self._max_history = max_history
+        self._max_queue = max_queue
         self._buffer: deque[tuple[int, Any]] = deque()
-        self._queues: set[asyncio.Queue[Any]] = set()
+        self._queues: set[_BackpressureQueue] = set()
         self._closed = False
         self._dropped = 0
         self._seq = 0
@@ -93,7 +198,7 @@ class EventHub:
 
     @property
     def dropped(self) -> int:
-        """缓冲超上限被淘汰的最旧事件条数，供上层观测。"""
+        """被丢弃的事件总数：历史缓冲淘汰 + 慢消费者队列丢弃，供运维观测。"""
         return self._dropped
 
     @property
@@ -121,6 +226,7 @@ class EventHub:
         """线程安全发布：分配 seq、盖戳传输 id、入缓冲并推给所有在线订阅者。
 
         缓冲超过 max_history 时淘汰最旧一条并累加 dropped 计数。
+        推给订阅者时走其有界队列的两级丢弃背压（可丢级丢最旧、信号必达）。
         枢纽关闭后发布被静默忽略。
         """
 
@@ -164,9 +270,10 @@ class EventHub:
         - 同世代但所求位置已被淘汰：下发 reconcile_required(position_dropped) 后转实时。
         - 同世代且位置仍在缓冲内：回放该 id 之后仍保留的事件，再续实时。
         reconcile_required 仅投给本订阅者，不入缓冲、不广播。
-        订阅者被取消时在 finally 中注销自己的队列，不泄漏。
+        实时事件经本订阅者的有界队列（两级丢弃背压）；订阅者被取消时在 finally
+        中注销自己的队列，不泄漏。
         """
-        queue: asyncio.Queue[Any] = asyncio.Queue()
+        queue = _BackpressureQueue(self._max_queue, self._account_drop)
         replay: list[tuple[int, Any]] = []
         reconcile: tuple[int, dict[str, Any]] | None = None
 
@@ -213,6 +320,10 @@ class EventHub:
                 yield item
         finally:
             self._queues.discard(queue)
+
+    def _account_drop(self, count: int) -> None:
+        """订阅者队列两级丢弃时回调：累加 dropped（loop 线程内，无需加锁）。"""
+        self._dropped += count
 
     def _build_reconcile(
         self, reason: str, last_event_id: str | None

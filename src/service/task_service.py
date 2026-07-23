@@ -133,12 +133,14 @@ class TaskManager:
         loop: asyncio.AbstractEventLoop,
         hook_dispatcher: SubagentHookDispatcher,
         epoch: str,
+        max_queue: int,
     ) -> None:
         self._graph = graph
         self._graph_hub = graph_hub
         self._loop = loop
         self._hook_dispatcher = hook_dispatcher
         self._epoch = epoch
+        self._max_queue = max_queue
         self._tasks: dict[str, _TaskEntry] = {}
 
     # ---- 对外操作 ----
@@ -377,7 +379,10 @@ class TaskManager:
     def _new_hub(self, thread_id: str) -> EventHub:
         """为任务建一条业务通道枢纽：带本进程世代 id 与带 thread_id 的 reconcile 载荷。"""
         return EventHub(
-            self._loop, epoch=self._epoch, thread_id=thread_id
+            self._loop,
+            epoch=self._epoch,
+            thread_id=thread_id,
+            max_queue=self._max_queue,
         )
 
     # ---- 内部实现 ----

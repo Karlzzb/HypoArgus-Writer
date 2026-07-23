@@ -318,6 +318,13 @@ data: <JSON>
 
 建议客户端不设读超时（长连接），断线带 `Last-Event-ID` 重连续传。
 
+**慢消费者背压（两级丢弃——信号必达，产物可丢可取）**：每订阅者一条有界队列（容量由环境变量 `SSE_MAX_QUEUE` 调，缺省 256）。慢消费者灌满时按两级丢弃挤位：
+
+- 可丢级（`content_delta` 逐字帧、`product` 整块产物）队列满时丢最旧一条并累计 `dropped`；丢了靠 REST（`GET /tasks/{id}/products`、`/review`、`/bibliography`）对账重取。
+- 不可丢控制信号（`review_required` / `finalized` / `error` / `reconcile_required`）满时挤掉可丢级帧为其让位；全队列无可丢级可挤时强制超容入队——信号体积极小、罕见，保信号必达，无内存风险。
+
+正常速率消费者不丢不重。`dropped`（历史缓冲淘汰 + 队列丢弃累计）与 `subscriber_count` 经下方 stats 端点观测。
+
 ### 3.1 业务通道 `GET /tasks/{thread_id}/stream`
 
 每任务一条流；不带 `Last-Event-ID` 的新订阅只收实时事件，带 `Last-Event-ID`
@@ -369,6 +376,22 @@ data: <JSON>
 12 个事件类型：`node_start`、`node_end`、`node_error`、`gate_blocked`、`gate_resumed`、`branch_taken`、`loop_iteration`、`subagent_start`、`subagent_end`、`state_snapshot`、`llm_config_used`、`progress`。
 `parent_id` 用于拼接执行拓扑树。
 `state_snapshot` 只含元数据（状态、轮次、章节与素材计数等），绝不含正文。
+
+### 3.3 背压可观测 `GET /tasks/{thread_id}/stream/stats` 与 `GET /graph_events/stats`
+
+只读、轻量，返回 SSE 通道的背压健康指标：
+
+```json
+{ "thread_id": "...", "subscriber_count": n, "dropped": n, "epoch": "..." }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `subscriber_count` | 该通道当前在线订阅者数 |
+| `dropped` | 累计丢弃事件数（历史缓冲淘汰 + 慢消费者队列丢弃） |
+| `epoch` | 通道世代 id，供客户端核对续传是否同世代 |
+
+业务通道 stats 须带真实 `thread_id`（未知任务 → 404）；可视化通道 stats 为全局聚合、不带 `thread_id` 字段。可视化通道事件皆元数据信封（不可丢级），`dropped` 主要反映历史缓冲淘汰。
 
 ## 4. Java 端对接示例
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, asynccontextmanager
@@ -22,7 +23,12 @@ from pydantic import BaseModel, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 
 from assembly.assembler_config import AssemblerConfig
-from service.event_broker import EventHub, new_epoch
+from service.event_broker import (
+    EventHub,
+    _DEFAULT_MAX_QUEUE,
+    _DEFAULT_MAX_QUEUE_ENV,
+    new_epoch,
+)
 from service.event_envelope import GRAPH_EVENT_TYPES, EventEnvelope
 from graph import build_graph, postgres_checkpointer
 from llm import observability
@@ -37,6 +43,7 @@ from agents.contracts import (
 )
 from agents.rewriter_loop import make_rewriter_loop
 from agents.search_agent import make_search_agent
+from domain.env_config import read_positive_int
 from domain.events import SUBAGENT_END, EventHook
 from search_agent.api import (
     SearchAgentConfigurationError,
@@ -262,6 +269,22 @@ def _format_event(epoch: str, seq: int, item: Any) -> dict[str, str]:
     }
 
 
+def _stats_payload(hub: EventHub, thread_id: str | None = None) -> dict[str, Any]:
+    """SSE 通道背压可观测载荷：订阅者数、累计丢弃事件数、世代 id。
+
+    业务通道带 thread_id（未知任务由调用方先抛 TaskNotFound→404）；可视化
+    通道为全局聚合、不带 thread_id。
+    """
+    payload: dict[str, Any] = {
+        "subscriber_count": hub.subscriber_count,
+        "dropped": hub.dropped,
+        "epoch": hub.epoch,
+    }
+    if thread_id is not None:
+        payload["thread_id"] = thread_id
+    return payload
+
+
 def create_app(
     *,
     llm_factory: LLMFactory = default_llm_factory,
@@ -273,6 +296,7 @@ def create_app(
     assembler_config: AssemblerConfig | None = None,
     epoch: str | None = None,
     ping_interval: int | None = None,
+    max_queue: int | None = None,
 ) -> FastAPI:
     """构建 FastAPI 应用：全部依赖在 lifespan 里装配。
 
@@ -285,11 +309,19 @@ def create_app(
     epoch 为进程（应用实例）启动标识，用于 SSE 事件 id ``{epoch}-{seq}``
     与 Last-Event-ID 续传的世代裁决；缺省每次建应用新生成一个。测试注入
     固定值以复现世代失配。ping_interval 为 SSE keepalive 心跳间隔秒数，
-    缺省 15。
+    缺省 15。max_queue 为每订阅者 SSE 队列容量（慢消费者两级丢弃背压），
+    缺省读环境变量 SSE_MAX_QUEUE、未设置回落 _DEFAULT_MAX_QUEUE。
     """
 
     app_epoch = epoch if epoch is not None else new_epoch()
     app_ping = ping_interval if ping_interval is not None else _DEFAULT_PING_INTERVAL
+    app_max_queue = (
+        max_queue
+        if max_queue is not None
+        else read_positive_int(
+            os.environ, _DEFAULT_MAX_QUEUE_ENV, _DEFAULT_MAX_QUEUE
+        )
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -323,7 +355,9 @@ def create_app(
                 document_review_max_retries=document_review_max_retries,
                 assembler_config=assembler_config,
             )
-            graph_hub = EventHub(loop, epoch=app_epoch)
+            graph_hub = EventHub(
+                loop, epoch=app_epoch, max_queue=app_max_queue
+            )
             app.state.graph_hub = graph_hub
             app.state.search_agent = observability.wrap_subagent(
                 resolved_search_agent
@@ -335,6 +369,7 @@ def create_app(
                 loop=loop,
                 hook_dispatcher=hook_dispatcher,
                 epoch=app_epoch,
+                max_queue=app_max_queue,
             )
             app.state.manager = manager
             yield
@@ -478,6 +513,26 @@ def create_app(
             ping=app_ping,
             sep="\n",
         )
+
+    @app.get("/tasks/{thread_id}/stream/stats")
+    async def stream_stats(thread_id: str) -> dict[str, Any]:
+        """业务通道背压可观测：当前订阅者数、累计丢弃事件数与世代 id。
+
+        ``subscriber_count`` 为该任务业务流当前在线订阅者数；``dropped`` 为
+        历史缓冲淘汰与慢消费者队列丢弃的累计计数；``epoch`` 供客户端核对
+        续传世代。慢消费者灌满时据此观测可丢级丢弃健康、信号是否必达。
+        """
+        hub = _manager().business_hub(thread_id)
+        return _stats_payload(hub, thread_id)
+
+    @app.get("/graph_events/stats")
+    async def graph_events_stats() -> dict[str, Any]:
+        """可视化通道背压可观测：当前订阅者数、累计丢弃事件数与世代 id。
+
+        全局流事件皆为元数据信封（不可丢级），慢消费者灌满时信号强制超容
+        必达、无产物丢弃；``dropped`` 主要反映历史缓冲淘汰。
+        """
+        return _stats_payload(app.state.graph_hub)
 
     @app.get("/graph_events")
     async def graph_events(

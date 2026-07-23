@@ -1616,3 +1616,47 @@ def test_服务关停优雅关流():
         assert app.state.graph_hub.closed
 
     asyncio.run(main())
+
+
+def test_stats端点可观测背压():
+    """AC：dropped 与 subscriber_count 可经 stats 端点观测（issue #55）。"""
+    async def main() -> None:
+        app = _make_app([])
+        async with _client(app) as client:
+            # 未知任务的业务 stats → 404。
+            miss = await client.get("/tasks/nope/stream/stats")
+            assert miss.status_code == 404
+
+            # 全局可视化 stats：无订阅者、无丢弃、世代即测试固定值。
+            stats = (await client.get("/graph_events/stats")).json()
+            assert stats["subscriber_count"] == 0
+            assert stats["dropped"] == 0
+            assert stats["epoch"] == TEST_EPOCH
+
+            # 业务 stats：建一个任务，无订阅者时计数为 0。
+            thread_id, _ = await _create_task(client)
+            biz = (await client.get(f"/tasks/{thread_id}/stream/stats")).json()
+            assert biz["thread_id"] == thread_id
+            assert biz["subscriber_count"] == 0
+            assert biz["dropped"] == 0
+            assert biz["epoch"] == TEST_EPOCH
+
+            # 开一条全局流并保持连接，期间 subscriber_count 经端点观测为 1。
+            async with client.stream("GET", "/graph_events") as response:
+                assert response.status_code == 200
+                for _ in range(50):
+                    live = (await client.get("/graph_events/stats")).json()
+                    if live["subscriber_count"] >= 1:
+                        break
+                    await asyncio.sleep(0.02)
+                assert live["subscriber_count"] >= 1
+                assert live["epoch"] == TEST_EPOCH
+            # 客户端断开后，订阅者数回落为 0。
+            for _ in range(50):
+                after = (await client.get("/graph_events/stats")).json()
+                if after["subscriber_count"] == 0:
+                    break
+                await asyncio.sleep(0.02)
+            assert after["subscriber_count"] == 0
+
+    asyncio.run(main())
