@@ -464,6 +464,17 @@ def create_app(
         """
         return _manager().get_products(thread_id)
 
+    @app.get("/tasks/{thread_id}/review")
+    async def get_task_review(thread_id: str) -> dict[str, Any]:
+        """人工审阅包全文：停在审阅门时一次给齐六类内容 + pack_version 轮次指纹。
+
+        只读检查点 state，不引入新状态；与 SSE 摘要事件 review_pack_ready 对账——
+        丢了摘要靠此 REST 重取全文。
+        未停在中断点返回 409（不返回半成品），任务不存在返回 404；
+        重复调用幂等（同检查点同 pack_version）。
+        """
+        return _manager().get_review_pack(thread_id)
+
     @app.post("/tasks/{thread_id}/review", status_code=202)
     async def submit_review(thread_id: str, request: ReviewRequest) -> dict[str, str]:
         """提交人工审阅决定（定稿或修订），从中断点恢复运行。"""

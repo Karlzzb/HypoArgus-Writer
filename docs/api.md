@@ -29,7 +29,10 @@ Java 端                                  HypoArgus-Writer
   │ GET /tasks/{id}/stream  (SSE 长连接)   │
   │──────────────────────────────────────▶│
   │        ◀── event: status  (多次，各阶段推进)
-  │        ◀── event: review_required     （任务停在人工中断点）
+  │        ◀── event: review_pack_ready （审阅包摘要 + pack_version，丢了靠 REST 取）
+  │        ◀── event: review_required     （任务停在人工中断点，纯路由元数据）
+  │ GET /tasks/{id}/review              （取审阅包全文：大纲/正文/警告/台账/引文库）
+  │──────────────────────────────────────▶│ 200 {pack_version, outline, chapters, ...}
   │ POST /tasks/{id}/review {action:"revise", feedback:"..."}
   │──────────────────────────────────────▶│ 202
   │        ◀── event: status ...          （新一轮迭代）
@@ -132,6 +135,8 @@ Java 端                                  HypoArgus-Writer
 
 语义：`revise` 会由 LLM 把意见解析为逐章修订指令并再迭代一轮，之后重新停在中断点；`finalize` 直接进入 `FINISHED` 并在业务 SSE 推送 `finalized` 事件。
 若意见解析不出有效指令，系统不报错，而是携 `error` 字段重新推送 `review_required` 事件，调用方重新提交即可。
+
+停门后审阅所需全文（大纲/各章正文/引文警告/篇级 warn/修订台账/引文库）一次取齐见 §2.9 `GET /tasks/{id}/review`；`review_required` 事件只携路由元数据（`chapter_ids`/`pending_confirmation`/`clarification_questions`/`iteration_round`/`error`），不带正文与警告全文。
 
 修订指令定位增强下的三种重新中断（均通过重新推送 `review_required` 事件呈现，调用方按载荷字段区分）：
 
@@ -293,6 +298,31 @@ Java 端                                  HypoArgus-Writer
 
 错误：请求体校验失败 → 422；检索任务违反引擎入参契约 → 422；检索通道 / LLM 配置缺失 → 503。
 
+### 2.9 人工审阅包
+
+`GET /tasks/{thread_id}/review` → `200 OK`
+
+停在人工中断点时一次返回完整审阅包全文供调用方开展审阅；
+未停在中断点返回 409（不返回半成品），任务不存在返回 404。
+重复调用幂等（同检查点同 `pack_version`）。
+
+响应体（六类内容齐备 + 轮次指纹）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `pack_version` | string | 轮次指纹：六类内容 + 迭代轮次的 sha256 前 16 位；同状态恒同，修订再停门后内容变化即指纹变化 |
+| `iteration_round` | int | 当前迭代轮次，从 0 起 |
+| `outline` | array | 当前轮大纲（`ChapterSpec`：`id`/`title`/`subsections`/`chapter_type`/`planned_summary`/`points`[含 `hypotheses`]） |
+| `chapters` | array | 各章正文：`{chapter_id, text, summary}`，`text` 含原位素材 id 角标 |
+| `citation_warnings` | array[string] | 引文重试超限的未决警告，交人工裁决 |
+| `review_warnings` | array[string] | 篇级评审 warn 级提示（章间衔接/口径统一/跨章重复），不打回、不影响重试 |
+| `revision_ledger` | array | 修订台账（`RevisionRound`：`round_no`/`raw_feedback`/`directives`/`digest`），全量持久化 |
+| `citation_library` | array | 引文库素材全文（`Material`：`id`/`hypothesis_id`/`chapter_id`/`source`/`url`/`source_kind`/`excerpt`/`relevance_score`/`verdict`） |
+
+调用方在收到 SSE `review_pack_ready` 摘要或 `review_required` 路由信号后取此全文审阅；
+SSE 摘要丢了靠此 REST 对账重取。
+`review_required` 只携路由元数据，引文警告与篇级 warn 全文只走本接口。
+
 ## 3. SSE 通道
 
 两条通道，帧格式均为标准 SSE 三行：
@@ -341,7 +371,7 @@ data: <JSON>
 | `status` | `{"status": "...", "iteration_round": n, "node": "节点名"}` | 状态机推进 |
 | `product` | `{"kind": "outline_ready"\|"materials_ready"\|"chapter_ready", ...}` | 结构化产物整块事件，按产出顺序推送；属可丢级，丢了靠 `GET /tasks/{id}/products` 对账重取（见下） |
 | `content_delta` | `{"chapter_id": "...", "mode": "draft"\|"revise", "kind": "content"\|"thinking", "delta": "...", "attempt": <int>, "sequence": <int>}` | 写作中正文逐字增量（`kind=content` 为纯正文，非 JSON 语法碎片；思考开启时 `kind=thinking` 随正文一并逐字推送）；仅 writer draft/revise 产生，其他运行单元不逐字流。属可丢级，丢了不影响终态——`chapter_ready` 整块是持久锚，逐字流非持久化 |
-| `review_required` | `{"iteration_round": n, "chapter_ids": [...], "citation_warnings": [...], "review_warnings": [...], "error"?: "...", "clarification_questions"?: [...], "pending_confirmation"?: {...}}` | 停在人工中断点，等待调用方提交审阅；`error` 仅在上次提交契约不符或解析失败时出现；`clarification_questions` 为意见含混/定位失败时的回问问题列表；`pending_confirmation` 为大扇出待确认清单：`{"affected_chapter_ids": [...], "total_chapters": n, "directives": [{"target_chapter_id", "type", "instruction"}]}` |
+| `review_required` | `{"iteration_round": n, "chapter_ids": [...], "error"?: "...", "clarification_questions"?: [...], "pending_confirmation"?: {...}}` | 停在人工中断点——纯到达信号，仅携路由元数据供调用方判分支：`error`（上次提交契约不符/解析失败，须重新提交）、`clarification_questions`（意见含混/引文定位失败的回问问题）、`pending_confirmation`（大扇出待确认清单：`{"affected_chapter_ids": [...], "total_chapters": n, "directives": [{"target_chapter_id", "type", "instruction"}]}`）按场景出现。引文警告/篇级 warn/章正文/素材全文不在本事件，走 `GET /tasks/{id}/review` |
 | `reconcile_required` | `{"reason": "epoch_mismatch"\|"position_dropped"\|"malformed", "last_event_id": "...", "reconcile_via": ["GET /tasks/{id}", ...]}` | 续传失效控制事件：世代失配或所求位置已被淘汰，调用方须走 REST 对账而非静默错位续推；随后转实时推送 |
 | `finalized` | `{"chapters": [{"chapter_id", "text", "summary"}], "citation_warnings": [...]}` | 定稿全文（原始角标）；发出后流结束 |
 | `error` | `{"message": "..."}` | 任务失败；发出后流结束 |
@@ -353,9 +383,9 @@ data: <JSON>
 | `outline_ready` | `{"kind": "outline_ready", "outline": [{id, title, subsections, chapter_type, planned_summary, points: [{id, text, hypotheses: [...]}]}]}` | 目录生成完成（含假说）；首跑框架阶段产出时推送，恢复续跑不重发（图不重跑已完成节点），回滚到框架前重放会重发 |
 | `materials_ready` | `{"kind": "materials_ready", "chapter_id": "ch1", "materials": [Material...]}` | 该章素材落库；每章素材集合增长时推送，载荷为该章当前整块素材 |
 | `chapter_ready` | `{"kind": "chapter_ready", "chapter_id": "ch1", "draft": {chapter_id, text, summary, self_check}}` | 该章正文写完；草稿文本变化时推送，载荷为该章整块草稿 |
+| `review_pack_ready` | `{"kind": "review_pack_ready", "iteration_round": n, "chapter_ids": [...], "chapter_total": n, "chapter_completed": n, "material_count": n, "citation_warning_count": n, "review_warning_count": n, "revision_round_count": n, "pack_version": "..."}` | 停审阅门时与 `review_required` 同发（先产物后信号）；只推摘要 + `pack_version` 轮次指纹，绝不含章正文或素材全文；丢了靠 `GET /tasks/{id}/review` 重取全文。`pack_version` 与 `GET /review` 同源（同检查点同指纹） |
 
-`product` 事件载荷与 `GET /tasks/{id}/products` 章级快照逐字段同构——丢帧后按 REST 取回同等内容。
-（审阅包摘要 `review_pack_ready` 属后续票据，不在本类。）
+`product` 事件载荷与 `GET /tasks/{id}/products` 章级快照逐字段同构——丢帧后按 REST 取回同等内容；审阅包摘要丢了按 `GET /tasks/{id}/review` 取回全文。
 
 `content_delta` 逐字流语义：
 

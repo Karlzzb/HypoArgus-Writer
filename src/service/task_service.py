@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
+import json
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -74,6 +76,76 @@ def build_resume_value(action: str, feedback: str | None) -> dict[str, Any]:
             raise InvalidReview("action=revise 时必须携带非空的 feedback 意见文本")
         return {"action": "revise", "feedback": feedback.strip()}
     raise InvalidReview(f"非法的审阅动作：{action!r}")
+
+
+def _review_pack_content(values: Mapping[str, Any]) -> dict[str, Any]:
+    """从检查点 state 取审阅包六类内容（model_dump，章级粒度）。
+
+    六类：当前轮大纲、各章正文（chapter_id/text/summary）、引文警告、
+    篇级评审 warn、修订台账、引文库（素材全文）。outline / chapter_drafts /
+    citation_library 在检查点里经 serializer 还原为 pydantic 模型实例，
+    取 model_dump 与 GET /products 章级粒度形状对齐；空字段兜底为空列表。
+    """
+    return {
+        "outline": [spec.model_dump() for spec in values.get("outline", [])],
+        "chapters": [
+            {
+                "chapter_id": draft.chapter_id,
+                "text": draft.text,
+                "summary": draft.summary,
+            }
+            for draft in values.get("chapter_drafts", [])
+        ],
+        "citation_warnings": list(values.get("citation_warnings", [])),
+        "review_warnings": list(values.get("review_warnings", [])),
+        "revision_ledger": [
+            round_.model_dump() for round_ in values.get("revision_ledger", [])
+        ],
+        "citation_library": [
+            material.model_dump() for material in values.get("citation_library", [])
+        ],
+    }
+
+
+def _review_pack_version(content: Mapping[str, Any], iteration_round: int) -> str:
+    """审阅包轮次指纹：六类内容 + 迭代轮次的规范 JSON sha256 前 16 位。
+
+    入参为已构建的六类内容 dict（``_review_pack_content`` 产物），避免 REST
+    路径重复 model_dump。同状态同指纹（GET /review 重复调用幂等）；
+    修订再停门后内容变化即指纹变化。sort_keys=True 保证字段顺序不影响指纹，
+    只对内容本身敏感。
+    """
+    canonical = json.dumps(
+        {"iteration_round": iteration_round, **content},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _review_required_routing(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """把人工中断载荷投影为 review_required 的纯路由元数据（全文走 GET /review）。
+
+    保留四类分支信号：iteration_round / chapter_ids（正常审阅）、
+    pending_confirmation（大扇出确认分支）、clarification_questions（含混回问分支）、
+    error（上次提交契约不符或解析失败，须重新提交）；剥离 citation_warnings /
+    review_warnings——两者属审阅包内容，全文只走 GET /tasks/{id}/review。
+    中断载荷本身不变（human_review_gate 仍读全量做契约校验与回显）。
+    """
+    routing: dict[str, Any] = {
+        "iteration_round": payload.get("iteration_round", 0),
+        "chapter_ids": list(payload.get("chapter_ids", [])),
+    }
+    error = payload.get("error")
+    if error is not None:
+        routing["error"] = error
+    questions = payload.get("clarification_questions")
+    if questions:
+        routing["clarification_questions"] = list(questions)
+    pending = payload.get("pending_confirmation")
+    if pending:
+        routing["pending_confirmation"] = pending
+    return routing
 
 
 class SubagentHookDispatcher:
@@ -233,7 +305,8 @@ class TaskManager:
 
         status = status_text(snapshot.values.get("status"), WorkflowStatus.IDLE.value)
         if self._at_interrupt(snapshot):
-            # 停在中断点：补发 gate_blocked 信封与业务 review_required，不重跑图。
+            # 停在中断点：补发 gate_blocked 信封与审阅门双发（摘要产物 +
+            # review_required 路由信号），不重跑图。
             payload = self._interrupt_payload_of(snapshot)
             self._graph_hub.publish(
                 new_envelope(
@@ -245,7 +318,7 @@ class TaskManager:
                     thread_id=thread_id,
                 )
             )
-            self._publish_business(entry, "review_required", payload)
+            self._publish_review_gate(entry, payload, snapshot.values)
             return status
 
         if snapshot.next:
@@ -380,6 +453,30 @@ class TaskManager:
             "status": status_text(values.get("status"), WorkflowStatus.IDLE.value),
             "iteration_round": values.get("iteration_round", 0),
             "chapters": chapters,
+        }
+
+    def get_review_pack(self, thread_id: str) -> dict[str, Any]:
+        """人工审阅包全文：仅停在人工中断点时可取，否则抛 TaskConflict（409）。
+
+        一次给齐六类内容（当前轮大纲、各章正文 chapter_id/text/summary、
+        引文警告、篇级评审 warn、修订台账、引文库素材全文）+ pack_version
+        轮次指纹；重复调用幂等（同检查点同指纹）。任务不存在抛 TaskNotFound；
+        未停在中断点抛 TaskConflict（不返回半成品）。
+        """
+        self._ensure_entry(thread_id)
+        config = self._thread_config(thread_id)
+        snapshot = self._graph.get_state(config)
+        if not self._at_interrupt(snapshot):
+            raise TaskConflict(f"任务 {thread_id} 未停在人工中断点，审阅包不可取")
+        values = snapshot.values
+        iteration_round = values.get("iteration_round", 0)
+        content = _review_pack_content(values)
+        return {
+            "thread_id": thread_id,
+            "status": status_text(values.get("status"), WorkflowStatus.IDLE.value),
+            "iteration_round": iteration_round,
+            "pack_version": _review_pack_version(content, iteration_round),
+            **content,
         }
 
     def render_bibliography(self, thread_id: str, format: str) -> dict[str, Any]:
@@ -534,6 +631,50 @@ class TaskManager:
                 "data": data,
             }
         )
+
+    def _publish_review_gate(
+        self,
+        entry: _TaskEntry,
+        interrupt_payload: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> None:
+        """停审阅门时双发：review_pack_ready 摘要产物事件 + review_required 路由信号。
+
+        review_pack_ready 属可丢级（type=product），只推摘要 + pack_version，
+        全文（章正文/素材全文/警告/台账）绝不入 SSE——丢了靠 GET /review 对账；
+        review_required 降级为纯路由元数据（信号必达，不参与丢最旧）。
+        先发产物后发信号，保证「全部产物事件先于 review_required」的到达序。
+        """
+        self._publish_business(
+            entry,
+            "product",
+            {"kind": "review_pack_ready", **self._review_pack_summary(values)},
+        )
+        self._publish_business(
+            entry, "review_required", _review_required_routing(interrupt_payload)
+        )
+
+    @staticmethod
+    def _review_pack_summary(values: Mapping[str, Any]) -> dict[str, Any]:
+        """审阅包摘要：轮次、章节 id 与各项计数 + pack_version，绝不含正文/素材全文。
+
+        六类内容只构建一次（``_review_pack_content``），计数与指纹同源——
+        指纹与 ``GET /review`` 全文同检查点同值。
+        """
+        iteration_round = values.get("iteration_round", 0)
+        content = _review_pack_content(values)
+        outline = content["outline"]
+        return {
+            "iteration_round": iteration_round,
+            "chapter_ids": [spec["id"] for spec in outline],
+            "chapter_total": len(outline),
+            "chapter_completed": len(content["chapters"]),
+            "material_count": len(content["citation_library"]),
+            "citation_warning_count": len(content["citation_warnings"]),
+            "review_warning_count": len(content["review_warnings"]),
+            "revision_round_count": len(content["revision_ledger"]),
+            "pack_version": _review_pack_version(content, iteration_round),
+        }
 
     def _start_run(
         self,
@@ -694,9 +835,10 @@ class TaskManager:
                         )
 
     def _finish_run(self, entry: _TaskEntry, emitter: GraphRunEmitter) -> None:
-        """运行正常结束后的收尾：中断转审阅请求，终态发布定稿全文。"""
+        """运行正常结束后的收尾：中断转审阅门双发，终态发布定稿全文。"""
         if emitter.interrupt_payload is not None:
-            self._publish_business(entry, "review_required", emitter.interrupt_payload)
+            values = self._graph.get_state(self._thread_config(entry.thread_id)).values
+            self._publish_review_gate(entry, emitter.interrupt_payload, values)
             return
         if emitter.last_status is WorkflowStatus.FINISHED:
             values = self._graph.get_state(self._thread_config(entry.thread_id)).values

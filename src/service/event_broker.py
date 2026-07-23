@@ -48,13 +48,14 @@ _DEFAULT_MAX_QUEUE = 256
 # 容量可经同名环境变量覆盖（由 app 装配时读取），具体阈值据线上负载调定。
 _DEFAULT_MAX_QUEUE_ENV = "SSE_MAX_QUEUE"
 
-# reconcile_required 载荷里指明的对账 REST 口子（只读通道，issue #54/#56
-# 时点已存在）：missed 产物靠此 REST 重取，reconcile_required 载荷须指明。
+# reconcile_required 载荷里指明的对账 REST 口子（只读通道，issue #54/#56/#60
+# 时点已存在）：missed 产物与审阅包摘要靠此 REST 重取，reconcile_required 载荷须指明。
 _RECONCILE_VIA_BUSINESS: tuple[str, ...] = (
     "GET /tasks/{id}",
     "GET /tasks/{id}/checkpoints",
     "GET /tasks/{id}/bibliography",
     "GET /tasks/{id}/products",
+    "GET /tasks/{id}/review",
 )
 
 
