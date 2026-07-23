@@ -35,7 +35,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(REPO_ROOT / ".env", override=False)
 
 from agents.search_agent import make_search_agent  # noqa: E402
-from domain.events import SUBAGENT_END, SUBAGENT_PROGRESS, SUBAGENT_START  # noqa: E402
+from domain.events import SUBAGENT_END  # noqa: E402
 
 
 # 真实可检索的汽修章样例假说（与 test1 真实 demo 同域，保证 web 召回有内容）。
