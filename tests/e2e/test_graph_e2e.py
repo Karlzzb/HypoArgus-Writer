@@ -881,6 +881,213 @@ def test_篇级评审fact_conflict打回_只重写涉事章节且修订规则可
     assert result["status"] == WorkflowStatus.FINISHED
 
 
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "memory",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(
+                not _pg_reachable(TEST_PG_DSN), reason="测试 Postgres 不可达"
+            ),
+        ),
+    ],
+)
+def test_回退并行扇出中断恢复_已完成分支保留且只重跑崩溃分支(backend: str):
+    """回退并行扇出验收（ADR-0001 约束 1 与 4，回退扇出版）。
+
+    篇级评审报 ch1+ch2 fact_conflict → route_after_document_reviewer 为两章各发
+    一个 Send 并行回退（issue #64：回退改回 Send 扇出，对齐首写）。崩溃注入于
+    ch1 回退改写中途：ch1 分支内抛致命异常，ch2 分支的写入作为 pending write
+    被 checkpoint 保留。同 thread_id 二次驱动恢复：只重跑崩溃的 ch1 分支，ch2
+    零重复——这正是并行扇出 + 超步事务语义成立的可观测证据（串行自环下 ch1
+    崩溃则 ch2 根本未曾执行）。断言：已完成分支零重复、subagent 事件成对且带
+    chapter_id/mode、最终产物与不中断路径等价。
+    """
+    import asyncio as _asyncio
+    from contextlib import contextmanager
+
+    from agents.chapter_reviewer import make_stub_chapter_reviewer
+    from agents.contracts import SubagentAdapter
+    from agents.rewriter_loop import stub_rewriter_loop_run
+    from domain.events import SUBAGENT_END, SUBAGENT_START
+
+    def _recorder(events: list[tuple[str, dict]]):
+        def _hook(event_type: str, payload: dict) -> None:
+            events.append((event_type, payload))
+
+        return _hook
+
+    def _crashing_rewriter(
+        calls: list[tuple[str, str]],
+        events: list[tuple[str, dict]],
+        crash_chapter: str | None,
+    ) -> SubagentAdapter:
+        """故障注入桩改写器：对 crash_chapter 的回退改写（mode=revise）抛致命异常，
+        其余走确定性桩。崩溃前先让位给并行兄弟分支，使「某章完成、崩溃章未完成」
+        的死亡现场确定性成立。"""
+
+        async def _run(task: dict) -> dict:
+            chapter_id = task["chapter_spec"]["id"]
+            mode = task["mode"]
+            calls.append((chapter_id, mode))
+            if chapter_id == crash_chapter and mode == "revise":
+                await _asyncio.sleep(0.2)
+                raise RuntimeError("故障注入：进程死于 ch1 回退改写")
+            return await stub_rewriter_loop_run(task)
+
+        return SubagentAdapter("rewriter_loop", _run, _recorder(events))
+
+    def _pair(events: list[tuple[str, dict]], unit: str, chapter_id: str) -> list[str]:
+        return [
+            etype
+            for etype, payload in events
+            if payload["unit"] == unit and payload["chapter_id"] == chapter_id
+        ]
+
+    @contextmanager
+    def _checkpoint_backend(kind: str):
+        if kind == "postgres":
+            with postgres_checkpointer(TEST_PG_DSN) as saver:
+                yield saver
+        else:
+            yield InMemorySaver(serde=checkpoint_serializer())
+
+    fact_conflict_response = json.dumps(
+        [
+            {
+                "dimension": "fact_conflict",
+                "chapter_ids": ["ch1", "ch2"],
+                "detail": "两章对同一指标结论相反",
+            }
+        ],
+        ensure_ascii=False,
+    )
+
+    with _checkpoint_backend(backend) as saver:
+        thread_id = f"e2e-fallback-crash-{uuid.uuid4()}"
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+
+        # 第一个「进程」：首写两章 + 篇级评审报硬伤（ch1+ch2）→ 并行回退扇出，
+        # ch1 分支注入异常崩溃，ch2 分支先完成、其写入作为 pending write 落盘。
+        rw_before: list[tuple[str, str]] = []
+        events_before: list[tuple[str, dict]] = []
+        fake = FakeLLM(
+            [
+                *FRAMEWORK_RESPONSES,
+                SEMANTIC_PASS,
+                SEMANTIC_PASS,
+                fact_conflict_response,
+            ],
+            keyed_responses=FRAMEWORK_KEYED_RESPONSES,
+        )
+        graph = build_graph(
+            llm_factory=lambda unit: fake,
+            checkpointer=saver,
+            search_agent=make_stub_search_agent(),
+            rewriter_loop=_crashing_rewriter(rw_before, events_before, "ch1"),
+            chapter_reviewer=make_stub_chapter_reviewer(),
+        )
+        with pytest.raises(RuntimeError, match="故障注入：进程死于 ch1 回退改写"):
+            graph.invoke(
+                initial_state("写一篇人才培养方案", "专业撰稿人", "trace-fb-crash"),
+                config,
+            )
+
+        # 死亡现场：并行回退扇出崩溃时，已完成的 ch2 分支写入作为 pending write
+        # 被 checkpoint 保留——草稿已是修订版（含修订落实）、revised_chapter_ids
+        # 含 ch2；ch1 分支自身写入被丢弃，仍为首写原稿。待执行任务只剩 ch1 分支。
+        snapshot = graph.get_state(config)
+        assert snapshot.next == ("writing_orchestrator",)
+        assert set(snapshot.values["revised_chapter_ids"]) == {"ch2"}
+        drafts_before = {d.chapter_id: d.text for d in snapshot.values["chapter_drafts"]}
+        assert "修订落实" in drafts_before["ch2"]
+        assert "修订落实" not in drafts_before["ch1"]
+        # 崩溃前：两章首写各一次 draft；回退扇出中 ch2 revise 完成、ch1 revise 崩溃。
+        assert sorted(rw_before) == [
+            ("ch1", "draft"),
+            ("ch1", "revise"),
+            ("ch2", "draft"),
+            ("ch2", "revise"),
+        ]
+
+        # 第二个「进程」：同 thread_id 恢复，只备二次终审应答（2 章增量语义核查 + 篇级评审）。
+        rw_after: list[tuple[str, str]] = []
+        events_after: list[tuple[str, dict]] = []
+        fake2 = FakeLLM([SEMANTIC_PASS, SEMANTIC_PASS, DOCUMENT_REVIEW_PASS])
+        graph2 = build_graph(
+            llm_factory=lambda unit: fake2,
+            checkpointer=saver,
+            search_agent=make_stub_search_agent(),
+            rewriter_loop=_crashing_rewriter(rw_after, events_after, None),
+            chapter_reviewer=make_stub_chapter_reviewer(),
+        )
+        resumed = graph2.invoke(None, config)
+
+        # 已完成分支零重复：恢复进程只重跑崩溃的 ch1 回退改写，ch2 零重复。
+        # 这是并行扇出 + 超步事务语义成立的可观测证据（串行自环下 ch1 崩溃则
+        # ch2 根本未曾执行，无从保留其写入）。
+        assert rw_after == [("ch1", "revise")]
+
+        # 事件成对且带业务上下文（ADR-0001 约束 2 与 4）。崩溃进程：ch2 回退改写
+        # start/end 成对；被杀的 ch1 回退改写留「有 start 无 end」残链。
+        ch1_before = _pair(events_before, "rewriter_loop", "ch1")
+        assert ch1_before[-1] == SUBAGENT_START  # ch1 revise 崩溃，无 end
+        ch2_before = _pair(events_before, "rewriter_loop", "ch2")
+        assert ch2_before[-2:] == [SUBAGENT_START, SUBAGENT_END]  # ch2 revise 成对
+        # 续跑：ch1 回退改写成对。
+        assert _pair(events_after, "rewriter_loop", "ch1") == [
+            SUBAGENT_START,
+            SUBAGENT_END,
+        ]
+        # 事件均带 chapter_id 与 mode 业务上下文。
+        for _etype, payload in events_before + events_after:
+            assert payload["chapter_id"] in {"ch1", "ch2"}
+            assert payload["mode"] in {"draft", "revise"}
+        assert resumed["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+        assert resumed["citation_report"].passed is True
+
+        # 两章均被回退改写、落实修订说明。
+        drafts = {d.chapter_id: d.text for d in resumed["chapter_drafts"]}
+        assert "修订落实" in drafts["ch1"]
+        assert "修订落实" in drafts["ch2"]
+
+        # 与不中断路径的产物完全等价（同一桩编排保证可逐字段比对）。
+        baseline_fake = FakeLLM(
+            [
+                *FRAMEWORK_RESPONSES,
+                SEMANTIC_PASS,
+                SEMANTIC_PASS,
+                fact_conflict_response,
+                SEMANTIC_PASS,
+                SEMANTIC_PASS,
+                DOCUMENT_REVIEW_PASS,
+            ],
+            keyed_responses=FRAMEWORK_KEYED_RESPONSES,
+        )
+        baseline_graph = build_graph(
+            llm_factory=lambda unit: baseline_fake,
+            checkpointer=InMemorySaver(serde=checkpoint_serializer()),
+            search_agent=make_stub_search_agent(),
+            rewriter_loop=_crashing_rewriter([], [], None),
+            chapter_reviewer=make_stub_chapter_reviewer(),
+        )
+        baseline_config: RunnableConfig = {
+            "configurable": {"thread_id": f"e2e-fallback-base-{uuid.uuid4()}"}
+        }
+        baseline = baseline_graph.invoke(
+            initial_state("写一篇人才培养方案", "专业撰稿人", "trace-fb-base"),
+            baseline_config,
+        )
+        assert resumed["chapter_drafts"] == baseline["chapter_drafts"]
+        assert resumed["citation_library"] == baseline["citation_library"]
+        assert resumed["citation_report"] == baseline["citation_report"]
+
+        # 恢复后仍可定稿收束。
+        result = graph2.invoke(Command(resume=FINALIZE), config)
+        assert result["status"] == WorkflowStatus.FINISHED
+
+
 def test_篇级评审warn不打回_警告呈人工且不触发重写():
     """篇级 warn 三维（此处跨章重复）呈人工不打回（issue #48）。
 

@@ -63,6 +63,18 @@ python scripts/demo.py --real
 # 运行到定稿时另落一份成品文档（仅重编号正文 + 参考文献），同名加 -article 后缀
 python scripts/demo.py --archive out.md
 
+# 人工门默认自动模拟（脚本按序提交 revise→confirm→finalize，保证可复现基准）；
+# 传 --no-auto-review 关闭自动模拟：到达中断点时仅打印 REST 指令，
+# 由人在另一终端 curl 提交，服务端续跑后本进程继续等待下一事件
+python scripts/demo.py --real --no-auto-review --port 8000
+
+# 每次人工中断点（含反馈前第一次）都会独立落盘一版初稿供人审阅：
+#   <档案名>-article-r1.md  反馈前原文
+#   <档案名>-article-r2.md  revise 后、finalize 前中间版
+#   <档案名>-article.md     定稿最终版（同名 -article 后缀）
+# 人工模式下需推到 finalize 才产出最终成品；SIGTERM 硬杀不跑 finally 会丢档案，用 Ctrl+C 仍能落盘过程档案
+python scripts/demo.py --no-auto-review --archive out.md
+
 # 性能调测：LLM_DEBUG_TIMING=1 打印逐次 LLM 调用计时
 LLM_DEBUG_TIMING=1 uv run python scripts/demo.py --real
 ```
