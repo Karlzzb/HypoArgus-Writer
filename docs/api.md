@@ -339,10 +339,22 @@ data: <JSON>
 | `type` | `data` 结构 | 说明 |
 |---|---|---|
 | `status` | `{"status": "...", "iteration_round": n, "node": "节点名"}` | 状态机推进 |
+| `product` | `{"kind": "outline_ready"\|"materials_ready"\|"chapter_ready", ...}` | 结构化产物整块事件，按产出顺序推送；属可丢级，丢了靠 `GET /tasks/{id}/products` 对账重取（见下） |
 | `review_required` | `{"iteration_round": n, "chapter_ids": [...], "citation_warnings": [...], "review_warnings": [...], "error"?: "...", "clarification_questions"?: [...], "pending_confirmation"?: {...}}` | 停在人工中断点，等待调用方提交审阅；`error` 仅在上次提交契约不符或解析失败时出现；`clarification_questions` 为意见含混/定位失败时的回问问题列表；`pending_confirmation` 为大扇出待确认清单：`{"affected_chapter_ids": [...], "total_chapters": n, "directives": [{"target_chapter_id", "type", "instruction"}]}` |
 | `reconcile_required` | `{"reason": "epoch_mismatch"\|"position_dropped"\|"malformed", "last_event_id": "...", "reconcile_via": ["GET /tasks/{id}", ...]}` | 续传失效控制事件：世代失配或所求位置已被淘汰，调用方须走 REST 对账而非静默错位续推；随后转实时推送 |
 | `finalized` | `{"chapters": [{"chapter_id", "text", "summary"}], "citation_warnings": [...]}` | 定稿全文（原始角标）；发出后流结束 |
 | `error` | `{"message": "..."}` | 任务失败；发出后流结束 |
+
+`product` 事件的 `kind` 与载荷：
+
+| `kind` | 载荷 | 产出时机 |
+|---|---|---|
+| `outline_ready` | `{"kind": "outline_ready", "outline": [{id, title, subsections, chapter_type, planned_summary, points: [{id, text, hypotheses: [...]}]}]}` | 目录生成完成（含假说）；首跑框架阶段产出时推送，恢复续跑不重发（图不重跑已完成节点），回滚到框架前重放会重发 |
+| `materials_ready` | `{"kind": "materials_ready", "chapter_id": "ch1", "materials": [Material...]}` | 该章素材落库；每章素材集合增长时推送，载荷为该章当前整块素材 |
+| `chapter_ready` | `{"kind": "chapter_ready", "chapter_id": "ch1", "draft": {chapter_id, text, summary, self_check}}` | 该章正文写完；草稿文本变化时推送，载荷为该章整块草稿 |
+
+`product` 事件载荷与 `GET /tasks/{id}/products` 章级快照逐字段同构——丢帧后按 REST 取回同等内容。
+（逐字流 `content_delta` 与审阅包摘要 `review_pack_ready` 属后续票据，不在本类。）
 
 ### 3.2 可视化通道 `GET /graph_events`
 

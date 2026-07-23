@@ -26,6 +26,7 @@ import asyncio
 import contextvars
 import os
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -122,6 +123,23 @@ class _TaskEntry:
         return self.run_task is not None and not self.run_task.done()
 
 
+@dataclass
+class _ProductTracker:
+    """一次图运行内结构化产物的已发登记：去重，避免重发同内容产物帧。
+
+    产物事件只在产物新产出时发：outline 首次非空、某章素材集合增长、
+    某章草稿文本变化。检查点恢复续跑不重发已完成产物——图不重跑已完成
+    节点，updates 不会再现已落检查点的产物，故本登记 per-run 局部即可，
+    无需跨运行持久化。
+    """
+
+    outline_done: bool = False
+    material_ids: dict[str, frozenset[str]] = field(default_factory=dict)
+    """章 id → 已发素材 id 集合：集合增长时重发该章 materials_ready。"""
+    draft_text: dict[str, str] = field(default_factory=dict)
+    """章 id → 已发草稿文本：文本变化时重发该章 chapter_ready。"""
+
+
 class TaskManager:
     """写作任务生命周期管理器：单实例服务全部任务。"""
 
@@ -173,9 +191,7 @@ class TaskManager:
         )
         return thread_id, trace_id
 
-    def submit_review(
-        self, thread_id: str, action: str, feedback: str | None
-    ) -> None:
+    def submit_review(self, thread_id: str, action: str, feedback: str | None) -> None:
         """提交人工审阅决定，从中断点恢复运行。"""
         entry = self._require_entry(thread_id)
         if entry.running:
@@ -215,9 +231,7 @@ class TaskManager:
         if not snapshot.values and not snapshot.next:
             raise TaskNotFound(f"任务不存在：{thread_id}（无检查点）")
 
-        status = status_text(
-            snapshot.values.get("status"), WorkflowStatus.IDLE.value
-        )
+        status = status_text(snapshot.values.get("status"), WorkflowStatus.IDLE.value)
         if self._at_interrupt(snapshot):
             # 停在中断点：补发 gate_blocked 信封与业务 review_required，不重跑图。
             payload = self._interrupt_payload_of(snapshot)
@@ -258,19 +272,12 @@ class TaskManager:
             raise TaskConflict(f"任务 {thread_id} 已有运行在进行中")
 
         target = None
-        for snapshot in self._graph.get_state_history(
-            self._thread_config(thread_id)
-        ):
-            if (
-                snapshot.config["configurable"].get("checkpoint_id")
-                == checkpoint_id
-            ):
+        for snapshot in self._graph.get_state_history(self._thread_config(thread_id)):
+            if snapshot.config["configurable"].get("checkpoint_id") == checkpoint_id:
                 target = snapshot
                 break
         if target is None:
-            raise TaskNotFound(
-                f"任务 {thread_id} 不存在检查点：{checkpoint_id}"
-            )
+            raise TaskNotFound(f"任务 {thread_id} 不存在检查点：{checkpoint_id}")
 
         emitter = self._new_emitter(entry)
         emitter.seed(target.values)
@@ -294,9 +301,7 @@ class TaskManager:
         """检查点元数据清单（新到旧）：绝不含正文。"""
         self._ensure_entry(thread_id)
         checkpoints: list[dict[str, Any]] = []
-        for snapshot in self._graph.get_state_history(
-            self._thread_config(thread_id)
-        ):
+        for snapshot in self._graph.get_state_history(self._thread_config(thread_id)):
             values = snapshot.values
             checkpoints.append(
                 {
@@ -343,7 +348,9 @@ class TaskManager:
         self._ensure_entry(thread_id)
         values = self._graph.get_state(self._thread_config(thread_id)).values
         outline = values.get("outline", [])
-        drafts_by_id = {draft.chapter_id: draft for draft in values.get("chapter_drafts", [])}
+        drafts_by_id = {
+            draft.chapter_id: draft for draft in values.get("chapter_drafts", [])
+        }
         materials_by_chapter: dict[str, list[Any]] = {}
         for material in values.get("citation_library", []):
             materials_by_chapter.setdefault(material.chapter_id, []).append(material)
@@ -370,9 +377,7 @@ class TaskManager:
             )
         return {
             "thread_id": thread_id,
-            "status": status_text(
-                values.get("status"), WorkflowStatus.IDLE.value
-            ),
+            "status": status_text(values.get("status"), WorkflowStatus.IDLE.value),
             "iteration_round": values.get("iteration_round", 0),
             "chapters": chapters,
         }
@@ -388,9 +393,7 @@ class TaskManager:
         drafts = values.get("chapter_drafts", [])
         if not drafts:
             raise TaskConflict(f"任务 {thread_id} 尚无章节正文，不能渲染书目")
-        rendered = render_article(
-            drafts, values.get("citation_library", []), format
-        )
+        rendered = render_article(drafts, values.get("citation_library", []), format)
         return {
             "thread_id": thread_id,
             "format": rendered.format,
@@ -543,9 +546,7 @@ class TaskManager:
     ) -> None:
         """一次图运行的完整生命周期：工作线程驱动、收尾发布与错误兜底。"""
         try:
-            await asyncio.to_thread(
-                self._drive, entry, emitter, graph_input, config
-            )
+            await asyncio.to_thread(self._drive, entry, emitter, graph_input, config)
         except asyncio.CancelledError:
             # 服务关停取消任务不是业务失败：原样上抛，不发 error 事件也不关业务枢纽。
             raise
@@ -569,6 +570,7 @@ class TaskManager:
         span、LLM generation 都在本线程内产生，天然挂到这条 trace 之下。
         """
         self._hook_dispatcher.set_hook(emitter.make_subagent_hook())
+        product_tracker = _ProductTracker()
         try:
             with observability.run_span(
                 thread_id=entry.thread_id,
@@ -581,41 +583,113 @@ class TaskManager:
                     emitter.handle(mode, chunk)
                     if mode == "updates":
                         self._publish_status_updates(entry, chunk)
+                        self._publish_product_events(entry, chunk, product_tracker)
         finally:
             self._hook_dispatcher.clear_hook()
 
     def _publish_status_updates(self, entry: _TaskEntry, chunk: Any) -> None:
         """updates 块含状态机值时向业务通道发布轻量状态事件。"""
-        if not isinstance(chunk, dict):
-            return
-        for node, update in chunk.items():
-            if node not in MAIN_NODES or not isinstance(update, dict):
-                continue
+        for node, update in self._main_updates(chunk):
             if "status" not in update:
                 continue
             self._publish_business(
                 entry,
                 "status",
                 {
-                    "status": status_text(
-                        update["status"], WorkflowStatus.IDLE.value
-                    ),
+                    "status": status_text(update["status"], WorkflowStatus.IDLE.value),
                     "iteration_round": update.get("iteration_round", 0),
                     "node": node,
                 },
             )
 
+    @staticmethod
+    def _main_updates(
+        chunk: Any,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        """updates 块里的主节点部分状态更新序列（节点名, 更新 dict）。
+
+        状态事件与产物事件都从同形 updates 块派生，共用此迭代避免重复的
+        ``isinstance`` + ``MAIN_NODES`` 过滤前奏（Duplicated Code 收敛点）。
+        """
+        if not isinstance(chunk, dict):
+            return
+        for node, update in chunk.items():
+            if node in MAIN_NODES and isinstance(update, dict):
+                yield node, update
+
+    def _publish_product_events(
+        self,
+        entry: _TaskEntry,
+        chunk: Any,
+        tracker: _ProductTracker,
+    ) -> None:
+        """updates 块含结构化产物时向业务通道发布整块产物事件（可丢级）。
+
+        产物事件属可丢级（票 #55 契约 ``type=product``），丢帧靠
+        ``GET /tasks/{id}/products``（票 #56）对账；只在产物新产出时发，
+        经 per-run 登记去重（见 _ProductTracker）。
+
+        三类整块产物：outline 首次非空 → ``outline_ready``（含假说）、
+        某章素材集合增长 → ``materials_ready``、某章草稿文本变化 →
+        ``chapter_ready``。载荷取该次 update 携带的整块对象 model_dump，
+        与 ``GET /products`` 章级粒度形状对齐，丢帧后 REST 取回同等。
+
+        逐字流（content_delta）与审阅包（review_pack_ready）不在本票范围。
+        """
+        for node, update in self._main_updates(chunk):
+            outline = update.get("outline")
+            if outline and not tracker.outline_done:
+                tracker.outline_done = True
+                self._publish_business(
+                    entry,
+                    "product",
+                    {
+                        "kind": "outline_ready",
+                        "outline": [spec.model_dump() for spec in outline],
+                    },
+                )
+            materials = update.get("citation_library")
+            if materials:
+                by_chapter: dict[str, list[Any]] = {}
+                for material in materials:
+                    by_chapter.setdefault(material.chapter_id, []).append(material)
+                for chapter_id, mats in by_chapter.items():
+                    ids = frozenset(m.id for m in mats)
+                    if ids - tracker.material_ids.get(chapter_id, frozenset()):
+                        tracker.material_ids[chapter_id] = (
+                            tracker.material_ids.get(chapter_id, frozenset()) | ids
+                        )
+                        self._publish_business(
+                            entry,
+                            "product",
+                            {
+                                "kind": "materials_ready",
+                                "chapter_id": chapter_id,
+                                "materials": [m.model_dump() for m in mats],
+                            },
+                        )
+            drafts = update.get("chapter_drafts")
+            if drafts:
+                for draft in drafts:
+                    if tracker.draft_text.get(draft.chapter_id) != draft.text:
+                        tracker.draft_text[draft.chapter_id] = draft.text
+                        self._publish_business(
+                            entry,
+                            "product",
+                            {
+                                "kind": "chapter_ready",
+                                "chapter_id": draft.chapter_id,
+                                "draft": draft.model_dump(),
+                            },
+                        )
+
     def _finish_run(self, entry: _TaskEntry, emitter: GraphRunEmitter) -> None:
         """运行正常结束后的收尾：中断转审阅请求，终态发布定稿全文。"""
         if emitter.interrupt_payload is not None:
-            self._publish_business(
-                entry, "review_required", emitter.interrupt_payload
-            )
+            self._publish_business(entry, "review_required", emitter.interrupt_payload)
             return
         if emitter.last_status is WorkflowStatus.FINISHED:
-            values = self._graph.get_state(
-                self._thread_config(entry.thread_id)
-            ).values
+            values = self._graph.get_state(self._thread_config(entry.thread_id)).values
             chapters = [
                 {
                     "chapter_id": draft.chapter_id,
@@ -629,9 +703,7 @@ class TaskManager:
                 "finalized",
                 {
                     "chapters": chapters,
-                    "citation_warnings": list(
-                        values.get("citation_warnings", [])
-                    ),
+                    "citation_warnings": list(values.get("citation_warnings", [])),
                 },
             )
             entry.hub.close()
