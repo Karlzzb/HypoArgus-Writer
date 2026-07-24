@@ -11,6 +11,7 @@ def _material(
     chapter_id: str,
     url: str | None,
     source_kind: SourceKind = "web",
+    source_ref: dict[str, str] | None = None,
 ) -> Material:
     return Material(
         id=material_id,
@@ -19,6 +20,7 @@ def _material(
         source=f"来源{material_id}",
         url=url,
         source_kind=source_kind,
+        source_ref=source_ref,
         excerpt="摘录",
         relevance_score=0.9,
         verdict="pass",
@@ -45,6 +47,26 @@ def test_按首次引用顺序重编号且重复引用共用同一序号():
     assert rendered.chapters[1].text == "观点丙[3]，再证甲[1]。"
     assert [entry.material_id for entry in rendered.entries] == ["m2", "m1", "m3"]
     assert [entry.index for entry in rendered.entries] == [1, 2, 3]
+
+
+def test_书目条目携带同一素材契约供调用方取来源定位():
+    material = _material(
+        "m1",
+        "ch1",
+        "https://example.com/1",
+        source_ref={"url": "https://example.com/1", "content_fingerprint": "fp1"},
+    )
+    rendered = render_article(
+        [ChapterDraft(chapter_id="ch1", text="观点[m1]。", summary="s")],
+        [material],
+        "gbt7714",
+    )
+
+    assert rendered.entries[0].material == material
+    assert rendered.entries[0].material.source_ref == {
+        "url": "https://example.com/1",
+        "content_fingerprint": "fp1",
+    }
 
 
 def test_未被正文引用的素材不进入书目():

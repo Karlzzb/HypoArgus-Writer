@@ -537,6 +537,7 @@ class TaskManager:
                 {
                     "index": entry.index,
                     "material_id": entry.material_id,
+                    "material": entry.material.model_dump(),
                     "text": entry.text,
                 }
                 for entry in rendered.entries

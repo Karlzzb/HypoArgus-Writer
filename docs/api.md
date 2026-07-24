@@ -232,7 +232,26 @@ Java 端                                  HypoArgus-Writer
     { "chapter_id": "ch1", "text": "正文……角标已重编号为 [1] 形式" }
   ],
   "bibliography": [
-    { "index": 1, "material_id": "m_0123456789ABCDEFGHJKMNPQRS", "text": "[1] 来源[EB/OL]. url." }
+    {
+      "index": 1,
+      "material_id": "m_0123456789ABCDEFGHJKMNPQRS",
+      "material": {
+        "id": "m_0123456789ABCDEFGHJKMNPQRS",
+        "hypothesis_id": "h1",
+        "chapter_id": "ch1",
+        "source": "来源名称",
+        "url": "https://example.com/evidence",
+        "source_kind": "web",
+        "source_ref": {
+          "url": "https://example.com/evidence",
+          "content_fingerprint": "..."
+        },
+        "excerpt": "证据摘录……",
+        "relevance_score": 0.9,
+        "verdict": "pass"
+      },
+      "text": "[1] 来源[EB/OL]. https://example.com/evidence."
+    }
   ]
 }
 ```
@@ -240,6 +259,11 @@ Java 端                                  HypoArgus-Writer
 错误：格式未注册 → 400；尚无章节正文（框架 / 检索阶段）→ 409。
 
 说明：`finalized` SSE 事件中的正文保留原始素材 id 角标；本接口返回按出现顺序重编号后的正文与配套书目，是推荐的最终产物获取方式。
+`bibliography[].index` 是服务端生成的最终展示编号，调用方不得自行重编号。
+`bibliography[].material_id` 为兼容旧消费者保留，恒等于 `bibliography[].material.id`。
+`bibliography[].material` 使用统一 `Material` 契约，包含稳定不透明 `id`、可选 `url`、三值 `source_kind` 与可选 `source_ref`。
+`source_ref` 是真实来源定位；`Material.id` 只承担正文角标和跨接口关联身份，不承载来源定位明文。
+mock 任务与真实任务的 `bibliography[].material` 形状相同。
 
 ### 2.8 独立检索
 

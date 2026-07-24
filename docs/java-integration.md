@@ -93,6 +93,10 @@ Java 端通常在发审阅前先查一次这个接口。
 | `materials` | 每章已收集到的素材。 |
 | `draft` | 当前草稿正文。 |
 
+`materials` 使用统一的 `Material` 形状。
+关键字段包括稳定不透明的 `id`、可选 `url`、`source_kind` 和可选 `source_ref`。
+`source_ref` 是真实来源定位；`id` 只用于正文角标和跨接口关联。
+
 这个接口是“过程数据”的主入口。
 它不会像审阅包那样要求任务必须停下来。
 
@@ -115,6 +119,9 @@ Java 端通常在发审阅前先查一次这个接口。
 | `review_warnings` | 篇级提示。 |
 | `revision_ledger` | 修订记录。 |
 | `citation_library` | 引文库素材。 |
+
+`citation_library` 与 `products[].materials` 使用同一 `Material` 形状。
+Java DTO 里建议把 `source_ref` 建成 `Map<String, Object>`，因为 web、知识库和结构化数据的定位字段不同。
 
 如果你要让人审稿、看全文、提修改意见，就用这个接口。
 
@@ -176,6 +183,9 @@ Java 端收到这个事件后，把同一章、同一轮、同一模式下的 `d
 
 原因很简单。
 它会返回重编号后的正文和配套书目，适合直接落库、导出或展示。
+`bibliography[].index` 是服务端生成的最终展示编号，Java 端不需要、也不应该重新编号。
+`bibliography[].material_id` 兼容旧消费者，值等于 `bibliography[].material.id`。
+`bibliography[].material` 与 `products`、`review` 里的素材形状一致，包含 `source_ref`、`url`、`source_kind` 和稳定 `id`。
 
 如果你只看 SSE 里的 `finalized` 事件，也能拿到最终正文。
 但它保留的是原始角标。

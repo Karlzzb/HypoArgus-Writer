@@ -75,6 +75,7 @@ class BibliographyEntry:
 
     index: int
     material_id: str
+    material: Material
     text: str
 
 
@@ -165,6 +166,7 @@ def render_article(
         BibliographyEntry(
             index=index,
             material_id=material_id,
+            material=materials_by_id[material_id],
             text=renderer(index, materials_by_id[material_id]),
         )
         for material_id, index in order.items()

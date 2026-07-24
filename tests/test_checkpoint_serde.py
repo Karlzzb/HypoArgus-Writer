@@ -132,6 +132,31 @@ def test_旧checkpoint素材缺少source_ref时仍可反序列化() -> None:
     assert material.source_ref is None
 
 
+def test_checkpoint_material新形状往返保留source_ref() -> None:
+    serde = checkpoint_serializer()
+    material = Material(
+        id="m_0123456789ABCDEFGHJKMNPQRS",
+        hypothesis_id="ch1-p1-h1",
+        chapter_id="ch1",
+        source="知识库来源",
+        url=None,
+        source_kind="knowledge_base",
+        source_ref={"knowledge_id": "kb1", "file_id": "file1", "chunk_id": "c1"},
+        excerpt="新形状摘录",
+        relevance_score=0.91,
+        verdict="pass",
+    )
+
+    restored = serde.loads_typed(serde.dumps_typed(material))
+
+    assert restored == material
+    assert restored.model_dump()["source_ref"] == {
+        "knowledge_id": "kb1",
+        "file_id": "file1",
+        "chunk_id": "c1",
+    }
+
+
 def test_注册后的往返不再触发未注册类型告警(caplog) -> None:
     from langgraph.checkpoint.serde import jsonplus
 
