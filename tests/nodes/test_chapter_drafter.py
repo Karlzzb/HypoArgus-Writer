@@ -6,8 +6,6 @@
 
 from typing import Any
 
-from langgraph.types import Send
-
 from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.contracts import SubagentAdapter
 from assembly.assembler_config import AssemblerConfig
@@ -20,7 +18,6 @@ from domain.state import (
     WorkflowStatus,
     WritingAgentState,
 )
-from graph import route_after_reference_join
 from nodes.chapter_drafter import (
     DRAFT_CHAPTER_ID_KEY,
     draft_send_payloads,
@@ -109,18 +106,12 @@ def test_载荷构造_已写章节不再扇出():
     assert [payload[DRAFT_CHAPTER_ID_KEY] for payload in payloads] == ["ch2"]
 
 
-def test_路由_未写章节扇出Send_全部已写直进终审():
-    routed = route_after_reference_join(_state())
-    assert isinstance(routed, list)
-    assert all(isinstance(send, Send) for send in routed)
-    assert [send.node for send in routed] == ["chapter_drafter", "chapter_drafter"]
+def test_载荷构造_可按指定章节构造首写任务():
+    from nodes.chapter_drafter import draft_send_payload_for_chapter
 
-    state = _state()
-    state["chapter_drafts"] = [
-        ChapterDraft(chapter_id="ch1", text="a", summary="s"),
-        ChapterDraft(chapter_id="ch2", text="b", summary="s"),
-    ]
-    assert route_after_reference_join(state) == "document_reviewer"
+    payload = draft_send_payload_for_chapter(_state(), "ch1")
+    assert payload["draft_chapter_id"] == "ch1"
+    assert {material.chapter_id for material in payload["citation_library"]} == {"ch1"}
 
 
 def test_节点单分支_任务包承接规划摘要链且只回写reducer字段():
