@@ -182,3 +182,42 @@ def test_KB_singleflight超时future异常被消费() -> None:
             loop.set_exception_handler(previous_handler)
 
     assert asyncio.run(main()) == []
+
+
+def test_运行诊断提供稳定的准入聚合维度() -> None:
+    async def main() -> dict[str, Any]:
+        config = EvidenceRetrievalConfig(evidence_output_mode="candidate_passthrough")
+        flow = ParallelSourcesFlow(
+            config,
+            EvidenceRetrievalDependencies(
+                web_search=_EmptyWebSearch(), web_fetcher=object(), kb_client=object(),
+                structured_client=object(), judge=cast(EvidenceJudge, object()), batch_judge=object(),
+            ),
+            SafeTraceEmitter(config, []),
+        )
+        _results, metrics = await flow.run([_task("task-admission", LineType.FORWARD)], scenarios={})
+        return metrics
+
+    admission = asyncio.run(main())["evidence_admission"]
+    assert admission["semantics"].startswith("one candidate evidence")
+    assert admission["candidate_count"] == 0
+    assert set(("by_chapter", "by_direction", "by_channel", "by_attempt_batch")) <= set(admission)
+
+
+def test_低收益反向任务在第三次前被跳过并留有决策证据() -> None:
+    async def main() -> tuple[list[Any], dict[str, Any]]:
+        config = EvidenceRetrievalConfig(
+            evidence_output_mode="candidate_passthrough",
+            adaptive_reverse_stop_enabled=True,
+            adaptive_reverse_stop_min_attempts=2,
+        )
+        flow = ParallelSourcesFlow(config, EvidenceRetrievalDependencies(
+            web_search=_EmptyWebSearch(), web_fetcher=object(), kb_client=object(),
+            structured_client=object(), judge=cast(EvidenceJudge, object()), batch_judge=object(),
+        ), SafeTraceEmitter(config, []))
+        return await flow.run([_task(f"reverse-{index}", LineType.REVERSE) for index in range(3)], scenarios={})
+
+    results, metrics = asyncio.run(main())
+    assert [row.termination_reason.value for row in results] == ["EXHAUSTED", "EXHAUSTED", "EXHAUSTED"]
+    assert metrics["adaptive_reverse_stop"]["skipped_count"] == 1
+    assert metrics["adaptive_reverse_stop"]["decisions"][0]["reason"] == "CONSECUTIVE_ZERO_ADMISSION_REVERSE_ATTEMPTS"

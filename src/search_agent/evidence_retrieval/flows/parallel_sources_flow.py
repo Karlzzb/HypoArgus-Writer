@@ -10,6 +10,8 @@ from typing import Any
 
 from ..chunk_context import build_adjacent_context
 from ..claim_logic import atomize_claim, normalize_reverse_hypothesis
+from ..admission import AdmissionReason, decide_admission
+from ..adaptive_stop import decide_reverse_stop
 from ..config import EvidenceRetrievalConfig
 from ..dependencies import EvidenceRetrievalDependencies, build_prepared_context
 from ..errors import ErrorCode, RetrievalError
@@ -1002,6 +1004,13 @@ def _metrics() -> dict[str, Any]:
             "gap_resolved_count": 0,
             "reserved_ms": 12000,
         },
+        "evidence_admission": {
+            "semantics": "one candidate evidence is counted once; primary_reason is the first stable blocker and all_reasons preserves multi-condition failures",
+            "candidate_count": 0, "admitted_count": 0,
+            "rejected_by_primary_reason": {}, "rejected_by_all_reason": {}, "by_chapter": {}, "by_direction": {},
+            "by_channel": {}, "by_attempt_batch": {},
+        },
+        "adaptive_reverse_stop": {"skipped_count": 0, "decisions": []},
         "pair_consistency": {"pair_count": 0, "consistent_count": 0, "conflict_count": 0, "incomplete_count": 0},
         "judge_contract": {"neutral_completion_count": 0, "repair_retry_count": 0},
         "judge_relation_distribution": {relation.value: 0 for relation in EvidenceRelation},
@@ -1083,6 +1092,39 @@ class ParallelSourcesFlow:
         )
         self.structured_candidates_by_task: dict[str, list[EvidenceCandidate]] = {}
         self.structured_status_by_task: dict[str, str] = {}
+
+    def _record_admission(self, task: RetrievalTask, result: RetrievalTaskResult) -> None:
+        """汇总公开输出使用的同一准入结论。"""
+        admission = self.metrics["evidence_admission"]
+        claims = {claim.claim_id: claim.source_text_span or claim.qualifier or claim.subject for claim in task.atomic_claims}
+        batch = ",".join(result.judge_batches) or "initial-unbatched"
+        dimensions = (
+            ("by_chapter", task.paragraph_id),
+            ("by_direction", task.line_type.value),
+            ("by_attempt_batch", batch),
+        )
+        for item in result.evidence_items:
+            decision = decide_admission(item, claims, self.config)
+            admission["candidate_count"] += 1
+            if decision.admitted:
+                admission["admitted_count"] += 1
+            else:
+                primary = decision.primary_reason.value
+                admission["rejected_by_primary_reason"][primary] = admission["rejected_by_primary_reason"].get(primary, 0) + 1
+            for reason in decision.reasons:
+                if reason == AdmissionReason.ADMITTED:
+                    continue
+                admission["rejected_by_all_reason"][reason.value] = admission["rejected_by_all_reason"].get(reason.value, 0) + 1
+            for field, value in (*dimensions, ("by_channel", _candidate_source_bucket(item))):
+                row = admission[field].setdefault(value, {"candidate_count": 0, "admitted_count": 0, "rejected_by_primary_reason": {}, "rejected_by_all_reason": {}})
+                row["candidate_count"] += 1
+                row["admitted_count"] += int(decision.admitted)
+                if not decision.admitted:
+                    primary = decision.primary_reason.value
+                    row["rejected_by_primary_reason"][primary] = row["rejected_by_primary_reason"].get(primary, 0) + 1
+                for reason in decision.reasons:
+                    if reason != AdmissionReason.ADMITTED:
+                        row["rejected_by_all_reason"][reason.value] = row["rejected_by_all_reason"].get(reason.value, 0) + 1
 
     def _batch_judge_uses_llm(self) -> bool:
         """Return whether the injected batch judge performs a real LLM call."""
@@ -3174,16 +3216,58 @@ class ParallelSourcesFlow:
             # Judge call handles both directions together. This preserves
             # directional concurrency while avoiding two competing LLM calls
             # and makes the Judge contract genuinely batch-scoped.
-            retrieved = await asyncio.gather(
-                *(self._retrieve_task(task, scenarios) for task in tasks)
-            )
-            await structured_prepare_task
-            if self.config.evidence_output_mode == "candidate_passthrough":
-                task_results = await self._passthrough_direction(retrieved)
+            if self.config.adaptive_reverse_stop_enabled:
+                forward_tasks = [task for task in tasks if task.line_type != LineType.REVERSE]
+                reverse_tasks = [task for task in tasks if task.line_type == LineType.REVERSE]
+                retrieved = await asyncio.gather(*(self._retrieve_task(task, scenarios) for task in forward_tasks))
+                await structured_prepare_task
+                task_results = await (
+                    self._passthrough_direction(retrieved)
+                    if self.config.evidence_output_mode == "candidate_passthrough"
+                    else self._judge_direction(retrieved)
+                ) if retrieved else []
+                reverse_history: list[int] = []
+                for task in reverse_tasks:
+                    protected = bool(task.selected_knowledge_ids or task.required_slots)
+                    stop = decide_reverse_stop(
+                        enabled=True, prior_attempts=len(reverse_history),
+                        prior_admitted=sum(reverse_history),
+                        minimum_attempts=self.config.adaptive_reverse_stop_min_attempts,
+                        unresolved=False, high_priority=bool(task.selected_knowledge_ids),
+                        coverage_protected=protected,
+                    ) if task.line_type == LineType.REVERSE else None
+                    if stop and stop.skip:
+                        skipped = RetrievalTaskResult(
+                            task_id=task.task_id, item_id=task.item_id, line_type=task.line_type,
+                            node_id=task.node_id, hypothesis_id=task.hypothesis_id, target_text=task.target_text,
+                            execution_status=ExecutionStatus.PARTIAL, termination_reason=TerminationReason.EXHAUSTED,
+                            verification=VerificationResult(verdict=VerificationVerdict.INCONCLUSIVE, upstream_status="doubtful", confidence=0, reason="Adaptive reverse stop: consecutive prior reverse attempts produced no admitted evidence."),
+                            evidence_gap="ADAPTIVE_REVERSE_STOP",
+                        )
+                        task_results.append(skipped)
+                        self.metrics["adaptive_reverse_stop"]["skipped_count"] += 1
+                        self.metrics["adaptive_reverse_stop"]["decisions"].append({"task_id": task.task_id, "reason": stop.reason, "evidence": stop.evidence})
+                        continue
+                    row = await self._retrieve_task(task, scenarios)
+                    retrieved.append(row)
+                    judged = await (self._passthrough_direction([row]) if self.config.evidence_output_mode == "candidate_passthrough" else self._judge_direction([row]))
+                    result = judged[0]
+                    task_results.append(result)
+                    if task.line_type == LineType.REVERSE:
+                        claims = {claim.claim_id: claim.source_text_span or claim.qualifier or claim.subject for claim in task.atomic_claims}
+                        reverse_history.append(sum(decide_admission(item, claims, self.config).admitted for item in result.evidence_items))
             else:
-                task_results = await self._judge_direction(retrieved)
+                retrieved = await asyncio.gather(*(self._retrieve_task(task, scenarios) for task in tasks))
+                await structured_prepare_task
+                task_results = await (
+                    self._passthrough_direction(retrieved)
+                    if self.config.evidence_output_mode == "candidate_passthrough"
+                    else self._judge_direction(retrieved)
+                )
             by_task = {row.task_id: row for row in task_results}
             results = [by_task[task.task_id] for task in tasks]
+            for task, result in zip(tasks, results, strict=True):
+                self._record_admission(task, result)
             # Pair forward/reverse items within each paragraph for an explicit
             # consistency diagnostic.  The check never rewrites a verdict;
             # it exposes contradictory independent conclusions for callers.

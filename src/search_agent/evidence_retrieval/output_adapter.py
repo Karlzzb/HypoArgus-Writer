@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .claim_logic import apply_claim_logic
+from .admission import decide_admission
 from .config import EvidenceRetrievalConfig
 from .public_contracts import (
     AgentRunStatus,
@@ -360,19 +361,6 @@ def _citation(
             ),
         )
 
-    if item.relation == EvidenceRelation.NEUTRAL:
-        return None
-    if not _complete_fact_sentence(content):
-        return None
-    if any(reason in _PUBLIC_CITATION_BLOCKERS for reason in item.scope_mismatch_reasons):
-        return None
-    if re.search(
-        r"无法直接(?:支持|确认|反驳|否定)|cannot directly (?:support|refute)",
-        item.reason or "",
-        re.I,
-    ):
-        return None
-
     supported = (
         list(item.metadata.get("supported_claim_ids") or [])
         if item.relation == EvidenceRelation.SUPPORT
@@ -384,28 +372,12 @@ def _citation(
         else []
     )
     mapped_ids = supported or refuted
-    if item.relation in {EvidenceRelation.SUPPORT, EvidenceRelation.REFUTE}:
-        if not mapped_ids or any(value not in claim_text_by_id for value in mapped_ids):
-            return None
-        if not item.scope_compatible:
-            return None
-        if item.judge_confidence < config.public_citation_min_confidence:
-            return None
-        if item.scores.directness < config.public_citation_min_directness:
-            return None
-        if any(
-            not _complete_fact_sentence(content, claim_text_by_id[claim_id])
-            for claim_id in mapped_ids
-        ):
-            return None
-    elif item.relation == EvidenceRelation.SUPPLEMENT:
+    if not decide_admission(item, claim_text_by_id, config).admitted:
+        return None
+    if item.relation == EvidenceRelation.SUPPLEMENT:
         matched_claim_id = str(item.metadata.get("matched_claim_id") or "")
-        if matched_claim_id not in claim_text_by_id:
-            return None
-        if item.judge_confidence < config.public_supplement_min_confidence:
-            return None
         supported, refuted, mapped_ids = [], [], [matched_claim_id]
-    else:
+    elif item.relation not in {EvidenceRelation.SUPPORT, EvidenceRelation.REFUTE}:
         return None
 
     source_type = {

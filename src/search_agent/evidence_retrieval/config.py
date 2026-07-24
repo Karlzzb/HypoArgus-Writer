@@ -119,6 +119,9 @@ class EvidenceRetrievalConfig(BaseModel):
     parallel_structured_timeout_ms: int = Field(default=4000, ge=100)
     parallel_batch_judge_timeout_ms: int = Field(default=70000, ge=100)
     gap_retrieval_reserved_ms: int = Field(default=12000, ge=1000, le=30000)
+    # 默认关闭；仅连续零准入后跳过未受保护的后续反向任务。
+    adaptive_reverse_stop_enabled: bool = False
+    adaptive_reverse_stop_min_attempts: int = Field(default=2, ge=1, le=10)
     judge_model: str | None = None
     # Judge 调用成功但格式不可解析时，仅做一次 JSON 格式修复，不重新判断事实。
     batch_judge_parse_retry_enabled: bool = True
