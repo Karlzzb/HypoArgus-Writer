@@ -40,7 +40,7 @@ LangGraph 以纯库形态嵌入自建 FastAPI，不使用 LangGraph Agent Server
 | 持久化 | `HYPOARGUS_PG_DSN` | 生产 Postgres 连接串，检查点保存器自动建表 |
 | 可观测（可选） | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` / `LANGFUSE_TIMEOUT` / `LANGFUSE_TRACING_ENABLED` | 公私钥齐备即启用；总开关设 `false` 关闭上报（公私钥可留着不动） |
 | 业务调节 | `FRAMEWORK_MAX_POINTS_PER_CHAPTER`(4)、`FRAMEWORK_MAX_HYPOTHESES_PER_POINT`(3)、`FRAMEWORK_MAX_HYPOTHESES_TOTAL`(60)、`DOCUMENT_REVIEW_MAX_RETRIES`(2)、`CHAPTER_MAX_REWRITES`(1)、`ASSEMBLER_*` 五项（含篇级终审全文段阈值 `ASSEMBLER_DOCUMENT_TEXT_MAX_CHARS`，缺省 30000） | 括号内为缺省值；`CHAPTER_MAX_REWRITES` 是章级写→评→重写循环的重写次数上限，设 0 关闭评审重写、只保留纯首写 |
-| 并发度 | `GRAPH_MAX_CONCURRENCY`(4)、`FRAMEWORK_MAX_CONCURRENT_CHAPTERS`(4)、`DOCUMENT_REVIEW_MAX_CONCURRENT_CHAPTERS`(4)、`SEARCH_AGENT_MAX_CONCURRENT_CALLS`(2)、`CHAPTER_REVIEWER_MAX_CONCURRENT_CALLS`(2) | 依次为：图级并行分支上限（检索与首写 Send 扇出）、论证框架论点假说生成与引文语义核查的章节级 LLM 并发上限、检索适配层与章级评审外部调用总并发（跨并行分支共享的线程信号量阈值，同一机制见 `src/agents/concurrency.py`） |
+| 并发度 | `GRAPH_MAX_CONCURRENCY`(4)、`FRAMEWORK_MAX_CONCURRENT_CHAPTERS`(4)、`DOCUMENT_REVIEW_MAX_CONCURRENT_CHAPTERS`(4)、`SEARCH_AGENT_MAX_CONCURRENT_CALLS`(6)、`CHAPTER_REVIEWER_MAX_CONCURRENT_CALLS`(2) | 依次为：图级并行分支上限（检索与首写 Send 扇出）、论证框架论点假说生成与引文语义核查的章节级 LLM 并发上限、检索运行时全局整章引擎调用预算、章级评审外部调用总并发。search_agent 预算由同一服务运行时的并行章节与增量检索共享，事件会暴露许可排队与 `queue_wait_ms`；引擎内部 provider 级限流仍独立生效（共享线程信号量机制见 `src/agents/concurrency.py`）。 |
 | 检索通道 | `VOLCANO_SEARCH_*`、`BISHENG_*`、`DORIS_*`、`SEARCH_AGENT_SHADOW_MODE`、`SEARCH_AGENT_*_LLM_ENABLED`、`JUDGE_MODEL`、`EVIDENCE_RETRIEVAL_<字段>` | search_agent 检索引擎三通道接入与细项配置，逐项说明见 `.env.example` 的检索通道分节 |
 | 调测 | `LLM_DEBUG_TIMING` | 设为 `1` 打印逐次 LLM 调用计时 |
 | 测试 | `HYPOARGUS_TEST_PG_DSN` | 缺省 `postgresql://postgres:postgres@127.0.0.1:15432/postgres`（本地 docker 容器 `hypoargus-test-pg`） |

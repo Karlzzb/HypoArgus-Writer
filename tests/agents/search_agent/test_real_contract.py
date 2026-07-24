@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from agents.search_agent import (
+    DEFAULT_MAX_CONCURRENT_CALLS,
     FakeSearchAgentRuntime,
     make_search_agent,
     make_stub_search_agent,
@@ -101,8 +102,12 @@ def test_进度事件密度_不少于假说数量() -> None:
     # （引擎逐项事件 + 适配层 engine_call 首尾事件）。
     assert len(progress) >= len(task["hypotheses"])
     steps = [payload["step"] for payload in progress]
-    # 适配层自身的最低进度保证：即使引擎内部事件全丢也有首尾两步。
-    assert steps[0] == "engine_call_start"
+    # 适配层自身的最低进度保证：先报告预算排队/获准，再有引擎首尾两步。
+    assert steps[:3] == [
+        "engine_permit_queued",
+        "engine_permit_acquired",
+        "engine_call_start",
+    ]
     assert steps[-1] == "engine_call_end"
     # 引擎逐项进度事件经桥翻译进入同一钩子（step 去掉 progress. 前缀）。
     assert "task.start" in steps
@@ -227,6 +232,19 @@ def test_信号量限流_并发上限为注入阈值() -> None:
     assert runtime.max_active == 1
 
 
+def test_检索运行时全局预算_缺省配置覆盖六章(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SEARCH_AGENT_MAX_CONCURRENT_CALLS", raising=False)
+    runtime = _并发探针运行时(latency_seconds=0.05)
+    adapter = make_search_agent(runtime=runtime)
+
+    _run_chapters_concurrently(adapter, DEFAULT_MAX_CONCURRENT_CALLS)
+
+    assert DEFAULT_MAX_CONCURRENT_CALLS == 6
+    assert runtime.max_active == DEFAULT_MAX_CONCURRENT_CALLS
+
+
 def test_信号量阈值经环境变量配置(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SEARCH_AGENT_MAX_CONCURRENT_CALLS", "3")
     runtime = _并发探针运行时(latency_seconds=0.05)
@@ -242,3 +260,203 @@ def test_信号量阈值非法值报错并指明变量名(
     monkeypatch.setenv("SEARCH_AGENT_MAX_CONCURRENT_CALLS", "零")
     with pytest.raises(ValueError, match="SEARCH_AGENT_MAX_CONCURRENT_CALLS"):
         make_search_agent(runtime=FakeSearchAgentRuntime())
+
+
+class _许可门控运行时(FakeSearchAgentRuntime):
+    """受控检索运行时：仅在测试释放闸门后完成，用于观察预算排队。"""
+
+    def __init__(self, entered_at: int = 2) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._release = asyncio.Event()
+        self._entered = asyncio.Event()
+        self._entered_at = entered_at
+        self._active = 0
+        self.max_active = 0
+
+    async def retrieve(
+        self, payload: dict[str, Any], **kwargs: Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+            if self._active == self._entered_at:
+                self._entered.set()
+        try:
+            await self._release.wait()
+            return await super().retrieve(payload, **kwargs)
+        finally:
+            with self._lock:
+                self._active -= 1
+
+    async def wait_until_budget_is_full(self) -> None:
+        await self._entered.wait()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def test_全局检索预算_记录章节排队与许可等待() -> None:
+    runtime = _许可门控运行时()
+    events: list[tuple[str, dict[str, Any]]] = []
+    adapter = make_search_agent(
+        lambda event_type, payload: events.append((event_type, payload)),
+        runtime=runtime,
+        max_concurrent_calls=2,
+    )
+
+    async def main() -> None:
+        runs = [
+            asyncio.create_task(adapter.run(dict(SEARCH_TASK, chapter_id=f"ch-{index}")))
+            for index in range(3)
+        ]
+        await runtime.wait_until_budget_is_full()
+        acquired = [
+            payload
+            for event_type, payload in events
+            if event_type == "subagent_progress"
+            and payload["step"] == "engine_permit_acquired"
+        ]
+        assert {payload["chapter_id"] for payload in acquired} == {"ch-0", "ch-1"}
+        assert runtime.max_active == 2
+        runtime.release()
+        await asyncio.gather(*runs)
+
+    asyncio.run(main())
+
+    queued = [
+        payload
+        for event_type, payload in events
+        if event_type == "subagent_progress" and payload["step"] == "engine_permit_queued"
+    ]
+    acquired = [
+        payload
+        for event_type, payload in events
+        if event_type == "subagent_progress"
+        and payload["step"] == "engine_permit_acquired"
+    ]
+    assert {payload["chapter_id"] for payload in queued} == {"ch-0", "ch-1", "ch-2"}
+    assert {payload["chapter_id"] for payload in acquired} == {"ch-0", "ch-1", "ch-2"}
+    assert all(payload["budget_limit"] == 2 for payload in [*queued, *acquired])
+    assert next(payload for payload in acquired if payload["chapter_id"] == "ch-2")[
+        "queue_wait_ms"
+    ] >= 0
+
+
+def test_检索失败释放全局预算并记录执行终态() -> None:
+    def fail_first(payload: dict[str, Any]) -> None:
+        if payload["paragraph"]["paragraph_id"] == "ch-fail":
+            raise RuntimeError("模拟检索失败")
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    adapter = make_search_agent(
+        lambda event_type, payload: events.append((event_type, payload)),
+        runtime=FakeSearchAgentRuntime(side_effect=fail_first),
+        max_concurrent_calls=1,
+    )
+
+    async def main() -> list[object]:
+        return await asyncio.gather(
+            adapter.run(dict(SEARCH_TASK, chapter_id="ch-fail")),
+            adapter.run(dict(SEARCH_TASK, chapter_id="ch-after-failure")),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(main())
+    assert isinstance(results[0], RuntimeError)
+    assert isinstance(results[1], dict)
+    end_events = [
+        payload
+        for event_type, payload in events
+        if event_type == "subagent_progress" and payload["step"] == "engine_call_end"
+    ]
+    assert {payload["chapter_id"] for payload in end_events} == {
+        "ch-fail",
+        "ch-after-failure",
+    }
+    assert next(payload for payload in end_events if payload["chapter_id"] == "ch-fail")[
+        "outcome"
+    ] == "error"
+
+
+def test_排队检索取消后归还全局预算许可() -> None:
+    runtime = _许可门控运行时()
+    events: list[tuple[str, dict[str, Any]]] = []
+    adapter = make_search_agent(
+        lambda event_type, payload: events.append((event_type, payload)),
+        runtime=runtime,
+        max_concurrent_calls=2,
+    )
+
+    async def main() -> None:
+        holders = [
+            asyncio.create_task(adapter.run(dict(SEARCH_TASK, chapter_id=f"ch-holder-{index}")))
+            for index in range(2)
+        ]
+        await runtime.wait_until_budget_is_full()
+        cancelled = asyncio.create_task(
+            adapter.run(dict(SEARCH_TASK, chapter_id="ch-cancelled"))
+        )
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        after_cancellation = asyncio.create_task(
+            adapter.run(dict(SEARCH_TASK, chapter_id="ch-after-cancellation"))
+        )
+        runtime.release()
+        await asyncio.gather(*holders, after_cancellation)
+
+    asyncio.run(main())
+
+    acquired_chapters = {
+        payload["chapter_id"]
+        for event_type, payload in events
+        if event_type == "subagent_progress"
+        and payload["step"] == "engine_permit_acquired"
+    }
+    assert "ch-cancelled" not in acquired_chapters
+    assert "ch-after-cancellation" in acquired_chapters
+    assert any(
+        payload["chapter_id"] == "ch-cancelled"
+        and payload["step"] == "engine_permit_cancelled"
+        for event_type, payload in events
+        if event_type == "subagent_progress"
+    )
+
+
+def test_执行中检索取消后释放预算并记录终态() -> None:
+    runtime = _许可门控运行时(entered_at=1)
+    events: list[tuple[str, dict[str, Any]]] = []
+    adapter = make_search_agent(
+        lambda event_type, payload: events.append((event_type, payload)),
+        runtime=runtime,
+        max_concurrent_calls=1,
+    )
+
+    async def main() -> None:
+        active = asyncio.create_task(
+            adapter.run(dict(SEARCH_TASK, chapter_id="ch-active-cancelled"))
+        )
+        await runtime.wait_until_budget_is_full()
+        active.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active
+
+        after_cancellation = asyncio.create_task(
+            adapter.run(dict(SEARCH_TASK, chapter_id="ch-after-active-cancellation"))
+        )
+        runtime.release()
+        await asyncio.wait_for(after_cancellation, timeout=0.5)
+
+    asyncio.run(main())
+
+    cancelled_end = next(
+        payload
+        for event_type, payload in events
+        if event_type == "subagent_progress"
+        and payload["chapter_id"] == "ch-active-cancelled"
+        and payload["step"] == "engine_call_end"
+    )
+    assert cancelled_end["outcome"] == "cancelled"

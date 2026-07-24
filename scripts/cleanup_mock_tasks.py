@@ -30,6 +30,9 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
+
+from psycopg import Connection
 
 from domain.env_config import read_positive_int
 from graph import postgres_checkpointer
@@ -53,7 +56,9 @@ def main() -> int:
     print(f"mock 线程清理：cutoff = {cutoff_iso}（MOCK_CLEANUP_DAYS={days}）")
 
     with postgres_checkpointer(dsn=dsn) as saver:
-        conn = saver.conn
+        # postgres_checkpointer 始终以单一 psycopg Connection 构造 saver；
+        # PostgresSaver 的公开类型还允许 ConnectionPool，故在脚本边界收窄。
+        conn = cast(Connection[dict[str, Any]], saver.conn)
         total = 0
 
         # checkpoints 表有 metadata 列，按 created_at 收窄。
