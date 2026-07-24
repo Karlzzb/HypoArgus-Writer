@@ -42,10 +42,13 @@ def reconcile(
         # 臆造占位角标与 ASCII 角标合并按 id 升序报 orphan_marker；占位角标
         # 永不在引文库（库内 id 恒为 ASCII），故只可能落 orphan 分支。
         markers |= set(_PLACEHOLDER_MARKER_PATTERN.findall(draft.text))
+        cited_material_ids = {marker for marker in markers if not marker.isdecimal()}
 
         # 角标类问题：无来源的标注与跨章误引。
         for marker in sorted(markers):
-            material = materials_by_id.get(marker)
+            # [1] / [2] 这类展示编号不是正文可引用素材标识。
+            # 即使旧数据或脏数据里存在同名素材，也不能把书目标号当作真实角标。
+            material = None if marker.isdecimal() else materials_by_id.get(marker)
             if material is None:
                 issues.append(
                     CitationIssue(
@@ -74,7 +77,7 @@ def reconcile(
             for material in library
             if material.chapter_id == draft.chapter_id
             and material.verdict == "pass"
-            and material.id not in markers
+            and material.id not in cited_material_ids
         ]
         for material in sorted(unused, key=lambda item: item.id):
             issues.append(

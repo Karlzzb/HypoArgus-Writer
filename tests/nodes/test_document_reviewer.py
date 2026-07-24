@@ -255,6 +255,30 @@ def test_重试超限_携带未决引文警告() -> None:
     assert result["revised_chapter_ids"] == []
 
 
+def test_展示编号严格门禁超限后作为citation_warning呈人工() -> None:
+    state = _state(
+        [_draft("ch1", "模型自行生成展示编号[1]。")],
+        [_mat("1", "ch1")],
+        citation_retry_count=1,
+    )
+
+    result, _ = _run(state, [[_aligned("1")], REVIEW_PASS], max_retries=1)
+
+    report = result["citation_report"]
+    assert report.passed is False
+    assert [(issue.kind, issue.chapter_id, issue.material_id) for issue in report.issues] == [
+        ("orphan_marker", "ch1", "1"),
+        ("unused_material", "ch1", "1"),
+    ]
+    assert report.failed_chapter_ids == ["ch1"]
+    assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+    warnings = result["citation_warnings"]
+    assert len(warnings) == 2
+    assert "orphan_marker" in warnings[0]
+    assert "正文角标 [1] 在引文库中不存在" in warnings[0]
+    assert "unused_material" in warnings[1]
+
+
 def test_增量核查_只审revised章节且语义核查只调一次() -> None:
     state = _state(
         [_draft("ch1", "孤儿[m404]。"), _draft("ch2", "引用[m2]。")],

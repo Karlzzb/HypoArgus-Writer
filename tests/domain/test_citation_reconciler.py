@@ -72,6 +72,31 @@ def test_识别无来源的标注() -> None:
     assert issues[0].detail
 
 
+def test_猜测的不透明素材ID不存在时报orphan() -> None:
+    """模型猜测 m_ + 26 位 Crockford Base32 形态时，不得因形态正确而放行。"""
+    guessed_id = "m_0123456789ABCDEFGHJKMNPQRS"
+    assert len(guessed_id.removeprefix("m_")) == 26
+
+    issues = reconcile([_draft("ch1", f"正文[{guessed_id}]结尾")], [])
+
+    assert [(issue.kind, issue.material_id) for issue in issues] == [
+        ("orphan_marker", guessed_id)
+    ]
+
+
+def test_模型生成展示编号即使命中库内数字id仍是orphan且不算已引用() -> None:
+    """写作正文只允许真实素材标识，不能把 [1] 当可接受书目标号。"""
+    issues = reconcile(
+        [_draft("ch1", "正文试图用展示编号[1]。")],
+        [_mat("1", "ch1")],
+    )
+
+    assert [(issue.kind, issue.chapter_id, issue.material_id) for issue in issues] == [
+        ("orphan_marker", "ch1", "1"),
+        ("unused_material", "ch1", "1"),
+    ]
+
+
 def test_识别跨章误引() -> None:
     library = [_mat("m1", "ch1")]
     drafts = [_draft("ch1", "本章引用[m1]。"), _draft("ch2", "误引[m1]。")]
