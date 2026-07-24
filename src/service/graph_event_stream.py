@@ -261,6 +261,13 @@ class GraphRunEmitter:
                 parent_id=self._subagent_parent(payload),
             )
             self._subagent_start_ids[key] = envelope.event_id
+            if unit == "rewriter_loop" and payload.get("mode") == "draft":
+                self._emit(
+                    type="pipeline_timing",
+                    unit="reference_orchestrator",
+                    payload={"chapter_id": chapter_id, "phase": "first_draft_started"},
+                    parent_id=envelope.parent_id,
+                )
         elif event_type == SUBAGENT_PROGRESS:
             self._emit(
                 type="progress",
@@ -275,13 +282,24 @@ class GraphRunEmitter:
                 payload=dict(payload),
                 parent_id=self._subagent_start_ids.pop(key, self._root_id),
             )
+            if unit == "search_agent":
+                parent_id = self._ensure_chapter_node_start(
+                    "reference_orchestrator", str(chapter_id)
+                )
+                for phase in ("retrieval_completed", "first_draft_queued"):
+                    self._emit(
+                        type="pipeline_timing",
+                        unit="reference_orchestrator",
+                        payload={"chapter_id": chapter_id, "phase": phase},
+                        parent_id=parent_id,
+                    )
 
     def _subagent_parent(self, payload: dict[str, Any]) -> str | None:
         """subagent_start 的父 id：并行分支按章节配对，其余挂当前节点。
 
-        rewriter_loop 的 draft 模式只会从 chapter_drafter 分支发起
-        （writing_orchestrator 的 draft 分支仅作防御、正常不可达），
-        故按 chapter_id 取（必要时代发）该分支的 node_start；
+        首写流水线的 rewriter_loop draft 模式在 reference_orchestrator 分支
+        内执行，故按章节挂到真实的检索分支 node_start，而不虚构独立节点；
+        writing_orchestrator 的 draft 分支仅作防御、正常不可达。
         search_agent 带 chapter_id 时同理挂检索分支——例外是修订轮的
         增量检索从串行的 writing_orchestrator 发起（串行超步内任务块
         先于子智能体事件处理，_current_node 判定无竞态），挂当前节点；
@@ -289,7 +307,9 @@ class GraphRunEmitter:
         """
         chapter_id = payload.get("chapter_id")
         if payload.get("mode") == "draft" and isinstance(chapter_id, str):
-            return self._ensure_chapter_node_start("chapter_drafter", chapter_id)
+            return self._ensure_chapter_node_start(
+                "reference_orchestrator", chapter_id
+            )
         if (
             payload.get("unit") == "search_agent"
             and isinstance(chapter_id, str)

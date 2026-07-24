@@ -59,20 +59,27 @@ def draft_send_payloads(state: WritingAgentState) -> list[DraftSendPayload]:
     drafted = {draft.chapter_id for draft in state.get("chapter_drafts", [])}
     outline = state.get("outline", [])
     return [
-        DraftSendPayload(
-            draft_chapter_id=chapter.id,
-            outline=outline,
-            citation_library=[
-                material
-                for material in state.get("citation_library", [])
-                if material.chapter_id == chapter.id
-            ],
-            doc_type=state.get("doc_type", ""),
-            doc_variant=state.get("doc_variant"),
-        )
+        draft_send_payload_for_chapter(state, chapter.id)
         for chapter in outline
         if chapter.id not in drafted
     ]
+
+
+def draft_send_payload_for_chapter(
+    state: WritingAgentState, chapter_id: str
+) -> DraftSendPayload:
+    """构造单个章节的首写载荷，供按章检索流水线和恢复路径共用。"""
+    return DraftSendPayload(
+        draft_chapter_id=chapter_id,
+        outline=state.get("outline", []),
+        citation_library=[
+            material
+            for material in state.get("citation_library", [])
+            if material.chapter_id == chapter_id
+        ],
+        doc_type=state.get("doc_type", ""),
+        doc_variant=state.get("doc_variant"),
+    )
 
 
 def make_chapter_drafter_node(

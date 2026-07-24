@@ -540,7 +540,7 @@ data: <JSON>
 ### 3.2 可视化通道 `GET /graph_events`
 
 全局流（覆盖所有任务），**永不主动关闭**，由客户端断开；用于执行拓扑可视化与运维观测，非业务必需。
-传输层与业务通道一致（`sse-starlette` + `{epoch}-{seq}` 传输 id + `Last-Event-ID` 续传 + keepalive + 断线检测）；12 个事件类型与元数据专用性质不变。
+传输层与业务通道一致（`sse-starlette` + `{epoch}-{seq}` 传输 id + `Last-Event-ID` 续传 + keepalive + 断线检测）；13 个事件类型与元数据专用性质不变。
 
 查询参数（均可选，组合过滤）：
 
@@ -566,7 +566,10 @@ data: <JSON>
 }
 ```
 
-12 个事件类型：`node_start`、`node_end`、`node_error`、`gate_blocked`、`gate_resumed`、`branch_taken`、`loop_iteration`、`subagent_start`、`subagent_end`、`state_snapshot`、`llm_config_used`、`progress`。
+13 个事件类型：`node_start`、`node_end`、`node_error`、`gate_blocked`、`gate_resumed`、`branch_taken`、`loop_iteration`、`subagent_start`、`subagent_end`、`state_snapshot`、`llm_config_used`、`progress`、`pipeline_timing`。
+
+`pipeline_timing` 载荷包含 `chapter_id` 与 `phase`。
+按章流水线依次上报 `retrieval_completed`、`first_draft_queued`、`first_draft_started`，可据事件时间戳关联检索完成、首写排队和首写启动。
 `parent_id` 用于拼接执行拓扑树。
 `state_snapshot` 只含元数据（状态、轮次、章节与素材计数等），绝不含正文。
 

@@ -4,11 +4,10 @@
 → chapter_drafter（首写并行扇出）→ document_reviewer（篇级终审门禁）
 → human_review_gate（人工中断点与迭代路由）。
 检索阶段：framework_orchestrator 后的条件边为每个待检索章节各发一个 Send，
-reference_orchestrator 各分支并行检索一章（existing_materials_digest 只反映
-扇出前的既有引文库），素材经 citation_library 合并 reducer 汇入主状态并
-跨章按 URL 去重、按超步落 checkpoint，全部分支完成后汇合进入首写扇出。
-首写阶段：检索汇合节点 reference_join 后的条件边为每个未写章节各发一个 Send，
-chapter_drafter 各分支并行写一章（前文承接用框架生成的规划摘要链），
+reference_orchestrator 各分支先把本章检索封装为可独立持久化的 Functional API task，
+成功后在同一分支立即首写；因此快章不受慢章检索阻塞，首写失败恢复时也不重跑检索。
+素材和产物经 reducer 汇入主状态，全部章节完成后才汇合进入终审。
+首写阶段：无待检索章节时由 chapter_drafter 各分支并行写章（前文承接用规划摘要链），
 产物经 chapter_drafts 合并 reducer 汇入主状态、按超步落 checkpoint，
 全部分支完成后汇合前进终审。两段并行带 checkpointer 时某分支失败，
 已完成分支的写入被保留，resume 只重跑未完成分支（ADR-0001 约束 1）。
@@ -119,10 +118,8 @@ def route_after_framework_orchestrator(state: WritingAgentState) -> str | list[S
 def reference_join(state: WritingAgentState) -> None:
     """检索并行分支的汇合点：无操作节点，不写任何状态。
 
-    LangGraph 对同名节点并行任务的条件边是逐任务求值的，且每次求值只见
-    该任务自身的写入；首写扇出必须基于全部检索分支合并后的完整引文库，
-    故经本节点的静态边先汇合（静态边按节点名去重激活，目标只跑一次），
-    下一超步再从这里的条件边做首写扇出。
+    此节点是最终文档的唯一汇合屏障：各章检索完成后已在同一分支首写，
+    这里仅等待全部章节的素材与草稿 reducer 合并完毕，再进入篇级终审。
     """
     return None
 
@@ -136,17 +133,9 @@ def revision_join(state: WritingAgentState) -> None:
     return None
 
 
-def route_after_reference_join(state: WritingAgentState) -> str | list[Send]:
-    """检索汇合后的路由：为每个未写章节各发一个 Send 并行首写。
-
-    Send 载荷（目标章 id + 装配所需状态切片）与选章判定收敛于
-    chapter_drafter.draft_send_payloads 单一事实源；全部章节已有草稿
-    （恢复续跑等场景）时直接前进终审。
-    """
-    payloads = draft_send_payloads(state)
-    if not payloads:
-        return "document_reviewer"
-    return [Send("chapter_drafter", payload) for payload in payloads]
+def route_after_reference_join(state: WritingAgentState) -> str:
+    """按章检索—首写流水线汇合后进入篇级终审。"""
+    return "document_reviewer"
 
 
 def route_after_writing_orchestrator(state: WritingAgentState) -> str | list[Send]:
@@ -232,16 +221,20 @@ def build_graph(
         chapter_reviewer or make_chapter_reviewer(llm_factory)
     )
 
+    raw_chapter_drafter_node = make_chapter_drafter_node(
+        effective_rewriter_loop, effective_chapter_reviewer, assembler_config
+    )
+    chapter_drafter_node = observability.traced_node(
+        "chapter_drafter", raw_chapter_drafter_node
+    )
     node_functions = {
         "framework_orchestrator": make_framework_orchestrator_node(
             llm_factory, assembler_config=assembler_config
         ),
         "reference_orchestrator": make_reference_orchestrator_node(
-            effective_search_agent, assembler_config
+            effective_search_agent, assembler_config, chapter_drafter_node
         ),
-        "chapter_drafter": make_chapter_drafter_node(
-            effective_rewriter_loop, effective_chapter_reviewer, assembler_config
-        ),
+        "chapter_drafter": raw_chapter_drafter_node,
         "writing_orchestrator": make_writing_orchestrator_node(
             effective_rewriter_loop,
             effective_search_agent,
@@ -275,7 +268,7 @@ def build_graph(
     builder.add_conditional_edges(
         "reference_join",
         route_after_reference_join,
-        ["chapter_drafter", "document_reviewer"],
+        ["document_reviewer"],
     )
     builder.add_edge("chapter_drafter", "document_reviewer")
     builder.add_node("revision_join", revision_join)

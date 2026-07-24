@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-# 七大类别展开后的 12 个事件类型完整枚举
+# 七大类别展开后的 13 个事件类型完整枚举
 # （节点启停与门禁、分支流转、循环迭代、子智能体调用、状态快照、模型配置、进度）。
 GRAPH_EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -28,6 +28,7 @@ GRAPH_EVENT_TYPES: frozenset[str] = frozenset(
         "state_snapshot",
         "llm_config_used",
         "progress",
+        "pipeline_timing",
     }
 )
 

@@ -286,9 +286,9 @@ def test_合成流块_子智能体progress事件挂最近一次subagent_start():
     events: list[EventEnvelope] = []
     emitter = _make_emitter(events)
     emitter.emit_root(type="progress", unit="graph", payload={})
-    # 并行首写分支：draft 模式的子智能体事件按章节挂 chapter_drafter 的 node_start。
-    chunk = _task_chunk("chapter_drafter", 3)
-    chunk["payload"]["input"] = {"draft_chapter_id": "ch-1"}
+    # 按章流水线的 draft 模式在检索分支内执行，挂真实检索节点。
+    chunk = _task_chunk("reference_orchestrator", 3)
+    chunk["payload"]["input"] = {"reference_chapter_id": "ch-1"}
     emitter.handle("debug", chunk)
     hook = emitter.make_subagent_hook()
 
@@ -319,6 +319,36 @@ def test_合成流块_子智能体progress事件挂最近一次subagent_start():
     assert end.parent_id == start.event_id
     node_start = next(event for event in events if event.type == "node_start")
     assert start.parent_id == node_start.event_id
+
+
+def test_按章流水线性能事件按章节关联检索完成与首写启动():
+    events: list[EventEnvelope] = []
+    emitter = _make_emitter(events)
+    emitter.emit_root(type="progress", unit="graph", payload={})
+    chunk = _task_chunk("reference_orchestrator", 3)
+    chunk["payload"]["input"] = {"reference_chapter_id": "ch-1"}
+    emitter.handle("debug", chunk)
+    hook = emitter.make_subagent_hook()
+
+    hook(SUBAGENT_START, {"unit": "search_agent", "chapter_id": "ch-1"})
+    hook(SUBAGENT_END, {"unit": "search_agent", "chapter_id": "ch-1"})
+    hook(
+        SUBAGENT_START,
+        {"unit": "rewriter_loop", "chapter_id": "ch-1", "mode": "draft"},
+    )
+
+    timing = [event for event in events if event.type == "pipeline_timing"]
+    assert [event.payload for event in timing] == [
+        {"chapter_id": "ch-1", "phase": "retrieval_completed"},
+        {"chapter_id": "ch-1", "phase": "first_draft_queued"},
+        {"chapter_id": "ch-1", "phase": "first_draft_started"},
+    ]
+    reference_start = next(
+        event
+        for event in events
+        if event.type == "node_start" and event.unit == "reference_orchestrator"
+    )
+    assert all(event.parent_id == reference_start.event_id for event in timing)
 
 
 def test_合成流块_子智能体progress无前置start时挂根事件():
@@ -482,7 +512,7 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
     _, _, _ = _run_first_pass(events)
 
     root_id = events[0].event_id
-    # chapter_drafter 并行扇出：每章一个任务，node_start 每单元可能多条。
+    # 按章流水线的检索分支：每章一个任务，node_start 每单元可能多条。
     node_start_ids: dict[str, set[str]] = {}
     for event in events:
         if event.type == "node_start":
@@ -490,13 +520,11 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
     assert set(node_start_ids) == {
         "framework_orchestrator",
         "reference_orchestrator",
-        "chapter_drafter",
         "document_reviewer",
         "human_review_gate",
     }
-    # 2 章并行扇出：检索与首写两段各恰好两个任务。
+    # 2 章并行检索分支各恰好一个任务，首写在同一分支内完成。
     assert len(node_start_ids["reference_orchestrator"]) == 2
-    assert len(node_start_ids["chapter_drafter"]) == 2
     for event in events:
         if event.type == "node_start":
             assert event.parent_id == root_id
@@ -529,14 +557,13 @@ def test_真图集成_子智能体事件成对且挂当前节点():
         "chapter_reviewer",
     }
 
-    # 并行扇出下每章的检索/首写子智能体精确挂到本章所属分支的 node_start
-    #（按 node_start 载荷里的 chapter_id 配对，跨线程到达顺序无关）：
-    # search_agent 挂检索分支，draft 的 rewriter_loop 挂本章首写分支。
+    # 按章流水线下每章的检索/首写子智能体精确挂到同一检索分支的 node_start
+    #（按 node_start 载荷里的 chapter_id 配对，跨线程到达顺序无关）。
     branch_start_by_key = {
         (event.unit, event.payload["chapter_id"]): event.event_id
         for event in events
         if event.type == "node_start"
-        and event.unit in {"reference_orchestrator", "chapter_drafter"}
+            and event.unit == "reference_orchestrator"
     }
     for event in starts:
         if event.unit == "search_agent":
@@ -545,19 +572,19 @@ def test_真图集成_子智能体事件成对且挂当前节点():
             ]
         elif event.unit == "rewriter_loop":
             assert event.parent_id == branch_start_by_key[
-                ("chapter_drafter", event.payload["chapter_id"])
+                ("reference_orchestrator", event.payload["chapter_id"])
             ]
 
     # 章级评审在首写节点内串行发起（write→review 同超步），不带独立分支键，
     # 故按「当前执行中节点，未知退根事件」挂父：并行扇出下当前节点判定有竞态，
-    # 父链要么落在某个 chapter_drafter 的 node_start，要么退回本次根事件。
+    # 父链要么落在某个 reference_orchestrator 的 node_start，要么退回本次根事件。
     root_id = events[0].event_id
-    chapter_drafter_start_ids = {
+    reference_start_ids = {
         event.event_id
         for event in events
-        if event.type == "node_start" and event.unit == "chapter_drafter"
+        if event.type == "node_start" and event.unit == "reference_orchestrator"
     }
-    reviewer_parents = chapter_drafter_start_ids | {root_id}
+    reviewer_parents = reference_start_ids | {root_id}
     for event in starts:
         if event.unit == "chapter_reviewer":
             assert event.parent_id in reviewer_parents

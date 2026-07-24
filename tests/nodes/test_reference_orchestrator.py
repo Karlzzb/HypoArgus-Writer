@@ -169,14 +169,14 @@ def test_载荷切分_已有素材入库章节不重发():
     assert [payload[REFERENCE_CHAPTER_ID_KEY] for payload in payloads] == ["ch3"]
 
 
-def test_载荷只携带状态切片_大纲按目标章过滤且引文库整体携带():
+def test_载荷只携带状态切片_大纲完整携带以提供规划摘要链():
     state = _build_state()
     state["citation_library"] = [_ch1_library_material()]
 
     payloads = reference_send_payloads(state)
 
     payload = payloads[0]
-    assert [chapter.id for chapter in payload["outline"]] == ["ch3"]
+    assert [chapter.id for chapter in payload["outline"]] == ["ch1", "ch2", "ch3"]
     assert payload["citation_library"] == state["citation_library"]
     assert payload["genre"] == "行业评论"
     assert "chapter_drafts" not in payload
