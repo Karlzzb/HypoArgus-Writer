@@ -27,13 +27,13 @@ from langgraph.types import Command
 
 from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.rewriter_loop import make_stub_rewriter_loop
-from agents.search_agent import make_stub_search_agent
+from agents.search_agent import make_stub_search_agent, material_id_from_source_ref
 from domain.citation_reconciler import MARKER_PATTERN
 from domain.units import MAIN_NODES
 from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
 from llm.llm_config import RUNTIME_UNITS
-from domain.state import WorkflowStatus, initial_state
+from domain.state import SourceKind, WorkflowStatus, initial_state
 from service.llm_response_plans import (
     DOCUMENT_REVIEW_PASS,
     FIRST_PASS_LLM_CALLS,
@@ -50,6 +50,19 @@ TEST_PG_DSN = os.environ.get(
 )
 
 FINALIZE = {"action": "finalize"}
+
+
+def _stub_material_id(chapter_id: str, hypothesis_id: str) -> str:
+    source_kinds: tuple[SourceKind, ...] = ("web", "knowledge_base", "structured_data")
+    source_kind = source_kinds[sum(hypothesis_id.encode()) % len(source_kinds)]
+    source_ref = {
+        "stub_source": "search_agent",
+        "chapter_id": chapter_id,
+        "hypothesis_id": hypothesis_id,
+    }
+    if source_kind == "web":
+        source_ref["url"] = f"https://stub.example/{hypothesis_id}"
+    return material_id_from_source_ref(source_kind, source_ref)
 
 
 def _build(responses: list[str], keyed: dict[str, list[str]] | None = None, **kwargs):
@@ -773,8 +786,9 @@ def test_rewriter任务包prev_chapter_summary含多个前章摘要链():
 
 
 def test_终审失败只重写不合格章节_超限携警告进入中断点():
+    ch1_material_id = _stub_material_id("ch1", "ch1-p1-h1")
     semantic_fail = json.dumps(
-        [{"material_id": "m-ch1-p1-h1", "aligned": False, "reason": "观点不对应"}],
+        [{"material_id": ch1_material_id, "aligned": False, "reason": "观点不对应"}],
         ensure_ascii=False,
     )
     # 首轮：ch1 语义失败、ch2 通过 → 定向回退只重写 ch1；

@@ -12,6 +12,9 @@ framework 的假说生成按章节并发，调用顺序不确定，
 
 import json
 
+from agents.search_agent.mapping import material_id_from_source_ref
+from domain.state import SourceKind
+
 # framework_orchestrator 的顺序应答：品类识别（自由结构）→ 大纲（2 章）→
 # 全文论点单次调用（每章 1 条论点）。
 FRAMEWORK_RESPONSES = [
@@ -125,6 +128,27 @@ AUDIT_EMPTY_RESPONSE = '{"issues": []}'
 # （issues 与 conflicts 均为空数组，评审通过、循环短路）。
 REVIEW_EMPTY_RESPONSE = '{"issues": [], "conflicts": []}'
 
+
+def _stub_source_kind(hypothesis_id: str) -> SourceKind:
+    source_kinds: tuple[SourceKind, ...] = ("web", "knowledge_base", "structured_data")
+    return source_kinds[sum(hypothesis_id.encode()) % len(source_kinds)]
+
+
+def _stub_material_id(chapter_id: str, hypothesis_id: str) -> str:
+    source_kind = _stub_source_kind(hypothesis_id)
+    source_ref = {
+        "stub_source": "search_agent",
+        "chapter_id": chapter_id,
+        "hypothesis_id": hypothesis_id,
+    }
+    if source_kind == "web":
+        source_ref["url"] = f"https://stub.example/{hypothesis_id}"
+    return material_id_from_source_ref(source_kind, source_ref)
+
+
+_CH1_STUB_MATERIAL_ID = _stub_material_id("ch1", "ch1-p1-h1")
+_CH2_STUB_MATERIAL_ID = _stub_material_id("ch2", "ch2-p1-h1")
+
 # rewriter_loop 真实现的键控应答（demo 空转与端到端主干等真链路场景与
 # TRUNK_RESPONSES 合用）：写作调用按上下文块的「- 标题：<章名>」行键控
 # （同章 draft 在前、revise 在后，按调用时间顺序弹出）；章级评审调用按
@@ -137,12 +161,13 @@ WRITER_KEYED_RESPONSES = {
     "【章节评审】": [REVIEW_EMPTY_RESPONSE] * 4,
     "- 标题：第一章": [
         writer_envelope(
-            "本专业面向智能制造领域培养高素质人才，课程体系对接行业标准。[m-ch1-p1-h1]",
+            "本专业面向智能制造领域培养高素质人才，课程体系对接行业标准。"
+            f"[{_CH1_STUB_MATERIAL_ID}]",
             "第一章完成培养定位与背景铺陈。",
         ),
         writer_envelope(
             "本专业以克制口吻阐明培养定位，课程体系对接行业标准。"
-            "（修订落实：引言口吻更克制）[m-ch1-p1-h1]",
+            f"（修订落实：引言口吻更克制）[{_CH1_STUB_MATERIAL_ID}]",
             "第一章按修订意见收束引言口吻。",
         ),
     ],
@@ -150,12 +175,13 @@ WRITER_KEYED_RESPONSES = {
         writer_envelope(
             # 正文承接前章摘要原文（供摘要链断言 drafts[0].summary in drafts[1].text）。
             "承接前章——第一章完成培养定位与背景铺陈。"
-            "在培养定位基础上，本专业构建产教融合的课程实施路径。[m-ch2-p1-h1]",
+            "在培养定位基础上，本专业构建产教融合的课程实施路径。"
+            f"[{_CH2_STUB_MATERIAL_ID}]",
             "第二章完成课程实施路径论述。",
         ),
         writer_envelope(
             "在培养定位基础上，本专业以行业数据论证课程实施路径成效。"
-            "（修订落实：补充行业数据佐证）[m-ch2-p1-h1]",
+            f"（修订落实：补充行业数据佐证）[{_CH2_STUB_MATERIAL_ID}]",
             "第二章按修订意见补充行业数据佐证。",
         ),
     ],

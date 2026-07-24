@@ -38,6 +38,8 @@ class MaterialPayload(TypedDict):
     url: str | None
     """来源链接：联网来源必带真实链接，知识库与结构化来源可为 None。"""
     source_kind: SourceKind
+    source_ref: NotRequired[dict[str, Any] | None]
+    """真实来源定位：新 payload 携带；旧 payload 缺失时按 None 兼容。"""
     excerpt: str
     relevance_score: float
     verdict: Literal["pass", "fail", "inconclusive"]
@@ -57,6 +59,7 @@ def material_from_payload(payload: MaterialPayload, chapter_id: str) -> Material
         source=payload["source"],
         url=payload["url"],
         source_kind=payload["source_kind"],
+        source_ref=payload.get("source_ref"),
         excerpt=payload["excerpt"],
         relevance_score=payload["relevance_score"],
         verdict=payload["verdict"],

@@ -11,6 +11,7 @@ from agents.search_agent import (
     engine_payload_from_task,
     fake_engine_output,
     forward_item_id,
+    material_id_from_source_ref,
     reverse_item_id,
     search_result_from_engine_output,
     split_item_id,
@@ -35,9 +36,91 @@ def _citation(citation_id: str, source_type: str, url: str | None) -> dict[str, 
         "source_name": f"来源（{citation_id}）",
         "title": f"标题（{citation_id}）",
         "url": url,
+        "knowledge_id": f"kb-{citation_id}" if source_type == "KNOWLEDGE_BASE" else None,
+        "file_id": f"file-{citation_id}" if source_type == "KNOWLEDGE_BASE" else None,
+        "chunk_id": f"chunk-{citation_id}" if source_type == "KNOWLEDGE_BASE" else None,
         "summary": f"摘录（{citation_id}）",
         "judgment": {"confidence": 0.8},
+        "provenance": {
+            "scenario_key": (
+                f"scenario-{citation_id}"
+                if source_type == "STRUCTURED_DATA"
+                else None
+            ),
+            "dataset_id": (
+                f"dataset-{citation_id}" if source_type == "STRUCTURED_DATA" else None
+            ),
+            "query_execution_id": (
+                f"query-{citation_id}" if source_type == "STRUCTURED_DATA" else None
+            ),
+            "content_fingerprint": f"fp-{citation_id}",
+        },
     }
+
+
+def _material_by_source_kind(output: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    materials = search_result_from_engine_output(output, TASK)["materials"]
+    return {material["source_kind"]: material for material in materials}
+
+
+def test_稳定来源输入映射为确定性不透明material_id() -> None:
+    source_ref = {"url": "https://example.com/source/path?x=1"}
+
+    first = material_id_from_source_ref("web", source_ref)
+    second = material_id_from_source_ref("web", dict(reversed(source_ref.items())))
+
+    assert first == second
+    assert first.startswith("m_")
+    assert len(first) == 28
+    assert set(first.removeprefix("m_")) <= set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+
+def test_三类来源稳定输入_id形状确定且不泄漏来源语义() -> None:
+    cases = [
+        (
+            "web",
+            {
+                "url": "https://example.com/ch-1/h-1/c-web",
+                "content_fingerprint": "fp-web",
+            },
+        ),
+        (
+            "knowledge_base",
+            {
+                "knowledge_id": "kb-ch-1",
+                "file_id": "file-h-1",
+                "chunk_id": "chunk-c-kb",
+                "content_fingerprint": "fp-kb",
+            },
+        ),
+        (
+            "structured_data",
+            {
+                "scenario_key": "scenario-ch-1",
+                "dataset_id": "dataset-h-1",
+                "query_execution_id": "query-c-doris",
+                "content_fingerprint": "fp-structured",
+            },
+        ),
+    ]
+
+    ids = [material_id_from_source_ref(kind, source_ref) for kind, source_ref in cases]
+    repeated = [
+        material_id_from_source_ref(kind, dict(reversed(source_ref.items())))
+        for kind, source_ref in cases
+    ]
+
+    assert len(set(ids)) == len(cases)
+    assert ids == repeated
+    for material_id in ids:
+        assert material_id.startswith("m_")
+        assert len(material_id) == 28
+        assert "ch-1" not in material_id
+        assert "h-1" not in material_id
+        assert "c-" not in material_id
+        assert "example" not in material_id
+        assert "kb" not in material_id.lower()
+        assert "dataset" not in material_id.lower()
 
 
 def test_任务包映射为引擎入参_正反向检索项与既有证据摘要齐备() -> None:
@@ -111,32 +194,41 @@ def test_引擎出参映射_回链裁决url与来源通道逐项回填() -> None
     }
 
     materials = search_result_from_engine_output(output, TASK)["materials"]
-    by_id = {material["id"]: material for material in materials}
-    assert set(by_id) == {
-        "m-ch-1-h-1-c-web",
-        "m-ch-1-h-1-c-kb",
-        "m-ch-1-h-1-c-doris",
-    }
+    by_kind = {material["source_kind"]: material for material in materials}
+    assert set(by_kind) == {"web", "knowledge_base", "structured_data"}
 
     # 全部素材回链发起检索项的假说。
     assert all(material["hypothesis_id"] == "h-1" for material in materials)
 
     # 正向线仅支撑引文为 pass；补充引文与反向线（即便引擎列为支撑）一律 fail。
-    assert by_id["m-ch-1-h-1-c-web"]["verdict"] == "pass"
-    assert by_id["m-ch-1-h-1-c-kb"]["verdict"] == "fail"
-    assert by_id["m-ch-1-h-1-c-doris"]["verdict"] == "fail"
+    assert by_kind["web"]["verdict"] == "pass"
+    assert by_kind["knowledge_base"]["verdict"] == "fail"
+    assert by_kind["structured_data"]["verdict"] == "fail"
 
     # url 与 source_kind 按引文回填：三通道类型标识一一对应，仅联网带链接。
-    assert by_id["m-ch-1-h-1-c-web"]["source_kind"] == "web"
-    assert by_id["m-ch-1-h-1-c-web"]["url"] == "https://example.com/a"
-    assert by_id["m-ch-1-h-1-c-kb"]["source_kind"] == "knowledge_base"
-    assert by_id["m-ch-1-h-1-c-kb"]["url"] is None
-    assert by_id["m-ch-1-h-1-c-doris"]["source_kind"] == "structured_data"
+    assert by_kind["web"]["source_kind"] == "web"
+    assert by_kind["web"]["url"] == "https://example.com/a"
+    assert by_kind["web"]["source_ref"]["url"] == "https://example.com/a"
+    assert by_kind["knowledge_base"]["source_kind"] == "knowledge_base"
+    assert by_kind["knowledge_base"]["url"] is None
+    assert by_kind["knowledge_base"]["source_ref"] == {
+        "chunk_id": "chunk-c-kb",
+        "content_fingerprint": "fp-c-kb",
+        "file_id": "file-c-kb",
+        "knowledge_id": "kb-c-kb",
+    }
+    assert by_kind["structured_data"]["source_kind"] == "structured_data"
+    assert by_kind["structured_data"]["source_ref"] == {
+        "content_fingerprint": "fp-c-doris",
+        "dataset_id": "dataset-c-doris",
+        "query_execution_id": "query-c-doris",
+        "scenario_key": "scenario-c-doris",
+    }
 
     # 其余字段：来源名、摘录与相关度分从引文记录携带。
-    assert by_id["m-ch-1-h-1-c-web"]["source"] == "来源（c-web）"
-    assert by_id["m-ch-1-h-1-c-web"]["excerpt"] == "摘录（c-web）"
-    assert by_id["m-ch-1-h-1-c-web"]["relevance_score"] == 0.8
+    assert by_kind["web"]["source"] == "来源（c-web）"
+    assert by_kind["web"]["excerpt"] == "摘录（c-web）"
+    assert by_kind["web"]["relevance_score"] == 0.8
 
 
 def test_同假说同引文正反两线并存时pass优先() -> None:
@@ -300,15 +392,15 @@ def test_引擎出参_正向补充引文降级为inconclusive落库() -> None:
             _citation("c-rev", "STRUCTURED_DATA", None),
         ],
     }
-    by_id = {
-        material["id"]: material
+    by_source = {
+        material["source"]: material
         for material in search_result_from_engine_output(output, TASK)["materials"]
     }
-    assert by_id["m-ch-1-h-1-c-pass"]["verdict"] == "pass"
-    assert by_id["m-ch-1-h-1-c-weak"]["verdict"] == "inconclusive"
-    assert by_id["m-ch-1-h-1-c-refute"]["verdict"] == "fail"
+    assert by_source["来源（c-pass）"]["verdict"] == "pass"
+    assert by_source["来源（c-weak）"]["verdict"] == "inconclusive"
+    assert by_source["来源（c-refute）"]["verdict"] == "fail"
     # 反向线即便被引擎列为补充也一律 fail（对假说的削弱证据不进写作池）。
-    assert by_id["m-ch-1-h-1-c-rev"]["verdict"] == "fail"
+    assert by_source["来源（c-rev）"]["verdict"] == "fail"
 
 
 def test_同假说同引文多线并存时取强者_pass优于inconclusive优于fail() -> None:

@@ -48,6 +48,7 @@ def test_检索打桩_每条假说恰好一条素材且字段合规() -> None:
         "source",
         "url",
         "source_kind",
+        "source_ref",
         "excerpt",
         "relevance_score",
         "verdict",
@@ -57,6 +58,7 @@ def test_检索打桩_每条假说恰好一条素材且字段合规() -> None:
         assert set(material.keys()) == expected_fields
         assert material["hypothesis_id"] == hypothesis_id
         assert material["verdict"] == "pass"
+        assert material["source_ref"] is not None
         assert isinstance(material["relevance_score"], float)
 
 

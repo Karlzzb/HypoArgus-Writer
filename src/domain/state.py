@@ -12,7 +12,7 @@ status 与 current_node_llm_config 使用 keep_last reducer：并行分支
 
 import enum
 import re
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel
 
@@ -91,6 +91,9 @@ class Material(BaseModel):
     source_kind: SourceKind = "web"
     """来源通道：驱动书目渲染的类型标识；
     默认 web 兼容旧 checkpoint（与既有条目全按联网来源渲染的行为一致）。"""
+    source_ref: dict[str, Any] | None = None
+    """真实来源定位：Material.id 只承担不透明引用身份，来源定位从本字段读取。
+    默认为 None 兼容旧 checkpoint 与旧 payload。"""
     excerpt: str
     relevance_score: float
     verdict: Literal["pass", "fail", "inconclusive"]

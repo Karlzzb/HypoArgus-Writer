@@ -232,7 +232,7 @@ Java 端                                  HypoArgus-Writer
     { "chapter_id": "ch1", "text": "正文……角标已重编号为 [1] 形式" }
   ],
   "bibliography": [
-    { "index": 1, "material_id": "m-ch1-p1-h1", "text": "[1] 来源[EB/OL]. url." }
+    { "index": 1, "material_id": "m_0123456789ABCDEFGHJKMNPQRS", "text": "[1] 来源[EB/OL]. url." }
   ]
 }
 ```
@@ -252,7 +252,7 @@ Java 端                                  HypoArgus-Writer
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `chapter_id` | string | 是 | 章节标识，不允许空白，进事件上下文与素材 id |
+| `chapter_id` | string | 是 | 章节标识，不允许空白，进事件上下文；素材 id 由稳定来源定位确定性派生，不再嵌入章节标识 |
 | `points` | array | 否 | 论点列表，缺省 `[]`；条目为 `{id, text}`（`id` 与 `text` 不允许空白），与假说一并聚合进查询构造 |
 | `hypotheses` | array | 是 | 假说列表，不允许为空；条目为 `{id, text, refute_condition}`，`id` 与 `text` 不允许空白，`refute_condition` 非空白时驱动反向检索 |
 | `genre` | string | 否 | 品类（检索范围提示），缺省 `""` |
@@ -278,11 +278,15 @@ Java 端                                  HypoArgus-Writer
 {
   "materials": [
     {
-      "id": "m-ch1-h1-cit-1",
+      "id": "m_0123456789ABCDEFGHJKMNPQRS",
       "hypothesis_id": "h1",
       "source": "来源名称",
       "url": "https://example.com/evidence",
       "source_kind": "web",
+      "source_ref": {
+        "url": "https://example.com/evidence",
+        "content_fingerprint": "..."
+      },
       "excerpt": "证据摘录……",
       "relevance_score": 0.9,
       "verdict": "pass"
@@ -294,9 +298,11 @@ Java 端                                  HypoArgus-Writer
 
 | 字段 | 说明 |
 |---|---|
+| `materials[].id` | 正文可见素材 id，形态固定为 `m_<26位CrockfordBase32>`；该值不包含章节 id、假说 id、上游 citation id 或来源定位明文 |
 | `materials[].hypothesis_id` | 素材回链的假说 id |
 | `materials[].url` | 来源链接；仅联网来源必带，知识库与结构化来源可为 `null` |
 | `materials[].source_kind` | 来源通道三值：`web` / `knowledge_base` / `structured_data` |
+| `materials[].source_ref` | 真实来源定位；web 通常含 `url`，知识库通常含 `knowledge_id`/`file_id`/`chunk_id`，结构化数据通常含 `scenario_key`/`dataset_id`/`query_execution_id` |
 | `materials[].verdict` | 佐证强度三值：`pass`（强支撑，可作量化断言依据）/ `inconclusive`（弱佐证，近似命中/补充，仅作背景提示）/ `fail`（反例或不可用，供筛选审计）。**消费方须按三值处理** |
 | `diagnostics` | 本次检索的诊断摘要（计数与耗时），与 `subagent_end` 事件携带的诊断同源；可含 `weak_evidence_count`（本章弱佐证条数）与 `pass_below_threshold`（pass 落库低于下限的薄弱章警告）|
 
@@ -323,7 +329,7 @@ Java 端                                  HypoArgus-Writer
 | `citation_warnings` | array[string] | 引文重试超限的未决警告，交人工裁决 |
 | `review_warnings` | array[string] | 篇级评审 warn 级提示（章间衔接/口径统一/跨章重复），不打回、不影响重试 |
 | `revision_ledger` | array | 修订台账（`RevisionRound`：`round_no`/`raw_feedback`/`directives`/`digest`），全量持久化 |
-| `citation_library` | array | 引文库素材全文（`Material`：`id`/`hypothesis_id`/`chapter_id`/`source`/`url`/`source_kind`/`excerpt`/`relevance_score`/`verdict`） |
+| `citation_library` | array | 引文库素材全文（`Material`：`id`/`hypothesis_id`/`chapter_id`/`source`/`url`/`source_kind`/`source_ref`/`excerpt`/`relevance_score`/`verdict`） |
 
 调用方在收到 SSE `review_pack_ready` 摘要或 `review_required` 路由信号后取此全文审阅；
 SSE 摘要丢了靠此 REST 对账重取。
@@ -370,12 +376,16 @@ mock 任务响应带 `mock: true`，真任务 `mock: false`（见 §2.11）。
       ],
       "materials": [
         {
-          "id": "m-ch1-h1-cit-1",
+          "id": "m_0123456789ABCDEFGHJKMNPQRS",
           "hypothesis_id": "h1",
           "chapter_id": "ch1",
           "source": "来源名称",
           "url": "https://example.com/evidence",
           "source_kind": "web",
+          "source_ref": {
+            "url": "https://example.com/evidence",
+            "content_fingerprint": "..."
+          },
           "excerpt": "证据摘录……",
           "relevance_score": 0.9,
           "verdict": "pass"
@@ -401,11 +411,12 @@ mock 任务响应带 `mock: true`，真任务 `mock: false`（见 §2.11）。
 | `chapters[].points` | array | `ArgumentPoint`：`{id, text, hypotheses:[...]}` |
 | `chapters[].points[].hypotheses` | array | `Hypothesis`：`{id, text, refute_condition, angle}` |
 | `chapters[].materials` | array | 该章已落库素材（按章分组）；未检索为空 |
-| `chapters[].materials[]` | object | `Material` 全字段：`id`/`hypothesis_id`/`chapter_id`/`source`/`url`/`source_kind`/`excerpt`/`relevance_score`/`verdict`；`url` 仅联网来源必带，余者可为 `null`；`source_kind` 三值 `web`/`knowledge_base`/`structured_data`；`verdict` 三值 `pass`/`inconclusive`/`fail` |
+| `chapters[].materials[]` | object | `Material` 全字段：`id`/`hypothesis_id`/`chapter_id`/`source`/`url`/`source_kind`/`source_ref`/`excerpt`/`relevance_score`/`verdict`；`id` 形态为 `m_<26位CrockfordBase32>`；`url` 仅联网来源必带，余者可为 `null`；真实定位见 `source_ref`；`source_kind` 三值 `web`/`knowledge_base`/`structured_data`；`verdict` 三值 `pass`/`inconclusive`/`fail` |
 | `chapters[].draft` | object\|null | `ChapterDraft`：`{chapter_id, text, summary, self_check}`；未写完为 `null`，调用方据此判本章是否已落正文 |
 | `chapters[].draft.self_check` | object | `SelfCheck`：`{citations_ok: bool, issues: [string]}` |
 
-说明：本接口 `chapters[].draft` 与 §3.1 `chapter_ready` 事件的 `draft` 载荷严格同构（`{chapter_id, text, summary, self_check}`），`chapters[].materials` 与 `materials_ready` 事件的 `materials` 同构（`Material` 全字段），章级骨架（`title`/`subsections`/`chapter_type`/`planned_summary`/`points`/`hypotheses`）与 `outline_ready` 事件的 `outline[]` 同构（仅章标识在事件载荷记为 `id`、本接口记为 `chapter_id`，同源 `ChapterSpec.id`）——SSE 丢帧后按 REST 取回同等内容。
+说明：本接口 `chapters[].draft` 与 §3.1 `chapter_ready` 事件的 `draft` 载荷严格同构（`{chapter_id, text, summary, self_check}`），`chapters[].materials` 与 `materials_ready` 事件的 `materials` 同构（`Material` 全字段），章级骨架（`title`/`subsections`/`chapter_type`/`planned_summary`/`points`/`hypotheses`）与 `outline_ready` 事件的 `outline[]` 同构（仅章标识在事件载荷记为 `id`、本接口记为 `chapter_id`，同源 `ChapterSpec.id`）。
+SSE 丢帧后按 REST 取回同等内容。
 `draft.text` 含原位素材 id 角标（未重编号）；重编号正文 + 配套书目走 §2.7 `GET /tasks/{id}/bibliography`。
 
 ### 2.11 mock 档与清理策略

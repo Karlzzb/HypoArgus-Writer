@@ -7,6 +7,7 @@
 
 from typing import Any
 
+from agents.search_agent import material_id_from_source_ref
 from nodes.reference_orchestrator import (
     REFERENCE_CHAPTER_ID_KEY,
     make_reference_orchestrator_node,
@@ -17,6 +18,7 @@ from domain.state import (
     ChapterSpec,
     Hypothesis,
     Material,
+    SourceKind,
     WorkflowStatus,
     WritingAgentState,
 )
@@ -44,19 +46,29 @@ def _hypothesis(hyp_id: str) -> Hypothesis:
     )
 
 
+def _source_ref(
+    hyp_id: str, url: str | None, source_kind: SourceKind
+) -> dict[str, str]:
+    if source_kind == "web":
+        return {"url": url or f"https://example.com/{hyp_id}"}
+    return {"knowledge_id": "kb-test", "file_id": f"file-{hyp_id}", "chunk_id": hyp_id}
+
+
 def _material(
-    mat_id: str,
     hyp_id: str,
     verdict: str = "pass",
     url: str | None = None,
-    source_kind: str = "knowledge_base",
+    source_kind: SourceKind = "knowledge_base",
 ) -> dict[str, Any]:
+    source_ref = _source_ref(hyp_id, url, source_kind)
+    mat_id = material_id_from_source_ref(source_kind, source_ref)
     return {
         "id": mat_id,
         "hypothesis_id": hyp_id,
         "source": f"来源 {mat_id}",
         "url": url,
         "source_kind": source_kind,
+        "source_ref": source_ref,
         "excerpt": f"摘录 {mat_id}",
         "relevance_score": 0.8,
         "verdict": verdict,
@@ -109,13 +121,12 @@ def _make_adapter() -> 假检索适配器:
     return 假检索适配器(
         {
             "ch1": [
-                _material("m-ch1-p1-h1", "ch1-p1-h1"),
-                _material("m-ch1-p1-h2", "ch1-p1-h2", verdict="fail"),
-                _material("m-ch1-p2-h1", "ch1-p2-h1"),
+                _material("ch1-p1-h1"),
+                _material("ch1-p1-h2", verdict="fail"),
+                _material("ch1-p2-h1"),
             ],
             "ch3": [
                 _material(
-                    "m-ch3-p1-h1",
                     "ch3-p1-h1",
                     url="https://example.com/ch3",
                     source_kind="web",
@@ -126,12 +137,15 @@ def _make_adapter() -> 假检索适配器:
 
 
 def _ch1_library_material() -> Material:
+    source_ref = _source_ref("ch1-p1-h1", None, "knowledge_base")
+    mat_id = material_id_from_source_ref("knowledge_base", source_ref)
     return Material(
-        id="m-ch1-p1-h1",
+        id=mat_id,
         hypothesis_id="ch1-p1-h1",
         chapter_id="ch1",
-        source="来源 m-ch1-p1-h1",
-        excerpt="摘录 m-ch1-p1-h1",
+        source=f"来源 {mat_id}",
+        source_ref=source_ref,
+        excerpt=f"摘录 {mat_id}",
         relevance_score=0.8,
         verdict="pass",
     )
@@ -220,30 +234,33 @@ def test_单章分支素材入库回链假说与章节且fail素材保留():
     updates = [node(payload) for payload in payloads]
 
     # 每个分支只回写目标章素材，跨分支合并交给 citation_library reducer。
-    assert [material.id for material in updates[0]["citation_library"]] == [
-        "m-ch1-p1-h1",
-        "m-ch1-p1-h2",
-        "m-ch1-p2-h1",
+    assert [material.hypothesis_id for material in updates[0]["citation_library"]] == [
+        "ch1-p1-h1",
+        "ch1-p1-h2",
+        "ch1-p2-h1",
     ]
-    assert [material.id for material in updates[1]["citation_library"]] == [
-        "m-ch3-p1-h1"
+    assert [material.hypothesis_id for material in updates[1]["citation_library"]] == [
+        "ch3-p1-h1"
     ]
     library = [
         material for update in updates for material in update["citation_library"]
     ]
-    by_material_id = {material.id: material for material in library}
-    assert "m-ch1-p1-h2" in by_material_id, "fail 素材也必须入库供后续环节筛选"
+    by_hypothesis_id = {material.hypothesis_id: material for material in library}
+    assert "ch1-p1-h2" in by_hypothesis_id, "fail 素材也必须入库供后续环节筛选"
     for material in library:
-        assert material.id == f"m-{material.hypothesis_id}"
+        assert material.id.startswith("m_")
+        assert len(material.id) == 28
+        assert material.hypothesis_id not in material.id
         assert material.chapter_id == material.hypothesis_id.split("-")[0]
+        assert material.source_ref is not None
     # url 与 source_kind 从检索结果透传入库，不再硬编码。
-    assert by_material_id["m-ch3-p1-h1"].url == "https://example.com/ch3"
-    assert by_material_id["m-ch3-p1-h1"].source_kind == "web"
-    assert by_material_id["m-ch1-p1-h1"].url is None
-    assert by_material_id["m-ch1-p1-h1"].source_kind == "knowledge_base"
-    verdicts = {material.id: material.verdict for material in library}
-    assert verdicts["m-ch1-p1-h2"] == "fail"
-    assert verdicts["m-ch1-p1-h1"] == "pass"
+    assert by_hypothesis_id["ch3-p1-h1"].url == "https://example.com/ch3"
+    assert by_hypothesis_id["ch3-p1-h1"].source_kind == "web"
+    assert by_hypothesis_id["ch1-p1-h1"].url is None
+    assert by_hypothesis_id["ch1-p1-h1"].source_kind == "knowledge_base"
+    verdicts = {material.hypothesis_id: material.verdict for material in library}
+    assert verdicts["ch1-p1-h2"] == "fail"
+    assert verdicts["ch1-p1-h1"] == "pass"
 
 
 def test_existing_materials_digest只反映既有引文库():

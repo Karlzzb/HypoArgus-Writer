@@ -44,6 +44,7 @@ def _sample_objects() -> list[object]:
             source="来源",
             url=None,
             source_kind="knowledge_base",
+            source_ref={"knowledge_id": "kb1", "file_id": "file1", "chunk_id": "c1"},
             excerpt="摘录",
             relevance_score=0.9,
             verdict="pass",
@@ -111,6 +112,24 @@ def test_注册清单覆盖domain_state全部模型类型() -> None:
         WorkflowStatus,
     ):
         assert expected in registered, f"{expected.__name__} 未注册进检查点允许清单"
+
+
+def test_旧checkpoint素材缺少source_ref时仍可反序列化() -> None:
+    material = Material.model_validate(
+        {
+            "id": "m-legacy",
+            "hypothesis_id": "ch1-p1-h1",
+            "chapter_id": "ch1",
+            "source": "旧来源",
+            "url": "https://example.com/legacy",
+            "source_kind": "web",
+            "excerpt": "旧摘录",
+            "relevance_score": 0.8,
+            "verdict": "pass",
+        }
+    )
+
+    assert material.source_ref is None
 
 
 def test_注册后的往返不再触发未注册类型告警(caplog) -> None:

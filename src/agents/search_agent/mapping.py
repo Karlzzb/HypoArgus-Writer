@@ -4,10 +4,12 @@
 把整章假说列表映射为引擎的正向检索项（假说本文）与反向检索项
 （refute_condition 驱动，关系固定为 oppose），
 把引擎的逐项证据裁决与引文记录映射为逐条回链假说 ID 的素材条目
-（回填 url 与 source_kind，裁决折算为 pass/fail）。
+（回填 source_ref、url 与 source_kind，裁决折算为 pass/fail）。
 全部为纯函数且只操作 dict，不导入引擎实现，离线测试无需引擎依赖。
 """
 
+import hashlib
+import json
 from typing import Any, Literal
 
 from agents.contracts import MaterialPayload, SearchResult, SourceKind
@@ -24,6 +26,97 @@ _SOURCE_KIND_BY_TYPE: dict[str, SourceKind] = {
     "STRUCTURED_DATA": "structured_data",
 }
 """引擎引文来源类型 → 契约三通道标识：两侧恰好三值一一对应。"""
+
+_CROCKFORD_BASE32_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+"""不透明 Material ID 使用 Crockford Base32，避开 I/L/O/U 易混字符。"""
+
+
+def _compact_source_ref(value: dict[str, Any]) -> dict[str, Any]:
+    """递归剔除 None / 空容器，保证同一语义输入有唯一 JSON 表示。"""
+    compacted: dict[str, Any] = {}
+    for key, item in sorted(value.items()):
+        if isinstance(item, dict):
+            nested = _compact_source_ref(item)
+            if nested:
+                compacted[key] = nested
+        elif item not in (None, "", [], {}):
+            compacted[key] = item
+    return compacted
+
+
+def _crockford_base32_130_bits(payload: bytes) -> str:
+    """把 SHA-256 摘要的高 130 bit 编为固定 26 位 Crockford Base32。"""
+    value = int.from_bytes(hashlib.sha256(payload).digest(), "big") >> (256 - 130)
+    chars: list[str] = []
+    for shift in range(125, -1, -5):
+        chars.append(_CROCKFORD_BASE32_ALPHABET[(value >> shift) & 0b11111])
+    return "".join(chars)
+
+
+def material_id_from_source_ref(source_kind: SourceKind, source_ref: dict[str, Any]) -> str:
+    """由稳定来源定位确定性派生正文可见 Material ID。
+
+    输出形态固定为 ``m_<26位CrockfordBase32>``。输入 JSON 排序并剔除空值，
+    因而不受 dict 构造顺序影响；原始章节、假说、citation 或 locator 文本只进入
+    哈希前镜像，不出现在正文可见 id 中。
+    """
+    identity = {
+        "source_kind": source_kind,
+        "source_ref": _compact_source_ref(source_ref),
+    }
+    payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"m_{_crockford_base32_130_bits(payload.encode())}"
+
+
+def _source_ref_from_citation(
+    source_kind: SourceKind, citation: dict[str, Any]
+) -> dict[str, Any]:
+    """从引擎公开 CitationRecord 字段构造真实来源定位。
+
+    简化/旧记录可能缺少知识库或结构化定位字段；此时落到可复现的公开记录摘要，
+    只作为兼容性身份材料，真实来源仍优先来自 url / knowledge / dataset 字段。
+    """
+    provenance = citation.get("provenance") or {}
+    if source_kind == "web":
+        source_ref = {
+            "url": citation.get("url"),
+            "content_fingerprint": provenance.get("content_fingerprint"),
+            "source_evidence_fingerprint": provenance.get(
+                "source_evidence_fingerprint"
+            ),
+        }
+    elif source_kind == "knowledge_base":
+        source_ref = {
+            "knowledge_id": citation.get("knowledge_id"),
+            "file_id": citation.get("file_id"),
+            "chunk_id": citation.get("chunk_id"),
+            "page": citation.get("page"),
+            "content_fingerprint": provenance.get("content_fingerprint"),
+            "source_evidence_fingerprint": provenance.get(
+                "source_evidence_fingerprint"
+            ),
+        }
+    else:
+        source_ref = {
+            "scenario_key": provenance.get("scenario_key"),
+            "dataset_id": provenance.get("dataset_id"),
+            "query_execution_id": provenance.get("query_execution_id"),
+            "content_fingerprint": provenance.get("content_fingerprint"),
+            "source_evidence_fingerprint": provenance.get(
+                "source_evidence_fingerprint"
+            ),
+        }
+    compacted = _compact_source_ref(source_ref)
+    if compacted:
+        return compacted
+    fallback = {
+        "source_name": citation.get("source_name"),
+        "title": citation.get("title"),
+        "summary_sha256": hashlib.sha256(
+            str(citation.get("summary", "")).encode()
+        ).hexdigest(),
+    }
+    return _compact_source_ref(fallback)
 
 
 def forward_item_id(hypothesis_id: str) -> str:
@@ -160,14 +253,16 @@ def search_result_from_engine_output(
                 _VERDICT_RANK[verdict] <= _VERDICT_RANK[existing["verdict"]]
             ):
                 continue
+            source_ref = _source_ref_from_citation(source_kind, citation)
             picked[key] = MaterialPayload(
-                id=f"m-{chapter_id}-{hypothesis_id}-{citation_id}",
+                id=material_id_from_source_ref(source_kind, source_ref),
                 hypothesis_id=hypothesis_id,
                 source=citation.get("source_name")
                 or citation.get("title")
                 or "未知来源",
                 url=citation.get("url"),
                 source_kind=source_kind,
+                source_ref=source_ref,
                 excerpt=citation["summary"],
                 relevance_score=float(citation["judgment"]["confidence"]),
                 verdict=verdict,

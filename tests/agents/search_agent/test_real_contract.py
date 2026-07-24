@@ -35,12 +35,14 @@ def test_真实现_素材字段合规且逐条回链假说() -> None:
             "source",
             "url",
             "source_kind",
+            "source_ref",
             "excerpt",
             "relevance_score",
             "verdict",
         }
         assert material["verdict"] in ("pass", "fail")
         assert material["source_kind"] in ("web", "knowledge_base", "structured_data")
+        assert material["source_ref"] is not None
 
     # 每条假说至少一条 pass 素材（正向线），非空反驳条件另有反向 fail 素材。
     pass_linked = {

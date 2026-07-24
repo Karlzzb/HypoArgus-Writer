@@ -13,8 +13,8 @@ BASELINE_PATH = REPO_ROOT / "scripts" / "demo_task.baseline.json"
 
 EXPECTED_TASK = {
     "user_intent": (
-        "按「人才培养方案总结（汇报）模版」，为智能网联汽车技术专业"
-        "（460704）2025 级高职专科人才培养方案撰写一份评审汇报用的总结"
+        "2026年通讯工程专业，写一篇人才培养和专业动态调整的分析文档，"
+        "所有论证要有数据和引用支撑"
     ),
     "user_identity": "高职院校教务处教师",
     "session_id": "demo-session",
