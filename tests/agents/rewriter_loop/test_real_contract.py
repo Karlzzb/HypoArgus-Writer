@@ -15,7 +15,7 @@ from typing import Any
 
 from agents.rewriter_loop import make_rewriter_loop
 from llm.llm_client import FakeLLM
-from tests.llm_response_plans import (
+from service.llm_response_plans import (
     AUDIT_EMPTY_RESPONSE,
     joined_prompt,
     writer_envelope,

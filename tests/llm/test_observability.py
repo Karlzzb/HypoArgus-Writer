@@ -19,7 +19,7 @@ from graph import build_graph, checkpoint_serializer
 from llm.llm_client import FakeLLM, OpenAICompatibleLLM
 from llm.llm_config import LLMConfig
 from domain.state import initial_state
-from tests.llm_response_plans import FIRST_PASS_RESPONSES, FRAMEWORK_KEYED_RESPONSES
+from service.llm_response_plans import FIRST_PASS_RESPONSES, FRAMEWORK_KEYED_RESPONSES
 
 STUB_MODEL = "stub-observability-model"
 STUB_COMPLETION = "插桩应答"

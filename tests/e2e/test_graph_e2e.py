@@ -34,7 +34,7 @@ from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
 from llm.llm_config import RUNTIME_UNITS
 from domain.state import WorkflowStatus, initial_state
-from tests.llm_response_plans import (
+from service.llm_response_plans import (
     DOCUMENT_REVIEW_PASS,
     FIRST_PASS_LLM_CALLS,
     FIRST_PASS_RESPONSES,

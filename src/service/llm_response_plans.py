@@ -1,8 +1,9 @@
-"""FakeLLM 响应编排计划：端到端测试共用的确定性应答序列。
+"""FakeLLM 响应编排计划：mock 装配档与端到端测试共用的确定性应答序列。
 
-test_graph_e2e / test_graph_event_stream / test_api_e2e 与
-tests/agents/rewriter_loop/test_real_contract 共用，
-避免同一份编排与信封拼装在多个测试文件里漂移。
+生产 mock 档（``service.mock_scenarios``）与 test_graph_e2e /
+test_graph_event_stream / test_api_e2e、tests/agents/rewriter_loop 等
+测试共用，避免同一份编排与信封拼装在多处漂移。因 mock 档在服务运行时
+装配，本模块必须位于 ``src/service`` 内（部署环境没有 ``tests`` 包）。
 
 framework 的假说生成按章节并发，调用顺序不确定，
 假说应答放在 FRAMEWORK_KEYED_RESPONSES 里按论点提示词片段键控分派；

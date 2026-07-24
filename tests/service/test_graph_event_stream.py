@@ -22,7 +22,7 @@ from domain.state import WorkflowStatus, initial_state
 from agents.chapter_reviewer import make_stub_chapter_reviewer
 from agents.rewriter_loop import make_stub_rewriter_loop
 from agents.search_agent import make_stub_search_agent
-from tests.llm_response_plans import FIRST_PASS_RESPONSES, FRAMEWORK_KEYED_RESPONSES
+from service.llm_response_plans import FIRST_PASS_RESPONSES, FRAMEWORK_KEYED_RESPONSES
 
 
 def _make_emitter(

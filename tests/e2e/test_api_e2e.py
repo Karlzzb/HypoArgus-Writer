@@ -42,7 +42,7 @@ from service.mock_scenarios import DEFAULT_SCENARIO, DEGRADATION_SCENARIO, MockS
 from graph import build_graph, checkpoint_serializer, postgres_checkpointer
 from llm.llm_client import FakeLLM
 from domain.state import ChapterDraft, SelfCheck, initial_state
-from tests.llm_response_plans import (
+from service.llm_response_plans import (
     DOCUMENT_REVIEW_PASS,
     FIRST_PASS_RESPONSES,
     FRAMEWORK_KEYED_RESPONSES,

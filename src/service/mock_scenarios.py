@@ -2,13 +2,13 @@
 
 供 ``service.mock_stack.build_mock_graph`` 装配 mock 栈，驱动真分支
 （多章大纲解析 / 角标正文 / 篇级终审 warn / 退化重试）。应答序列直接
-复用 ``tests/llm_response_plans`` 的共用编排，不在本模块重写，避免口径
+复用 ``service.llm_response_plans`` 的共用编排，不在本模块重写，避免口径
 漂移。新增场景在此单点登记，装配档只认 ``MockScenario`` 一个类型。
 """
 
 from dataclasses import dataclass
 
-from tests.llm_response_plans import (
+from service.llm_response_plans import (
     FRAMEWORK_KEYED_RESPONSES,
     FRAMEWORK_RESPONSES,
     SEMANTIC_PASS,

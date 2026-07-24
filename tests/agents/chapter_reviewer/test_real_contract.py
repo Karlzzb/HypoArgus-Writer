@@ -15,7 +15,7 @@ from typing import Any
 
 from agents.chapter_reviewer import make_chapter_reviewer
 from llm.llm_client import FakeLLM
-from tests.llm_response_plans import joined_prompt
+from service.llm_response_plans import joined_prompt
 
 
 def _review_envelope(issues: list[dict[str, str]], conflicts: list[dict[str, str]]) -> str:
