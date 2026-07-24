@@ -4,8 +4,8 @@
 → chapter_drafter（首写并行扇出）→ document_reviewer（篇级终审门禁）
 → human_review_gate（人工中断点与迭代路由）。
 检索阶段：framework_orchestrator 后的条件边为每个待检索章节各发一个 Send，
-reference_orchestrator 各分支先把本章检索封装为可独立持久化的 Functional API task，
-成功后在同一分支立即首写；因此快章不受慢章检索阻塞，首写失败恢复时也不重跑检索。
+reference_orchestrator 各分支完成本章检索并落 checkpoint 后，经条件 Send 进入
+管线首写节点；首写失败恢复时不重跑已完成检索。
 素材和产物经 reducer 汇入主状态，全部章节完成后才汇合进入终审。
 首写阶段：无待检索章节时由 chapter_drafter 各分支并行写章（前文承接用规划摘要链），
 产物经 chapter_drafts 合并 reducer 汇入主状态、按超步落 checkpoint，
@@ -46,10 +46,15 @@ from agents.search_agent import make_search_agent
 from assembly.assembler_config import AssemblerConfig
 from domain import state as domain_state
 from domain.state import WorkflowStatus, WritingAgentState
-from domain.units import MAIN_NODES
+from domain.units import MAIN_NODES, PIPELINE_CHAPTER_DRAFTER_NODE
 from llm import observability
 from llm.llm_client import LLMFactory, default_llm_factory
-from nodes.chapter_drafter import draft_send_payloads, make_chapter_drafter_node
+from nodes.chapter_drafter import (
+    DRAFT_CHAPTER_ID_KEY,
+    draft_send_payload_for_chapter,
+    draft_send_payloads,
+    make_chapter_drafter_node,
+)
 from nodes.document_reviewer import ReviewerConfig, make_document_reviewer_node
 from nodes.framework_orchestrator import make_framework_orchestrator_node
 from nodes.human_review_gate import make_human_review_gate_node
@@ -115,6 +120,23 @@ def route_after_framework_orchestrator(state: WritingAgentState) -> str | list[S
     return [Send("reference_orchestrator", payload) for payload in payloads]
 
 
+def route_after_reference_orchestrator(state: WritingAgentState) -> list[Send]:
+    """单章检索完成后，显式把该分支 payload 发送给管线首写节点。
+
+    不能用静态边直连首写节点：并行检索分支进入下一超步前会先经 reducer
+    合并，运行态目标章会被折叠成最后到达值。
+    """
+    chapter_id = state.get(DRAFT_CHAPTER_ID_KEY)
+    if not isinstance(chapter_id, str):
+        return []
+    return [
+        Send(
+            PIPELINE_CHAPTER_DRAFTER_NODE,
+            draft_send_payload_for_chapter(state, chapter_id),
+        )
+    ]
+
+
 def reference_join(state: WritingAgentState) -> None:
     """检索并行分支的汇合点：无操作节点，不写任何状态。
 
@@ -134,8 +156,16 @@ def revision_join(state: WritingAgentState) -> None:
 
 
 def route_after_reference_join(state: WritingAgentState) -> str:
-    """按章检索—首写流水线汇合后进入篇级终审。"""
-    return "document_reviewer"
+    """按章检索—首写流水线汇合后进入篇级终审。
+
+    LangGraph 的静态汇合边按分支到达触发，不是全局 barrier；快章先到时
+    先结束该分支，只有已完成全部章节草稿的分支进入篇级终审。
+    """
+    drafted = {draft.chapter_id for draft in state.get("chapter_drafts", [])}
+    expected = {chapter.id for chapter in state.get("outline", [])}
+    if expected and expected <= drafted:
+        return "document_reviewer"
+    return END
 
 
 def route_after_writing_orchestrator(state: WritingAgentState) -> str | list[Send]:
@@ -232,7 +262,7 @@ def build_graph(
             llm_factory, assembler_config=assembler_config
         ),
         "reference_orchestrator": make_reference_orchestrator_node(
-            effective_search_agent, assembler_config, chapter_drafter_node
+            effective_search_agent, assembler_config
         ),
         "chapter_drafter": raw_chapter_drafter_node,
         "writing_orchestrator": make_writing_orchestrator_node(
@@ -256,6 +286,10 @@ def build_graph(
     builder = StateGraph(WritingAgentState)
     for name, node_fn in node_functions.items():
         builder.add_node(name, observability.traced_node(name, node_fn))
+    builder.add_node(
+        PIPELINE_CHAPTER_DRAFTER_NODE,
+        observability.traced_node("chapter_drafter", raw_chapter_drafter_node),
+    )
 
     builder.add_edge(START, "framework_orchestrator")
     builder.add_conditional_edges(
@@ -264,11 +298,16 @@ def build_graph(
         ["reference_orchestrator", "chapter_drafter", "document_reviewer"],
     )
     builder.add_node("reference_join", reference_join)
-    builder.add_edge("reference_orchestrator", "reference_join")
+    builder.add_conditional_edges(
+        "reference_orchestrator",
+        route_after_reference_orchestrator,
+        [PIPELINE_CHAPTER_DRAFTER_NODE],
+    )
+    builder.add_edge(PIPELINE_CHAPTER_DRAFTER_NODE, "reference_join")
     builder.add_conditional_edges(
         "reference_join",
         route_after_reference_join,
-        ["document_reviewer"],
+        ["document_reviewer", END],
     )
     builder.add_edge("chapter_drafter", "document_reviewer")
     builder.add_node("revision_join", revision_join)

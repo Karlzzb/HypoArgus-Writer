@@ -110,7 +110,12 @@ def test_载荷构造_已写章节不再扇出():
 
 
 def test_检索流水线汇合后直接进入终审():
-    assert route_after_reference_join(_state()) == "document_reviewer"
+    state = _state()
+    state["chapter_drafts"] = [
+        ChapterDraft(chapter_id="ch1", text="第一章正文", summary="第一章摘要"),
+        ChapterDraft(chapter_id="ch2", text="第二章正文", summary="第二章摘要"),
+    ]
+    assert route_after_reference_join(state) == "document_reviewer"
 
 
 def test_节点单分支_任务包承接规划摘要链且只回写reducer字段():

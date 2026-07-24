@@ -43,7 +43,7 @@ from domain.bibliography import render_article
 from domain.env_config import read_positive_int
 from service.event_broker import EventHub
 from service.event_envelope import new_envelope
-from domain.units import MAIN_NODES
+from domain.units import GRAPH_UPDATE_NODES, graph_node_unit
 from service.graph_event_stream import GraphRunEmitter
 from domain.state import WorkflowStatus, initial_state, status_text
 from domain.events import EventHook
@@ -819,13 +819,14 @@ class TaskManager:
         for node, update in self._main_updates(chunk):
             if "status" not in update:
                 continue
+            unit = graph_node_unit(node)
             self._publish_business(
                 entry,
                 "status",
                 {
                     "status": status_text(update["status"], WorkflowStatus.IDLE.value),
                     "iteration_round": update.get("iteration_round", 0),
-                    "node": node,
+                    "node": unit,
                 },
             )
 
@@ -841,7 +842,7 @@ class TaskManager:
         if not isinstance(chunk, dict):
             return
         for node, update in chunk.items():
-            if node in MAIN_NODES and isinstance(update, dict):
+            if node in GRAPH_UPDATE_NODES and isinstance(update, dict):
                 yield node, update
 
     def _publish_product_events(

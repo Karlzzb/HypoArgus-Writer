@@ -40,8 +40,6 @@ DRAFT_CHAPTER_ID_KEY: Final = "draft_chapter_id"
 class DraftSendPayload(WritingAgentState):
     """Send 载荷类型：主状态切片 + 目标章 id（任务态专用键）。"""
 
-    draft_chapter_id: str
-
 
 class ChapterDrafterNode(Protocol):
     """节点函数类型：入参是 Send 载荷（任务态），返回主状态的部分更新。"""
@@ -103,6 +101,8 @@ def make_chapter_drafter_node(
         if config is None:
             config = load_assembler_config()
         chapter_id = state[DRAFT_CHAPTER_ID_KEY]
+        if not isinstance(chapter_id, str):
+            raise ValueError("首写分支缺少目标章 id")
         chapter = chapter_by_id(state, chapter_id)
         context = assemble(
             state, "chapter_drafter", config=config, chapter_id=chapter_id

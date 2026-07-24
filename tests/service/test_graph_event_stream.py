@@ -520,11 +520,13 @@ def test_真图集成_node链路闭合与branch_taken指向中断点():
     assert set(node_start_ids) == {
         "framework_orchestrator",
         "reference_orchestrator",
+        "chapter_drafter",
         "document_reviewer",
         "human_review_gate",
     }
-    # 2 章并行检索分支各恰好一个任务，首写在同一分支内完成。
+    # 2 章并行检索分支与管线首写分支各恰好一个任务。
     assert len(node_start_ids["reference_orchestrator"]) == 2
+    assert len(node_start_ids["chapter_drafter"]) == 2
     for event in events:
         if event.type == "node_start":
             assert event.parent_id == root_id
@@ -557,37 +559,30 @@ def test_真图集成_子智能体事件成对且挂当前节点():
         "chapter_reviewer",
     }
 
-    # 按章流水线下每章的检索/首写子智能体精确挂到同一检索分支的 node_start
+    # 按章流水线下每章子智能体精确挂到所属节点分支的 node_start
     #（按 node_start 载荷里的 chapter_id 配对，跨线程到达顺序无关）。
     branch_start_by_key = {
         (event.unit, event.payload["chapter_id"]): event.event_id
         for event in events
         if event.type == "node_start"
-            and event.unit == "reference_orchestrator"
+            and event.unit in {"reference_orchestrator", "chapter_drafter"}
     }
     for event in starts:
         if event.unit == "search_agent":
             assert event.parent_id == branch_start_by_key[
                 ("reference_orchestrator", event.payload["chapter_id"])
             ]
-        elif event.unit == "rewriter_loop":
-            assert event.parent_id == branch_start_by_key[
-                ("reference_orchestrator", event.payload["chapter_id"])
-            ]
-
-    # 章级评审在首写节点内串行发起（write→review 同超步），不带独立分支键，
-    # 故按「当前执行中节点，未知退根事件」挂父：并行扇出下当前节点判定有竞态，
-    # 父链要么落在某个 reference_orchestrator 的 node_start，要么退回本次根事件。
     root_id = events[0].event_id
-    reference_start_ids = {
+    branch_node_start_ids = {
         event.event_id
         for event in events
-        if event.type == "node_start" and event.unit == "reference_orchestrator"
+        if event.type == "node_start"
+        and event.unit in {"reference_orchestrator", "chapter_drafter"}
     }
-    reviewer_parents = reference_start_ids | {root_id}
+    writer_parents = branch_node_start_ids | {root_id}
     for event in starts:
-        if event.unit == "chapter_reviewer":
-            assert event.parent_id in reviewer_parents
+        if event.unit in {"rewriter_loop", "chapter_reviewer"}:
+            assert event.parent_id in writer_parents
 
     # subagent_end 挂对应的 subagent_start：按单元名配对顺序逐一对应。
     start_ids = {event.event_id for event in starts}

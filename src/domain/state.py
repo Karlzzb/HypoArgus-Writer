@@ -291,6 +291,8 @@ class WritingAgentState(TypedDict, total=False):
     """本轮待执行的修订指令；全部 Send 分支汇合并经终审后统一清空。"""
     directive_chapter_id: Annotated[str | None, keep_last]
     """人工修订 Send 分支的运行态目标章；汇合后的终审节点会清空。"""
+    draft_chapter_id: Annotated[str | None, keep_last]
+    """首写 Send / 检索管线分支的运行态目标章；仅分支节点消费。"""
     revised_chapter_ids: Annotated[list[str], merge_revised_ids]
     """本轮被修改章节；并行回退扇出各分支只回写本章节 id，经合并 reducer 并集汇入；
     document_reviewer 据此做增量核查，核查完毕后写空列表清空（见 reducer）。"""

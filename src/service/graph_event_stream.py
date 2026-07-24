@@ -30,7 +30,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from service.event_envelope import EventEnvelope, new_envelope
-from domain.units import MAIN_NODES
+from domain.units import GRAPH_UPDATE_NODES, PIPELINE_CHAPTER_DRAFTER_NODE, graph_node_unit
 from domain.state import WorkflowStatus, status_text
 from domain.events import (
     CONTENT_DELTA,
@@ -390,8 +390,9 @@ class GraphRunEmitter:
         if not isinstance(payload, dict):
             return
         node = payload.get("name")
-        if node not in MAIN_NODES:
+        if not isinstance(node, str) or node not in GRAPH_UPDATE_NODES:
             return
+        unit = graph_node_unit(node)
         task_id = payload.get("id")
         if chunk_type == "task":
             chapter_id = self._task_chapter_id(payload)
@@ -399,23 +400,23 @@ class GraphRunEmitter:
                 # 并行分支（检索或首写）：经（节点, 章节）键控入口取（或代发）
                 # node_start，子智能体事件先到时已代发过，这里复用不重复发。
                 self._ensure_chapter_node_start(
-                    node,
+                    unit,
                     chapter_id,
                     step=chunk.get("step"),
                     task_id=task_id if isinstance(task_id, str) else None,
                 )
-                self._current_node = node
+                self._current_node = unit
                 return
             envelope = self._emit(
                 type="node_start",
-                unit=node,
+                unit=unit,
                 payload={"step": chunk.get("step")},
                 parent_id=self._root_id,
             )
-            self._node_start_ids[node] = envelope.event_id
+            self._node_start_ids[unit] = envelope.event_id
             if isinstance(task_id, str):
                 self._task_start_ids[task_id] = envelope.event_id
-            self._current_node = node
+            self._current_node = unit
         elif chunk_type == "task_result":
             end_payload: dict[str, Any] = {"step": chunk.get("step")}
             chapter_id = self._task_chapter_id(payload)
@@ -432,11 +433,11 @@ class GraphRunEmitter:
                 parent_id = self._task_start_ids.pop(task_id, None)
             self._emit(
                 type="node_end",
-                unit=node,
+                unit=unit,
                 payload=end_payload,
-                parent_id=parent_id or self._parent_for(node),
+                parent_id=parent_id or self._parent_for(unit),
             )
-            if self._current_node == node:
+            if self._current_node == unit:
                 self._current_node = None
 
     @staticmethod
@@ -457,8 +458,8 @@ class GraphRunEmitter:
         for key, value in chunk.items():
             if key == "__interrupt__":
                 self._handle_interrupt(value)
-            elif key in MAIN_NODES and isinstance(value, dict):
-                self._handle_node_update(key, value)
+            elif key in GRAPH_UPDATE_NODES and isinstance(value, dict):
+                self._handle_node_update(graph_node_unit(key), value)
 
     def _handle_interrupt(self, value: Any) -> None:
         """中断块 → gate_blocked：载荷本身即元数据，原样入信封。"""
