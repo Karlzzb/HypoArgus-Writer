@@ -380,6 +380,8 @@ def make_document_reviewer_node(
                 citation_warnings=[],
                 review_warnings=review_warnings,
                 revised_chapter_ids=[],
+                pending_directives=[],
+                directive_chapter_id=None,
                 status=WorkflowStatus.AWAIT_USER_REVIEW,
                 current_node_llm_config=llm_config,
             )
@@ -406,6 +408,8 @@ def make_document_reviewer_node(
             citation_warnings=warnings,
             review_warnings=review_warnings,
             revised_chapter_ids=[],
+            pending_directives=[],
+            directive_chapter_id=None,
             status=(
                 WorkflowStatus.AWAIT_USER_REVIEW
                 if exhausted

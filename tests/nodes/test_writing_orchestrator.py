@@ -686,7 +686,7 @@ def test_判别函数_各模式与全部完成的返回值():
 
 
 def test_路由与判别函数一致():
-    """route_after_writing_orchestrator 未完成回自身、完成前进终审。"""
+    """直调路径按判别函数自环，人工修订按章节构造 Send。"""
     from graph import route_after_writing_orchestrator
 
     state = _make_state()
@@ -698,7 +698,10 @@ def test_路由与判别函数一致():
             target_chapter_id="ch1", type="rewrite_only", instruction="改一"
         )
     ]
-    assert route_after_writing_orchestrator(state) == "writing_orchestrator"
+    routed = route_after_writing_orchestrator(state)
+    assert isinstance(routed, list)
+    assert [send.node for send in routed] == ["writing_orchestrator"]
+    assert routed[0].arg["directive_chapter_id"] == "ch1"
 
 
 def test_防御兜底_无事可做时只推进状态机不调子智能体():

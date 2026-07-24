@@ -1,11 +1,10 @@
 """writing_orchestrator 主节点：图内自环、每超步只处理一章的纯调度逻辑。
 
 写作由 rewriter_loop 子智能体承担，补充佐证的增量检索由 search_agent 承担，
-本节点不调 LLM。每次节点调用（一个超步）只处理一章：由 next_writing_step
-从 State 纯数据推导下一步该做什么与目标章，处理完该章即把产物落 State 返回，
-条件边（见 graph.py 的 route_after_writing_orchestrator）据同一判别函数决定
-回到本节点写下一章还是前进终审。章级产物按超步自然落 checkpoint，
-崩溃重跑只损失进行中的一章（ADR-0001 约束 1）。
+本节点不调 LLM。人工修订与终审回退均按章节经 Send 并行扇出；每个分支只回写
+本章产物，合并 reducer 汇入后再前进终审。保留的直调路径一次只处理一章，供旧
+checkpoint 恢复与防御性兜底使用。章级产物按超步自然落 checkpoint，崩溃重跑只
+损失进行中的分支（ADR-0001 约束 1）。
 
 三种模式的单章选取（游标全部从既有字段推导，不新增游标字段）：
 
@@ -14,7 +13,7 @@
   （既有 id 去重、素材必须回链本章假说）；随后经 chapter_reviewer（mode=revise）
   把用户意见与规则违规装配成分区式修订说明，再调 rewriter_loop（mode=revise）
   恰一次改写，终态以确定性 re-lint 记录、不再二次重写（ADR-0007：评审前置、
-  消二次重写叠加）；执行完剔除该章全部指令。
+  消二次重写叠加）；各分支完成后在终审节点统一清空本轮指令。
 - 终审回退模式（citation_report 未通过且 failed_chapter_ids 中还有章
   未在本轮修复）：目标章 = 按大纲顺序第一个「不合格且未修复」的章，
   终审报告即评审结论，直接组装成分区式修订说明（error 级规则违规区）驱动
@@ -86,8 +85,9 @@ def next_writing_step(state: WritingAgentState) -> WritingStep | None:
     pending_directives = state.get("pending_directives", [])
     if pending_directives:
         grouped = _grouped_directives(pending_directives, outline)
+        revised = set(state.get("revised_chapter_ids", []))
         for chapter in outline:
-            if chapter.id in grouped:
+            if chapter.id in grouped and chapter.id not in revised:
                 return ("revise", chapter.id)
     report = state.get("citation_report")
     # 终审回退只在重试预算内的失败报告上触发：document_reviewer 写失败报告时
@@ -292,6 +292,50 @@ class RevisionSendPayload(WritingAgentState):
     """回退并行扇出的 Send 载荷：主状态切片 + 目标章 id（任务态专用键）。"""
 
     revision_chapter_id: str
+
+
+DIRECTIVE_CHAPTER_ID_KEY: Final = "directive_chapter_id"
+"""人工修订 Send 载荷中的目标章键名：仅在该分支任务态存在。"""
+
+
+DirectiveSendPayload = WritingAgentState
+"""人工修订并行扇出载荷：每个目标章只携带本章的合并指令。"""
+
+
+def directive_send_payloads(state: WritingAgentState) -> list[DirectiveSendPayload]:
+    """为尚未改写的人工修订目标章构造 Send 载荷。
+
+    同章全部指令保留原序并放入同一载荷，确保该章只评审和改写一次。
+    ``revised_chapter_ids`` 是本轮已完成章节的并行 reducer，既驱动终审的
+    增量核查，也使恢复时不重复发送已成功分支。分支不直接消费全局指令队列；
+    document_reviewer 在全部分支汇合后统一清空该队列，避免并发写同一字段。
+    """
+    outline = state.get("outline", [])
+    grouped = _grouped_directives(state.get("pending_directives", []), outline)
+    revised = set(state.get("revised_chapter_ids", []))
+    drafts = list(state.get("chapter_drafts", []))
+    payloads: list[DirectiveSendPayload] = []
+    for chapter in outline:
+        directives = grouped.get(chapter.id)
+        if not directives or chapter.id in revised:
+            continue
+        payloads.append(
+            WritingAgentState(
+                directive_chapter_id=chapter.id,
+                outline=outline,
+                chapter_drafts=drafts,
+                citation_library=[
+                    material
+                    for material in state.get("citation_library", [])
+                    if material.chapter_id == chapter.id
+                ],
+                pending_directives=directives,
+                doc_type=state.get("doc_type", ""),
+                doc_variant=state.get("doc_variant"),
+                genre=state.get("genre", ""),
+            )
+        )
+    return payloads
 
 
 def revision_send_payloads(state: WritingAgentState) -> list[RevisionSendPayload]:
@@ -530,6 +574,21 @@ def make_writing_orchestrator_node(
         if config is None:
             config = load_assembler_config()
         llm_config = {"unit": "writing_orchestrator"}
+        directive_chapter_id = state.get(DIRECTIVE_CHAPTER_ID_KEY)
+        if isinstance(directive_chapter_id, str):
+            # 人工修订的并行 Send 分支：载荷仅含目标章的全部指令，回写单元素
+            # 草稿和本章素材，由 reducer 与同超步兄弟分支安全合并。
+            new_draft, library = asyncio.run(
+                _run_directive_step(state, directive_chapter_id, config)
+            )
+            return WritingAgentState(
+                chapter_drafts=[new_draft],
+                citation_library=library,
+                directive_chapter_id=directive_chapter_id,
+                revised_chapter_ids=[directive_chapter_id],
+                status=WorkflowStatus.ARTICLE_WRITING,
+                current_node_llm_config=llm_config,
+            )
         revision_chapter_id = state.get(REVISION_CHAPTER_ID_KEY)
         if isinstance(revision_chapter_id, str):
             # 回退并行扇出分支：Send 载荷指定单章，只改写该章。回写单元素
