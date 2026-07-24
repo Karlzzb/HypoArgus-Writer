@@ -51,6 +51,7 @@ from service.llm_response_plans import (
     SEMANTIC_PASS,
     TRUNK_RESPONSES,
     WRITER_KEYED_RESPONSES,
+    writer_envelope,
 )
 from tests.e2e.test_graph_e2e import TEST_PG_DSN, _pg_reachable
 
@@ -1049,6 +1050,70 @@ def test_错误路径_未知任务404与非中断点提交409与非法入参422(
 
 
 # ---- 端到端主干验收（issue #7）：混合两类修订分支 + 引文门禁 + 书目渲染 ----
+
+
+def test_书目接口_忽略模型生成参考文献段():
+    async def main() -> None:
+        ch1_material_id = MATERIAL_ID_PATTERN.search(
+            WRITER_KEYED_RESPONSES["- 标题：第一章"][0]
+        )
+        assert ch1_material_id is not None
+        ch1_draft_with_references = writer_envelope(
+            "本专业面向智能制造领域培养高素质人才，课程体系对接行业标准。"
+            f"[{ch1_material_id.group(0)}]\n\n"
+            "## 参考文献：\n"
+            "- 模型编造来源。\n"
+            f"[{ch1_material_id.group(0)}] 模型生成的重复来源。",
+            "第一章完成培养定位与背景铺陈。",
+        )
+        keyed = {
+            **FRAMEWORK_KEYED_RESPONSES,
+            **WRITER_KEYED_RESPONSES,
+            "- 标题：第一章": [
+                ch1_draft_with_references,
+                WRITER_KEYED_RESPONSES["- 标题：第一章"][1],
+            ],
+        }
+        app = _make_app(
+            FIRST_PASS_RESPONSES,
+            keyed=keyed,
+            rewriter_stub=False,
+        )
+        async with _client(app) as client:
+            thread_id, _ = await _create_task(client, "sess-generated-references")
+            await _read_sse(
+                client,
+                f"/tasks/{thread_id}/stream",
+                _stop_on_review_count(1),
+                last_event_id=FROM_START,
+            )
+
+            response = await client.post(
+                f"/tasks/{thread_id}/review", json={"action": "finalize"}
+            )
+            assert response.status_code == 202
+            _, ended = await _read_sse(
+                client,
+                f"/tasks/{thread_id}/stream",
+                lambda frames: False,
+                last_event_id=FROM_START,
+            )
+            assert ended
+
+            response = await client.get(f"/tasks/{thread_id}/bibliography")
+            assert response.status_code == 200
+            rendered = response.json()
+            ch1_text = next(
+                c["text"] for c in rendered["chapters"] if c["chapter_id"] == "ch1"
+            )
+            assert "参考文献" not in ch1_text
+            assert "模型编造来源" not in ch1_text
+            assert "[m_" not in ch1_text
+            assert ch1_material_id.group(0) in {
+                entry["material_id"] for entry in rendered["bibliography"]
+            }
+
+    asyncio.run(main())
 
 
 @pytest.mark.parametrize(

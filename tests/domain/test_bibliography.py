@@ -99,3 +99,62 @@ def test_正文角标未落库时保留原样并不产生条目():
     rendered = render_article(drafts, LIBRARY, "markdown")
     assert rendered.chapters[0].text == "孤角标[mx]。"
     assert rendered.entries == []
+
+
+def test_数字展示编号不作为素材id生成书目条目():
+    library = [_material("1", "ch1", "https://example.com/numeric")]
+    drafts = [ChapterDraft(chapter_id="ch1", text="模型自行生成展示编号[1]。", summary="s")]
+
+    rendered = render_article(drafts, library, "gbt7714")
+
+    assert rendered.chapters[0].text == "模型自行生成展示编号[1]。"
+    assert rendered.entries == []
+
+
+def test_模型生成参考文献段不作为书目数据源():
+    drafts = [
+        ChapterDraft(
+            chapter_id="ch1",
+            text="正文没有引用。\n\n## 参考文献\n[1] 模型编造来源。\n[m1] 来源m1。",
+            summary="s",
+        )
+    ]
+
+    rendered = render_article(drafts, LIBRARY, "markdown")
+
+    assert rendered.chapters[0].text == "正文没有引用。"
+    assert rendered.entries == []
+
+
+def test_参考文献段内素材角标不影响正文首次引用顺序():
+    drafts = [
+        ChapterDraft(
+            chapter_id="ch1",
+            text="正文先引用[m2]。\n\n## References\n[m1] generated reference.",
+            summary="s",
+        ),
+        ChapterDraft(chapter_id="ch2", text="后文引用[m1]。", summary="s2"),
+    ]
+
+    rendered = render_article(drafts, LIBRARY, "markdown")
+
+    assert rendered.chapters[0].text == "正文先引用[1]。"
+    assert rendered.chapters[1].text == "后文引用[2]。"
+    assert [entry.material_id for entry in rendered.entries] == ["m2", "m1"]
+
+
+def test_普通references小节没有列表条目时不截断正文():
+    drafts = [
+        ChapterDraft(
+            chapter_id="ch1",
+            text="正文先引用[m1]。\n\n## References\nThis section describes naming.",
+            summary="s",
+        )
+    ]
+
+    rendered = render_article(drafts, LIBRARY, "markdown")
+
+    assert rendered.chapters[0].text == (
+        "正文先引用[1]。\n\n## References\nThis section describes naming."
+    )
+    assert [entry.material_id for entry in rendered.entries] == ["m1"]

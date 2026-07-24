@@ -7,6 +7,7 @@
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import re
 
 from domain.citation_reconciler import MARKER_PATTERN
 from domain.state import ChapterDraft, Material, SourceKind
@@ -57,6 +58,16 @@ _RENDERERS: dict[str, EntryRenderer] = {
 
 SUPPORTED_FORMATS: tuple[str, ...] = tuple(_RENDERERS)
 
+_REFERENCE_SECTION_HEADING_PATTERN = re.compile(
+    r"(?im)^\s{0,3}(?:#{1,6}\s*)?(?:参考文献|参考资料|references?)\s*[:：]?\s*$"
+)
+"""模型生成的章内参考文献段起始行。"""
+
+_REFERENCE_ENTRY_LEAD_PATTERN = re.compile(
+    r"^\s*(?:\[\d+\]|\[[A-Za-z0-9_\-]+\]|\d+[.)]|[-*])\s+"
+)
+"""参考文献段标题后的首个非空行需呈现列表条目形态。"""
+
 
 @dataclass(frozen=True)
 class BibliographyEntry:
@@ -84,6 +95,27 @@ class RenderedArticle:
     entries: list[BibliographyEntry]
 
 
+def _strip_generated_reference_section(text: str) -> str:
+    """剔除模型生成的章内参考文献段，最终书目只由渲染器统一产出。"""
+    for match in _REFERENCE_SECTION_HEADING_PATTERN.finditer(text):
+        for line in text[match.end() :].splitlines():
+            if not line.strip():
+                continue
+            if _REFERENCE_ENTRY_LEAD_PATTERN.match(line):
+                return text[: match.start()].rstrip()
+            break
+    return text
+
+
+def _material_marker_ids(text: str) -> list[str]:
+    """提取可作为素材 ID 的正文角标，排除最终展示编号。"""
+    return [
+        material_id
+        for material_id in MARKER_PATTERN.findall(text)
+        if not material_id.isdecimal()
+    ]
+
+
 def render_article(
     drafts: Sequence[ChapterDraft],
     citation_library: Sequence[Material],
@@ -102,9 +134,16 @@ def render_article(
         )
 
     materials_by_id = {material.id: material for material in citation_library}
+    draft_bodies = [
+        RenderedChapter(
+            chapter_id=draft.chapter_id,
+            text=_strip_generated_reference_section(draft.text),
+        )
+        for draft in drafts
+    ]
     order: dict[str, int] = {}
-    for draft in drafts:
-        for material_id in MARKER_PATTERN.findall(draft.text):
+    for draft in draft_bodies:
+        for material_id in _material_marker_ids(draft.text):
             if material_id in materials_by_id and material_id not in order:
                 order[material_id] = len(order) + 1
 
@@ -114,13 +153,13 @@ def render_article(
             text=MARKER_PATTERN.sub(
                 lambda match: (
                     f"[{order[match.group(1)]}]"
-                    if match.group(1) in order
+                    if not match.group(1).isdecimal() and match.group(1) in order
                     else match.group(0)
                 ),
                 draft.text,
             ),
         )
-        for draft in drafts
+        for draft in draft_bodies
     ]
     entries = [
         BibliographyEntry(
