@@ -75,6 +75,11 @@ uv sync          # 按 uv.lock 精确安装，可重复执行
 ```bash
 uvicorn --app-dir src --factory service.app:create_app --host 0.0.0.0 --port 8000
 ```
+或
+```bash
+./.venv/bin/uvicorn --app-dir src --factory service.app:create_app --host 0.0.0.0 --port
+  8000
+```
 
 生产建议交给 systemd 托管，示例单元文件：
 
