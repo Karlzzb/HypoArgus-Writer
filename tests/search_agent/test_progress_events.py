@@ -144,3 +144,41 @@ def test_进度事件载荷经消毒_不含正文全文() -> None:
 
     for payload in progress_payloads:
         walk(payload)
+
+
+class _SlowKbClient:
+    async def retrieve(self, **kwargs: Any) -> Any:
+        await asyncio.sleep(1.0)
+        raise AssertionError("timeout should fire before provider returns")
+
+
+def test_KB_singleflight超时future异常被消费() -> None:
+    async def main() -> list[dict[str, Any]]:
+        loop = asyncio.get_running_loop()
+        loop_errors: list[dict[str, Any]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            config = EvidenceRetrievalConfig(
+                parallel_kb_timeout_ms=100,
+                task_hard_timeout_ms=1000,
+            )
+            dependencies = EvidenceRetrievalDependencies(
+                kb_client=_SlowKbClient(),
+            ).complete(config)
+            trace = SafeTraceEmitter(config, [])
+            flow = ParallelSourcesFlow(config, dependencies, trace)
+            task = _task("task-kb-timeout", LineType.FORWARD)
+
+            results = await asyncio.gather(
+                flow._cached_kb_retrieve(task, ["kb-1"], "public", "query", "public_kb"),
+                flow._cached_kb_retrieve(task, ["kb-1"], "public", "query", "public_kb"),
+                return_exceptions=True,
+            )
+            assert all(isinstance(value, TimeoutError) for value in results)
+            await asyncio.sleep(0.2)
+            return loop_errors
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    assert asyncio.run(main()) == []

@@ -113,10 +113,10 @@ class EvidenceRetrievalConfig(BaseModel):
     # === parallel_sources 独立预算 ===
     parallel_flow_timeout_ms: int = Field(default=95000, ge=100)
     parallel_finalize_reserve_ms: int = Field(default=100, ge=0, le=1000)
-    parallel_web_search_timeout_ms: int = Field(default=5000, ge=100)
-    parallel_web_fetch_timeout_ms: int = Field(default=8000, ge=100)
-    parallel_kb_timeout_ms: int = Field(default=12000, ge=100)
-    parallel_structured_timeout_ms: int = Field(default=8000, ge=100)
+    parallel_web_search_timeout_ms: int = Field(default=3000, ge=100)
+    parallel_web_fetch_timeout_ms: int = Field(default=5000, ge=100)
+    parallel_kb_timeout_ms: int = Field(default=6000, ge=100)
+    parallel_structured_timeout_ms: int = Field(default=4000, ge=100)
     parallel_batch_judge_timeout_ms: int = Field(default=70000, ge=100)
     gap_retrieval_reserved_ms: int = Field(default=12000, ge=1000, le=30000)
     judge_model: str | None = None

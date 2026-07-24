@@ -8,7 +8,7 @@ Langfuse 启用时客户端换成官方插桩版，每次调用自动上报 gene
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 if TYPE_CHECKING:
     from openai import OpenAI, Stream
@@ -75,9 +75,11 @@ class OpenAICompatibleLLM:
 
     def invoke(self, messages: list[Message]) -> str:
         client = self._ensure_client()
-        response = client.chat.completions.create(
+        completions = cast(Any, client.chat.completions)
+        response = completions.create(
             model=self._config.model,
             messages=messages,  # type: ignore[arg-type]
+            **self._structured_output_kwargs(messages),
             # 思考开关显式下发（OpenAI 兼容扩展参数，qwen 系等服务商支持；
             # 不认识该参数的服务商会忽略）。缺省关闭：结构化 JSON 任务上
             # 思考 token 可达可见输出的数倍，延迟放大 5 倍以上。
@@ -95,10 +97,12 @@ class OpenAICompatibleLLM:
         ``content_delta.kind``（取值对齐 CONTEXT.md 词汇表 content / thinking）。
         """
         client = self._ensure_client()
-        response = client.chat.completions.create(
+        completions = cast(Any, client.chat.completions)
+        response = completions.create(
             model=self._config.model,
             messages=messages,  # type: ignore[arg-type]
             stream=True,
+            **self._structured_output_kwargs(messages),
             extra_body={"enable_thinking": self._config.enable_thinking},
         )
         # SDK 在 stream=True 下的返回为 Stream[ChatCompletionChunk]；mypy 对带
@@ -131,6 +135,21 @@ class OpenAICompatibleLLM:
                     base_url=self._config.base_url, api_key=self._config.api_key
                 )
             return self._client
+
+    def _structured_output_kwargs(
+        self, messages: list[Message]
+    ) -> dict[str, Any]:
+        """Use provider-enforced JSON mode when the prompt asks for JSON output.
+
+        Qwen/DashScope supports OpenAI-compatible ``response_format`` for
+        non-thinking models. Thinking mode cannot combine with JSON object mode,
+        so in that case we leave the request prompt-only.
+        """
+        if self._config.enable_thinking:
+            return {}
+        if any("JSON" in message.get("content", "") for message in messages):
+            return {"response_format": {"type": "json_object"}}
+        return {}
 
 
 class FakeLLM:

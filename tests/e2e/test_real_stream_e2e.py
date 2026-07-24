@@ -1,6 +1,6 @@
 """issue #59 门控真实流式逐字流 E2E：真实 LLM stream 路径的接缝验收。
 
-按环境变量门控（同 test_real_chain_e2e 范式）：显式设 HYPOARGUS_REAL_E2E=1 且
+按环境变量门控：显式设 HYPOARGUS_REAL_E2E=1 且
 LLM_API_KEY 齐备才运行，否则整个模块跳过——离线全量测试不触网、不花费真实调用成本。
 
 本模块只验收 writer LLM 的 stream 路径（draft 一发），不触检索通道——故门槛只取

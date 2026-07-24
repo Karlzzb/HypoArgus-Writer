@@ -1298,6 +1298,25 @@ class ParallelSourcesFlow:
         task.add_done_callback(lambda value: value.exception() if not value.cancelled() else None)
         raise TimeoutError
 
+    @staticmethod
+    def _retire_shared_future(inflight: dict, cache_key: str):
+        """Pop the inflight entry and retrieve any exception from the shared future.
+
+        The future is shielded, so an outer deadline can stop awaiting while the
+        future keeps running.  When it later fails (e.g. a provider timeout that
+        is already recorded as a structured ErrorDetail), no live awaiter remains
+        to consume the exception, and asyncio would dump the full traceback as a
+        never-retrieved task.  Retrieving it here keeps that noise out of the log;
+        the timeout itself stays visible via the per-query ErrorDetail.
+        """
+
+        def _callback(value):
+            inflight.pop(cache_key, None)
+            if not value.cancelled():
+                value.exception()
+
+        return _callback
+
     async def _cached_search(self, task: RetrievalTask, query: QueryItem) -> list[EvidenceCandidate]:
         key = " ".join(query.query.lower().split())
         if key in self.query_cache:
@@ -1311,6 +1330,7 @@ class ParallelSourcesFlow:
                         return await self.deps.web_search.search("parallel-shared", query)
                 future = asyncio.create_task(self._measured_call("web_search", _web_search_with_semaphore()))
                 self.query_inflight[key] = future
+                future.add_done_callback(self._retire_shared_future(self.query_inflight, key))
                 self.metrics["call_counts"]["web_search"] += 1
             else:
                 self.metrics["cache"]["query_cache_hits"] += 1
@@ -1321,7 +1341,6 @@ class ParallelSourcesFlow:
             finally:
                 if future.done():
                     self.query_inflight.pop(key, None)
-            future.add_done_callback(lambda value, cache=self.query_inflight, cache_key=key: cache.pop(cache_key, None))
         return [row.model_copy(update={
             "task_id": task.task_id,
             "candidate_id": f"web-{stable_json_hash([task.task_id, query.query_id, row.source_ref.url])[:20]}",
@@ -1346,6 +1365,7 @@ class ParallelSourcesFlow:
                     self._measured_call("web_fetch", _web_fetch_with_semaphore())
                 )
                 self.content_inflight[url] = future
+                future.add_done_callback(self._retire_shared_future(self.content_inflight, url))
                 self.metrics["call_counts"]["web_fetch"] += 1
             else:
                 self.metrics["cache"]["web_content_cache_hits"] += 1
@@ -1358,7 +1378,6 @@ class ParallelSourcesFlow:
             finally:
                 if future.done():
                     self.content_inflight.pop(url, None)
-            future.add_done_callback(lambda value, cache=self.content_inflight, cache_key=url: cache.pop(cache_key, None))
         return FetchResult(
             candidates=[row.model_copy(update={
                 "task_id": task.task_id,
@@ -1657,6 +1676,9 @@ class ParallelSourcesFlow:
 
             future = asyncio.create_task(provider_call())
             self.kb_inflight[key] = future
+            future.add_done_callback(
+                self._retire_shared_future(self.kb_inflight, key)
+            )
         else:
             self.metrics["cache"]["kb_singleflight_hits"] += 1
         try:
@@ -1669,11 +1691,6 @@ class ParallelSourcesFlow:
         finally:
             if future.done():
                 self.kb_inflight.pop(key, None)
-            future.add_done_callback(
-                lambda _value, cache=self.kb_inflight, cache_key=key: cache.pop(
-                    cache_key, None
-                )
-            )
 
     async def _kb(
         self,

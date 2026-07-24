@@ -1,8 +1,12 @@
 """统一 LLM 调用封装层（测试注入点）的单元测试。"""
 
+from types import SimpleNamespace
+
 import pytest
 
-from llm.llm_client import FakeLLM, StreamChunk
+from llm import observability
+from llm.llm_client import FakeLLM, OpenAICompatibleLLM, StreamChunk
+from llm.llm_config import LLMConfig
 
 
 def test_假LLM按序返回预置应答并记录调用():
@@ -82,3 +86,74 @@ def test_StreamChunk为不可变值对象():
     # frozen dataclass：不可赋值。
     with pytest.raises(Exception):
         chunk.kind = "thinking"  # type: ignore[misc]
+
+
+class _RecordingCompletions:
+    calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("stream"):
+            return iter([
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(delta=SimpleNamespace(content="{\"ok\": true}"))
+                    ]
+                )
+            ])
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content="{\"ok\": true}"))
+            ]
+        )
+
+
+class _RecordingOpenAI:
+    def __init__(self, *, base_url: str, api_key: str) -> None:
+        self.chat = SimpleNamespace(completions=_RecordingCompletions())
+
+
+def _recording_llm(*, enable_thinking: bool = False) -> OpenAICompatibleLLM:
+    _RecordingCompletions.calls = []
+    return OpenAICompatibleLLM(
+        LLMConfig(
+            model="stub-model",
+            base_url="https://example.invalid/v1",
+            api_key="sk-test",
+            enable_thinking=enable_thinking,
+        )
+    )
+
+
+def test_OpenAI兼容LLM_JSON提示启用响应格式(monkeypatch):
+    monkeypatch.setattr(observability, "openai_client_class", lambda: _RecordingOpenAI)
+    llm = _recording_llm()
+
+    assert llm.invoke([{"role": "system", "content": "只输出 JSON"}]) == "{\"ok\": true}"
+
+    call = _RecordingCompletions.calls[0]
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["extra_body"] == {"enable_thinking": False}
+
+
+def test_OpenAI兼容LLM_stream_JSON提示启用响应格式(monkeypatch):
+    monkeypatch.setattr(observability, "openai_client_class", lambda: _RecordingOpenAI)
+    llm = _recording_llm()
+
+    chunks = list(llm.stream([{"role": "system", "content": "Return JSON."}]))
+
+    assert "".join(chunk.text for chunk in chunks) == "{\"ok\": true}"
+    call = _RecordingCompletions.calls[0]
+    assert call["stream"] is True
+    assert call["response_format"] == {"type": "json_object"}
+
+
+def test_OpenAI兼容LLM_thinking模式不启用响应格式(monkeypatch):
+    monkeypatch.setattr(observability, "openai_client_class", lambda: _RecordingOpenAI)
+    llm = _recording_llm(enable_thinking=True)
+
+    llm.invoke([{"role": "system", "content": "只输出 JSON"}])
+
+    call = _RecordingCompletions.calls[0]
+    assert "response_format" not in call
+    assert call["extra_body"] == {"enable_thinking": True}
