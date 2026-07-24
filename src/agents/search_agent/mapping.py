@@ -11,6 +11,7 @@
 import hashlib
 import json
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from agents.contracts import MaterialPayload, SearchResult, SourceKind
 
@@ -44,6 +45,42 @@ def _compact_source_ref(value: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
+def _canonical_url(url: str) -> str:
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    port = parts.port
+    netloc = (
+        host
+        if port is None
+        or (parts.scheme == "http" and port == 80)
+        or (parts.scheme == "https" and port == 443)
+        else f"{host}:{port}"
+    )
+    query = urlencode(
+        sorted(
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_")
+        )
+    )
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path.rstrip("/") or "/", query, ""))
+
+
+def _normalize_source_ref_for_identity(source_ref: dict[str, Any]) -> dict[str, Any]:
+    normalized = _compact_source_ref(source_ref)
+    if "url" in normalized:
+        normalized["url"] = _canonical_url(str(normalized["url"]))
+    execution_scoped_keys = {"query_execution_id", "record_id", "retrieved_at"}
+    durable_keys = set(normalized) - execution_scoped_keys
+    if durable_keys:
+        normalized = {
+            key: value
+            for key, value in normalized.items()
+            if key not in execution_scoped_keys
+        }
+    return normalized
+
+
 def _crockford_base32_130_bits(payload: bytes) -> str:
     """把 SHA-256 摘要的高 130 bit 编为固定 26 位 Crockford Base32。"""
     value = int.from_bytes(hashlib.sha256(payload).digest(), "big") >> (256 - 130)
@@ -62,7 +99,7 @@ def material_id_from_source_ref(source_kind: SourceKind, source_ref: dict[str, A
     """
     identity = {
         "source_kind": source_kind,
-        "source_ref": _compact_source_ref(source_ref),
+        "source_ref": _normalize_source_ref_for_identity(source_ref),
     }
     payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return f"m_{_crockford_base32_130_bits(payload.encode())}"
@@ -76,10 +113,20 @@ def _source_ref_from_citation(
     简化/旧记录可能缺少知识库或结构化定位字段；此时落到可复现的公开记录摘要，
     只作为兼容性身份材料，真实来源仍优先来自 url / knowledge / dataset 字段。
     """
+    explicit = citation.get("source_ref")
+    if isinstance(explicit, dict):
+        compacted_explicit = _compact_source_ref(explicit)
+        if compacted_explicit:
+            if "url" in compacted_explicit:
+                compacted_explicit["url"] = _canonical_url(
+                    str(compacted_explicit["url"])
+                )
+            return compacted_explicit
+
     provenance = citation.get("provenance") or {}
     if source_kind == "web":
         source_ref = {
-            "url": citation.get("url"),
+            "url": _canonical_url(citation["url"]) if citation.get("url") else None,
             "content_fingerprint": provenance.get("content_fingerprint"),
             "source_evidence_fingerprint": provenance.get(
                 "source_evidence_fingerprint"

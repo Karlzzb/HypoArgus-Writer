@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .claim_logic import apply_claim_logic
 from .config import EvidenceRetrievalConfig
@@ -127,6 +128,92 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _canonical_url(url: str) -> str:
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    port = parts.port
+    netloc = (
+        host
+        if port is None
+        or (parts.scheme == "http" and port == 80)
+        or (parts.scheme == "https" and port == 443)
+        else f"{host}:{port}"
+    )
+    query = urlencode(
+        sorted(
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_")
+        )
+    )
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path.rstrip("/") or "/", query, ""))
+
+
+def _compact_source_ref(value: dict[str, Any]) -> dict[str, Any]:
+    compacted: dict[str, Any] = {}
+    for key, item in sorted(value.items()):
+        if isinstance(item, dict):
+            nested = _compact_source_ref(item)
+            if nested:
+                compacted[key] = nested
+        elif item not in (None, "", [], {}):
+            compacted[key] = item
+    return compacted
+
+
+def _public_source_ref(item: EvidenceItem) -> dict[str, Any] | None:
+    query_ids = _query_ids(item)
+    common = {
+        "content_fingerprint": item.content_fingerprint,
+        "source_evidence_fingerprint": item.source_evidence_fingerprint,
+    }
+    if query_ids:
+        common["query_ids"] = query_ids
+
+    ref = item.source_ref
+    if item.source_type == SourceType.WEB:
+        source_ref = _compact_source_ref(
+            {
+                **common,
+                "url": _canonical_url(ref.url) if ref.url else None,
+                "chunk_index": item.metadata.get("chunk_index"),
+                "published_at": item.metadata.get("published_at"),
+            }
+        )
+        return source_ref or None
+    if item.source_type == SourceType.KNOWLEDGE_BASE:
+        chunk_index = (
+            ref.chunk_index
+            if ref.chunk_index is not None
+            else item.metadata.get("chunk_index")
+        )
+        source_ref = _compact_source_ref(
+            {
+                **common,
+                "knowledge_id": ref.knowledge_id,
+                "knowledge_origin": ref.knowledge_origin,
+                "file_id": ref.file_id,
+                "chunk_id": ref.chunk_id,
+                "chunk_index": chunk_index,
+                "page": item.metadata.get("page"),
+            }
+        )
+        return source_ref or None
+    source_ref = _compact_source_ref(
+        {
+            **common,
+            "scenario_key": item.metadata.get("scenario_key") or ref.scenario_name,
+            "record_id": ref.record_id or item.metadata.get("tool_call_id"),
+            "dataset_id": ref.dataset_id,
+            "query_execution_id": ref.query_execution_id,
+            "query_params_hash": ref.query_params_hash,
+            "columns": item.metadata.get("columns"),
+            "row_count": item.metadata.get("row_count"),
+        }
+    )
+    return source_ref or None
+
+
 _PUBLIC_CITATION_BLOCKERS = {
     "WRONG_YEAR",
     "WRONG_TIME_SCOPE",
@@ -241,6 +328,7 @@ def _citation(
             source_type=source_type,
             source_name=item.source_name,
             url=item.source_ref.url,
+            source_ref=_public_source_ref(item),
             document_id=_optional_str(item.metadata.get("document_id")),
             knowledge_id=_optional_str(item.source_ref.knowledge_id),
             file_id=_optional_str(item.source_ref.file_id),
@@ -338,6 +426,7 @@ def _citation(
         source_type=source_type,
         source_name=item.source_name,
         url=item.source_ref.url,
+        source_ref=_public_source_ref(item),
         document_id=_optional_str(item.metadata.get("document_id")),
         knowledge_id=_optional_str(item.source_ref.knowledge_id),
         file_id=_optional_str(item.source_ref.file_id),

@@ -101,6 +101,7 @@ class CitationRecord(StrictModel):
     source_type: Literal["WEB", "KNOWLEDGE_BASE", "STRUCTURED_DATA"]
     source_name: str
     url: str | None = None
+    source_ref: dict[str, Any] | None = None
     document_id: str | None = None
     knowledge_id: str | None = None
     file_id: str | None = None

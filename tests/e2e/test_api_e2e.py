@@ -1256,6 +1256,8 @@ def test_独立检索接口_同步返回素材与诊断且事件按session_id可
             assert materials
             assert {m["hypothesis_id"] for m in materials} <= {"h1", "h2"}
             for material in materials:
+                _assert_opaque_material_id(material["id"])
+                assert material["source_ref"]
                 assert material["verdict"] in ("pass", "fail")
                 assert material["source_kind"] in (
                     "web",

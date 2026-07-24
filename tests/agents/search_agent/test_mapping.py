@@ -58,6 +58,19 @@ def _citation(citation_id: str, source_type: str, url: str | None) -> dict[str, 
     }
 
 
+def _output_for_single_citation(citation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "results": [
+            {
+                "item_id": forward_item_id("h-1"),
+                "citation_ids": [citation["citation_id"]],
+                "supporting_citation_ids": [citation["citation_id"]],
+            }
+        ],
+        "citations": [citation],
+    }
+
+
 def _material_by_source_kind(output: dict[str, Any]) -> dict[str, dict[str, Any]]:
     materials = search_result_from_engine_output(output, TASK)["materials"]
     return {material["source_kind"]: material for material in materials}
@@ -121,6 +134,110 @@ def test_三类来源稳定输入_id形状确定且不泄漏来源语义() -> No
         assert "example" not in material_id
         assert "kb" not in material_id.lower()
         assert "dataset" not in material_id.lower()
+
+
+def test_web_url_identity_使用规范化来源且保留source_ref定位() -> None:
+    first_ref = {
+        "url": "HTTPS://Example.COM:443/a/b/?utm_source=x&z=2&a=1#frag",
+        "content_fingerprint": "fp-web",
+    }
+    second_ref = {
+        "url": "https://example.com/a/b?a=1&z=2",
+        "content_fingerprint": "fp-web",
+    }
+
+    assert material_id_from_source_ref("web", first_ref) == material_id_from_source_ref(
+        "web", second_ref
+    )
+
+    citation = _citation(
+        "c-web-normalized",
+        "WEB",
+        "HTTPS://Example.COM:443/a/b/?utm_source=x&z=2&a=1#frag",
+    )
+    material = search_result_from_engine_output(
+        _output_for_single_citation(citation), TASK
+    )["materials"][0]
+
+    assert material["source_ref"]["url"] == "https://example.com/a/b?a=1&z=2"
+    assert material["url"] == "HTTPS://Example.COM:443/a/b/?utm_source=x&z=2&a=1#frag"
+
+
+def test_显式source_ref优先进入material_pool并参与稳定id生成() -> None:
+    citation = _citation("c-kb-explicit", "KNOWLEDGE_BASE", None)
+    citation["source_ref"] = {
+        "knowledge_id": "kb-9",
+        "knowledge_origin": "upstream_selected",
+        "file_id": "file-9",
+        "chunk_id": "chunk-9",
+        "chunk_index": 3,
+        "page": 12,
+        "query_ids": ["q-b", "q-a"],
+        "content_fingerprint": "fp-kb-explicit",
+    }
+
+    material = search_result_from_engine_output(
+        _output_for_single_citation(citation), TASK
+    )["materials"][0]
+
+    assert material["source_kind"] == "knowledge_base"
+    assert material["url"] is None
+    assert material["source_ref"] == {
+        "chunk_id": "chunk-9",
+        "chunk_index": 3,
+        "content_fingerprint": "fp-kb-explicit",
+        "file_id": "file-9",
+        "knowledge_id": "kb-9",
+        "knowledge_origin": "upstream_selected",
+        "page": 12,
+        "query_ids": ["q-b", "q-a"],
+    }
+    assert material["id"] == material_id_from_source_ref(
+        "knowledge_base", material["source_ref"]
+    )
+
+
+def test_结构化素材source_ref暴露执行定位但id不受执行id漂移影响() -> None:
+    stable_ref = {
+        "scenario_key": "graduate_salary",
+        "dataset_id": "doris-main",
+        "record_id": "tool-call-stable",
+        "query_params_hash": "params-hash",
+        "content_fingerprint": "fp-structured",
+    }
+    first = {**stable_ref, "query_execution_id": "exec-1"}
+    second = {**stable_ref, "query_execution_id": "exec-2"}
+
+    assert material_id_from_source_ref(
+        "structured_data", first
+    ) == material_id_from_source_ref("structured_data", second)
+
+    first_record = {**stable_ref, "record_id": "tool-call-1"}
+    second_record = {**stable_ref, "record_id": "tool-call-2"}
+    assert material_id_from_source_ref(
+        "structured_data", first_record
+    ) == material_id_from_source_ref("structured_data", second_record)
+
+    citation = _citation("c-structured-explicit", "STRUCTURED_DATA", None)
+    citation["source_ref"] = {
+        **first,
+        "columns": ["major", "salary"],
+        "row_count": 2,
+    }
+    material = search_result_from_engine_output(
+        _output_for_single_citation(citation), TASK
+    )["materials"][0]
+
+    assert material["source_ref"] == {
+        "columns": ["major", "salary"],
+        "content_fingerprint": "fp-structured",
+        "dataset_id": "doris-main",
+        "query_execution_id": "exec-1",
+        "query_params_hash": "params-hash",
+        "record_id": "tool-call-stable",
+        "row_count": 2,
+        "scenario_key": "graduate_salary",
+    }
 
 
 def test_任务包映射为引擎入参_正反向检索项与既有证据摘要齐备() -> None:

@@ -3,9 +3,23 @@
     "AgentRunStatus": {
       "additionalProperties": false,
       "properties": {
+        "status": {
+          "enum": [
+            "SUCCESS",
+            "PARTIAL",
+            "ERROR"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
         "completed_task_count": {
           "default": 0,
           "title": "Completed Task Count",
+          "type": "integer"
+        },
+        "partial_task_count": {
+          "default": 0,
+          "title": "Partial Task Count",
           "type": "integer"
         },
         "error_task_count": {
@@ -24,20 +38,6 @@
           ],
           "default": null,
           "title": "Message"
-        },
-        "partial_task_count": {
-          "default": 0,
-          "title": "Partial Task Count",
-          "type": "integer"
-        },
-        "status": {
-          "enum": [
-            "SUCCESS",
-            "PARTIAL",
-            "ERROR"
-          ],
-          "title": "Status",
-          "type": "string"
         }
       },
       "required": [
@@ -49,13 +49,6 @@
     "AtomicClaimDecision": {
       "additionalProperties": false,
       "properties": {
-        "citation_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Citation Ids",
-          "type": "array"
-        },
         "claim_id": {
           "title": "Claim Id",
           "type": "string"
@@ -76,6 +69,23 @@
           "default": null,
           "title": "Logic Role"
         },
+        "verdict": {
+          "enum": [
+            "SUPPORTED",
+            "REFUTED",
+            "CONFLICT",
+            "INCONCLUSIVE"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "citation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Citation Ids",
+          "type": "array"
+        },
         "missing_slots": {
           "items": {
             "type": "string"
@@ -85,16 +95,6 @@
         },
         "reason": {
           "title": "Reason",
-          "type": "string"
-        },
-        "verdict": {
-          "enum": [
-            "SUPPORTED",
-            "REFUTED",
-            "CONFLICT",
-            "INCONCLUSIVE"
-          ],
-          "title": "Verdict",
           "type": "string"
         }
       },
@@ -122,19 +122,12 @@
           "title": "Directness",
           "type": "number"
         },
-        "quote_match_mode": {
-          "enum": [
-            "EXACT",
-            "NORMALIZED",
-            "SNIPPET",
-            "STRUCTURED_ROW"
-          ],
-          "title": "Quote Match Mode",
-          "type": "string"
-        },
-        "reason": {
-          "title": "Reason",
-          "type": "string"
+        "supported_claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Claim Ids",
+          "type": "array"
         },
         "refuted_claim_ids": {
           "items": {
@@ -142,6 +135,10 @@
           },
           "title": "Refuted Claim Ids",
           "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
         },
         "scope_compatible": {
           "title": "Scope Compatible",
@@ -154,12 +151,15 @@
           "title": "Scope Mismatch Reasons",
           "type": "array"
         },
-        "supported_claim_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Supported Claim Ids",
-          "type": "array"
+        "quote_match_mode": {
+          "enum": [
+            "EXACT",
+            "NORMALIZED",
+            "SNIPPET",
+            "STRUCTURED_ROW"
+          ],
+          "title": "Quote Match Mode",
+          "type": "string"
         }
       },
       "required": [
@@ -175,46 +175,6 @@
     "CitationProvenance": {
       "additionalProperties": false,
       "properties": {
-        "content_fingerprint": {
-          "title": "Content Fingerprint",
-          "type": "string"
-        },
-        "dataset_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Dataset Id"
-        },
-        "published_at": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Published At"
-        },
-        "query_execution_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Query Execution Id"
-        },
         "query_ids": {
           "items": {
             "type": "string"
@@ -222,9 +182,17 @@
           "title": "Query Ids",
           "type": "array"
         },
-        "retrieved_at": {
-          "title": "Retrieved At",
-          "type": "string"
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Call Id"
         },
         "scenario_key": {
           "anyOf": [
@@ -238,11 +206,7 @@
           "default": null,
           "title": "Scenario Key"
         },
-        "source_evidence_fingerprint": {
-          "title": "Source Evidence Fingerprint",
-          "type": "string"
-        },
-        "tool_call_id": {
+        "dataset_id": {
           "anyOf": [
             {
               "type": "string"
@@ -252,7 +216,43 @@
             }
           ],
           "default": null,
-          "title": "Tool Call Id"
+          "title": "Dataset Id"
+        },
+        "query_execution_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Query Execution Id"
+        },
+        "retrieved_at": {
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "published_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Published At"
+        },
+        "content_fingerprint": {
+          "title": "Content Fingerprint",
+          "type": "string"
+        },
+        "source_evidence_fingerprint": {
+          "title": "Source Evidence Fingerprint",
+          "type": "string"
         }
       },
       "required": [
@@ -266,114 +266,8 @@
     "CitationRecord": {
       "additionalProperties": false,
       "properties": {
-        "chunk_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Chunk Id"
-        },
         "citation_id": {
           "title": "Citation Id",
-          "type": "string"
-        },
-        "content": {
-          "minLength": 1,
-          "title": "Content",
-          "type": "string"
-        },
-        "document_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Document Id"
-        },
-        "file_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "File Id"
-        },
-        "judgment": {
-          "$ref": "#/$defs/CitationJudgment"
-        },
-        "knowledge_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Knowledge Id"
-        },
-        "page": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Page"
-        },
-        "provenance": {
-          "$ref": "#/$defs/CitationProvenance"
-        },
-        "relation": {
-          "enum": [
-            "SUPPORT",
-            "REFUTE",
-            "SUPPLEMENT"
-          ],
-          "title": "Relation",
-          "type": "string"
-        },
-        "source_name": {
-          "title": "Source Name",
-          "type": "string"
-        },
-        "source_type": {
-          "enum": [
-            "WEB",
-            "KNOWLEDGE_BASE",
-            "STRUCTURED_DATA"
-          ],
-          "title": "Source Type",
-          "type": "string"
-        },
-        "status": {
-          "enum": [
-            "ACCEPTED",
-            "DEGRADED"
-          ],
-          "title": "Status",
-          "type": "string"
-        },
-        "summary": {
-          "minLength": 1,
-          "title": "Summary",
           "type": "string"
         },
         "task_ids": {
@@ -382,6 +276,16 @@
           },
           "title": "Task Ids",
           "type": "array"
+        },
+        "content": {
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
         },
         "title": {
           "anyOf": [
@@ -395,6 +299,19 @@
           "default": null,
           "title": "Title"
         },
+        "source_type": {
+          "enum": [
+            "WEB",
+            "KNOWLEDGE_BASE",
+            "STRUCTURED_DATA"
+          ],
+          "title": "Source Type",
+          "type": "string"
+        },
+        "source_name": {
+          "title": "Source Name",
+          "type": "string"
+        },
         "url": {
           "anyOf": [
             {
@@ -406,6 +323,102 @@
           ],
           "default": null,
           "title": "Url"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ref"
+        },
+        "document_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Document Id"
+        },
+        "knowledge_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Knowledge Id"
+        },
+        "file_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Id"
+        },
+        "chunk_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chunk Id"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "relation": {
+          "enum": [
+            "SUPPORT",
+            "REFUTE",
+            "SUPPLEMENT"
+          ],
+          "title": "Relation",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ACCEPTED",
+            "DEGRADED"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "judgment": {
+          "$ref": "#/$defs/CitationJudgment"
+        },
+        "provenance": {
+          "$ref": "#/$defs/CitationProvenance"
         }
       },
       "required": [
@@ -426,10 +439,9 @@
     "EvidenceGap": {
       "additionalProperties": false,
       "properties": {
-        "gap_retrieval_triggered": {
-          "default": false,
-          "title": "Gap Retrieval Triggered",
-          "type": "boolean"
+        "reason": {
+          "title": "Reason",
+          "type": "string"
         },
         "missing_slots": {
           "items": {
@@ -438,9 +450,10 @@
           "title": "Missing Slots",
           "type": "array"
         },
-        "reason": {
-          "title": "Reason",
-          "type": "string"
+        "gap_retrieval_triggered": {
+          "default": false,
+          "title": "Gap Retrieval Triggered",
+          "type": "boolean"
         },
         "resolved": {
           "default": false,
@@ -465,17 +478,17 @@
           "title": "Message",
           "type": "string"
         },
-        "retryable": {
-          "default": false,
-          "title": "Retryable",
-          "type": "boolean"
-        },
         "task_ids": {
           "items": {
             "type": "string"
           },
           "title": "Task Ids",
           "type": "array"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
         }
       },
       "required": [
@@ -488,40 +501,17 @@
     "TaskDecision": {
       "additionalProperties": false,
       "properties": {
-        "atomic_claim_results": {
-          "items": {
-            "$ref": "#/$defs/AtomicClaimDecision"
-          },
-          "title": "Atomic Claim Results",
-          "type": "array"
-        },
-        "citation_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Citation Ids",
-          "type": "array"
-        },
-        "conclusion_summary": {
-          "title": "Conclusion Summary",
+        "task_id": {
+          "title": "Task Id",
           "type": "string"
         },
-        "confidence": {
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Confidence",
-          "type": "number"
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
         },
-        "evidence_gap": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EvidenceGap"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "node_id": {
+          "title": "Node Id",
+          "type": "string"
         },
         "hypothesis_id": {
           "anyOf": [
@@ -535,10 +525,6 @@
           "default": null,
           "title": "Hypothesis Id"
         },
-        "item_id": {
-          "title": "Item Id",
-          "type": "string"
-        },
         "line_type": {
           "enum": [
             "forward",
@@ -547,16 +533,9 @@
           "title": "Line Type",
           "type": "string"
         },
-        "node_id": {
-          "title": "Node Id",
+        "target_text": {
+          "title": "Target Text",
           "type": "string"
-        },
-        "refuting_citation_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Refuting Citation Ids",
-          "type": "array"
         },
         "run_status": {
           "enum": [
@@ -565,28 +544,6 @@
             "ERROR"
           ],
           "title": "Run Status",
-          "type": "string"
-        },
-        "supplementary_citation_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Supplementary Citation Ids",
-          "type": "array"
-        },
-        "supporting_citation_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Supporting Citation Ids",
-          "type": "array"
-        },
-        "target_text": {
-          "title": "Target Text",
-          "type": "string"
-        },
-        "task_id": {
-          "title": "Task Id",
           "type": "string"
         },
         "verdict": {
@@ -598,6 +555,62 @@
           ],
           "title": "Verdict",
           "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "conclusion_summary": {
+          "title": "Conclusion Summary",
+          "type": "string"
+        },
+        "citation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Citation Ids",
+          "type": "array"
+        },
+        "supporting_citation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supporting Citation Ids",
+          "type": "array"
+        },
+        "refuting_citation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Refuting Citation Ids",
+          "type": "array"
+        },
+        "supplementary_citation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supplementary Citation Ids",
+          "type": "array"
+        },
+        "atomic_claim_results": {
+          "items": {
+            "$ref": "#/$defs/AtomicClaimDecision"
+          },
+          "title": "Atomic Claim Results",
+          "type": "array"
+        },
+        "evidence_gap": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceGap"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "warnings": {
           "items": {
@@ -655,12 +668,15 @@
   },
   "additionalProperties": false,
   "properties": {
-    "citations": {
-      "items": {
-        "$ref": "#/$defs/CitationRecord"
-      },
-      "title": "Citations",
-      "type": "array"
+    "schema_version": {
+      "const": "search-agent-output/v1",
+      "default": "search-agent-output/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
     },
     "document_id": {
       "title": "Document Id",
@@ -670,9 +686,8 @@
       "title": "Paragraph Id",
       "type": "string"
     },
-    "request_id": {
-      "title": "Request Id",
-      "type": "string"
+    "run_status": {
+      "$ref": "#/$defs/AgentRunStatus"
     },
     "results": {
       "items": {
@@ -681,17 +696,12 @@
       "title": "Results",
       "type": "array"
     },
-    "run_status": {
-      "$ref": "#/$defs/AgentRunStatus"
-    },
-    "schema_version": {
-      "const": "search-agent-output/v1",
-      "default": "search-agent-output/v1",
-      "title": "Schema Version",
-      "type": "string"
-    },
-    "trace": {
-      "$ref": "#/$defs/TraceReference"
+    "citations": {
+      "items": {
+        "$ref": "#/$defs/CitationRecord"
+      },
+      "title": "Citations",
+      "type": "array"
     },
     "warnings": {
       "items": {
@@ -699,6 +709,9 @@
       },
       "title": "Warnings",
       "type": "array"
+    },
+    "trace": {
+      "$ref": "#/$defs/TraceReference"
     }
   },
   "required": [
