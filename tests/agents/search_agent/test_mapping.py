@@ -6,6 +6,7 @@ Pydantic 严格校验），出参侧断言假说回链、裁决折算、url 与 
 
 from typing import Any
 
+from agents.contracts import MaterialPayload
 from agents.search_agent import (
     ENGINE_DOCUMENT_ID,
     engine_payload_from_task,
@@ -16,6 +17,7 @@ from agents.search_agent import (
     search_result_from_engine_output,
     split_item_id,
 )
+from domain.state import SourceKind
 
 TASK: dict[str, Any] = {
     "chapter_id": "ch-1",
@@ -71,7 +73,7 @@ def _output_for_single_citation(citation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _material_by_source_kind(output: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _material_by_source_kind(output: dict[str, Any]) -> dict[str, MaterialPayload]:
     materials = search_result_from_engine_output(output, TASK)["materials"]
     return {material["source_kind"]: material for material in materials}
 
@@ -89,7 +91,7 @@ def test_稳定来源输入映射为确定性不透明material_id() -> None:
 
 
 def test_三类来源稳定输入_id形状确定且不泄漏来源语义() -> None:
-    cases = [
+    cases: list[tuple[SourceKind, dict[str, Any]]] = [
         (
             "web",
             {
@@ -159,6 +161,7 @@ def test_web_url_identity_使用规范化来源且保留source_ref定位() -> No
         _output_for_single_citation(citation), TASK
     )["materials"][0]
 
+    assert material["source_ref"] is not None
     assert material["source_ref"]["url"] == "https://example.com/a/b?a=1&z=2"
     assert material["url"] == "HTTPS://Example.COM:443/a/b/?utm_source=x&z=2&a=1#frag"
 
@@ -325,6 +328,7 @@ def test_引擎出参映射_回链裁决url与来源通道逐项回填() -> None
     # url 与 source_kind 按引文回填：三通道类型标识一一对应，仅联网带链接。
     assert by_kind["web"]["source_kind"] == "web"
     assert by_kind["web"]["url"] == "https://example.com/a"
+    assert by_kind["web"]["source_ref"] is not None
     assert by_kind["web"]["source_ref"]["url"] == "https://example.com/a"
     assert by_kind["knowledge_base"]["source_kind"] == "knowledge_base"
     assert by_kind["knowledge_base"]["url"] is None

@@ -50,7 +50,8 @@ from agents.rewriter_loop import (  # noqa: E402
     load_prose,
     make_rewriter_loop,
 )
-from agents.rewriter_loop.writer_client import WriterEnvelope, citable_materials  # noqa: E402
+from agents.citation_policy import citable_materials  # noqa: E402
+from agents.rewriter_loop.writer_client import WriterEnvelope  # noqa: E402
 from domain.doc_types import carried_doc_facts, tier_from_variant  # noqa: E402
 from llm.llm_client import LLM, FakeLLM, default_llm_factory  # noqa: E402
 

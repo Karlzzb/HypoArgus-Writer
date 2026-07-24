@@ -12,18 +12,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from agents.contracts import MaterialPayload
+from agents.citation_policy import citable_materials
 from agents.rewriter_loop.style_linter import Violation
-from domain.state import CITABLE_VERDICTS
-
-
-def citable_materials(task: dict[str, Any]) -> list[MaterialPayload]:
-    """从任务包取可进写作池的素材：pass 强支撑 + inconclusive 弱佐证（杠杆②放宽）。
-
-    fail（反例/不可用）不进提示词与校验；条目保留 verdict 供下游按佐证强度分组渲染。
-    过滤口径取 domain 唯一事实源 CITABLE_VERDICTS，供编排层与真实适配器共用。
-    """
-    return [m for m in task["materials"] if m["verdict"] in CITABLE_VERDICTS]
 
 
 class WriterEnvelope(BaseModel):

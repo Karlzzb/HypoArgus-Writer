@@ -4,7 +4,7 @@
 更新 merge 进 state（整值覆盖语义）→ 用共享判别函数 next_writing_step 判断
 是否继续，直到前进为止。覆盖点：首写模式逐超步各一次调用且顺序与大纲一致、
 章级增量落 state；摘要链承接（prev_chapter_summary）；素材过滤（只有该章
-verdict=pass 的素材进任务包）；改写结果与单章自检入 State；状态机推进到
+pass 与 inconclusive 素材进任务包）；改写结果与单章自检入 State；状态机推进到
 ARTICLE_WRITING；修订模式按指令定向改写与增量检索入库去重、逐章消费指令
 队列；终审回退模式只重写不合格章节、revised_chapter_ids 逐超步累积；
 判别函数各模式与全部完成情形的返回值；非法目标章节防御性抛错。
@@ -23,6 +23,7 @@ from domain.state import (
     Hypothesis,
     Material,
     RevisionDirective,
+    SourceKind,
     WorkflowStatus,
     WritingAgentState,
 )
@@ -122,13 +123,26 @@ def _hypothesis(hyp_id: str) -> Hypothesis:
 
 
 def _material(
-    mat_id: str, hypothesis_id: str, chapter_id: str, verdict: str
+    mat_id: str,
+    hypothesis_id: str,
+    chapter_id: str,
+    verdict: str,
+    *,
+    source_kind: SourceKind = "web",
 ) -> Material:
+    source_ref = (
+        {"url": f"https://example.com/{mat_id}"}
+        if source_kind == "web"
+        else {"knowledge_id": "kb", "file_id": mat_id, "chunk_id": "c1"}
+    )
     return Material(
         id=mat_id,
         hypothesis_id=hypothesis_id,
         chapter_id=chapter_id,
         source=f"来源 {mat_id}",
+        url=source_ref.get("url"),
+        source_kind=source_kind,
+        source_ref=source_ref,
         excerpt=f"摘录 {mat_id}",
         relevance_score=0.8,
         verdict=verdict,  # type: ignore[arg-type]
@@ -138,7 +152,7 @@ def _material(
 def _make_state() -> WritingAgentState:
     """三章大纲：ch1 两论点各一假说，ch2 一论点两假说，ch3 无论点。
 
-    引文库同时含 pass 与 fail 素材，用于验证素材过滤。
+    引文库同时含 pass、inconclusive 与 fail 素材，用于验证素材过滤。
     """
     outline = [
         ChapterSpec(
@@ -169,9 +183,9 @@ def _make_state() -> WritingAgentState:
     ]
     citation_library = [
         _material("m-1", "ch1-p1-h1", "ch1", "pass"),
-        _material("m-2", "ch1-p2-h1", "ch1", "fail"),
+        _material("m-2", "ch1-p2-h1", "ch1", "fail", source_kind="knowledge_base"),
         _material("m-3", "ch2-p1-h1", "ch2", "pass"),
-        _material("m-4", "ch2-p1-h2", "ch2", "pass"),
+        _material("m-4", "ch2-p1-h2", "ch2", "inconclusive"),
     ]
     return WritingAgentState(
         outline=outline,
@@ -265,20 +279,25 @@ def test_摘要链承接_首章为空_后章收到完整前章摘要链():
     )
 
 
-def test_素材过滤_只有本章pass素材进任务包():
+def test_素材过滤_只有本章pass与弱佐证素材进任务包():
     adapter, _ = _run_node()
     # ch1：m-2 verdict=fail 被过滤，他章素材不进。
     assert [material["id"] for material in adapter.tasks[0]["materials"]] == ["m-1"]
     material = adapter.tasks[0]["materials"][0]
     assert material["hypothesis_id"] == "ch1-p1-h1"
     assert material["source"] == "来源 m-1"
+    assert material["source_ref"] == {"url": "https://example.com/m-1"}
     assert material["excerpt"] == "摘录 m-1"
     assert material["relevance_score"] == 0.8
     assert material["verdict"] == "pass"
-    # ch2：两条 pass 素材都进；ch3：无素材。
+    # ch2：pass 与 inconclusive 都进，verdict 保留；ch3：无素材。
     assert [material["id"] for material in adapter.tasks[1]["materials"]] == [
         "m-3",
         "m-4",
+    ]
+    assert [material["verdict"] for material in adapter.tasks[1]["materials"]] == [
+        "pass",
+        "inconclusive",
     ]
     assert adapter.tasks[2]["materials"] == []
 
@@ -373,11 +392,11 @@ def test_修订模式_混合分支逐超步执行():
     search_task = search.tasks[0]
     assert search_task["chapter_id"] == "ch2"
     assert [hyp["id"] for hyp in search_task["hypotheses"]] == ["ch2-p1-h1", "ch2-p1-h2"]
-    # digest 由 citation_digest 段装配：4 条素材，ch1 通过 1 未通过 1、ch2 通过 2。
+    # digest 由 citation_digest 段装配：4 条素材，ch1 通过 1 未通过 1、ch2 通过 1 弱佐证 1。
     assert search_task["existing_materials_digest"] == (
         "引文库共 4 条素材。\n"
         "章节 ch1：通过 1 条，弱佐证 0 条，未通过 1 条\n"
-        "章节 ch2：通过 2 条，弱佐证 0 条，未通过 0 条"
+        "章节 ch2：通过 1 条，弱佐证 1 条，未通过 0 条"
     )
 
     # rewriter_loop 两次均 mode=revise，任务包带评审装配的分区式修订说明与 current_text：
@@ -799,7 +818,7 @@ def test_回退并行扇出分支_单章改写回写单元素列表():
     rewriter = 记录式假改写适配器()
     node = make_writing_orchestrator_node(rewriter, 记录式假检索适配器())
     state = _make_fallback_state(["ch2"])
-    state[REVISION_CHAPTER_ID_KEY] = "ch2"
+    cast(dict[str, Any], state)[REVISION_CHAPTER_ID_KEY] = "ch2"
     result = node(state)
     assert [task["chapter_spec"]["id"] for task in rewriter.tasks] == ["ch2"]
     assert [task["mode"] for task in rewriter.tasks] == ["revise"]
@@ -809,4 +828,3 @@ def test_回退并行扇出分支_单章改写回写单元素列表():
     assert result["revised_chapter_ids"] == ["ch2"]
     assert result["status"] == WorkflowStatus.ARTICLE_WRITING
     assert result["current_node_llm_config"]["unit"] == "writing_orchestrator"
-

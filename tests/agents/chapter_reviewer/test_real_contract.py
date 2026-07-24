@@ -59,6 +59,67 @@ def test_评审真实现_revise逐字保留用户意见并给冲突提示(review
     assert "第二段原句必须保留，勿改。" in joined_prompt(fake.calls[0])
 
 
+def test_评审真实现_素材池为空_提示明确禁止角标且不渲染可引用池(
+    review_task: dict[str, Any],
+) -> None:
+    review_task["doc_type"] = "调研报告"
+    review_task["doc_variant"] = None
+    review_task["chapter_text"] = "## 一、示例章节\n\n本章只做定性论述。"
+    for material in review_task["materials"]:
+        material["verdict"] = "fail"
+    fake = FakeLLM([_review_envelope([], [])])
+    adapter = make_chapter_reviewer(lambda unit: fake)
+    asyncio.run(adapter.run(review_task))
+
+    prompt = joined_prompt(fake.calls[0])
+    assert "本章无可引素材" in prompt
+    assert "不得出现任何" in prompt and "角标" in prompt
+    assert "不得生成 `[1]`" in prompt
+    assert "参考文献列表" in prompt
+    assert "仅可引用池内 id" not in prompt
+    assert "m-h-1" not in prompt
+
+
+def test_评审真实现_只渲染当前章节假说可引用素材(review_task: dict[str, Any]) -> None:
+    review_task["materials"].append(
+        {
+            "id": "m-other-chapter",
+            "hypothesis_id": "other-chapter-h1",
+            "source": "其他章来源",
+            "url": "https://example.com/other",
+            "source_kind": "web",
+            "source_ref": {"url": "https://example.com/other"},
+            "excerpt": "其他章摘录",
+            "relevance_score": 0.95,
+            "verdict": "pass",
+        }
+    )
+    fake = FakeLLM([_review_envelope([], [])])
+    adapter = make_chapter_reviewer(lambda unit: fake)
+    asyncio.run(adapter.run(review_task))
+
+    prompt = joined_prompt(fake.calls[0])
+    assert "m-h-1" in prompt
+    assert "m-other-chapter" not in prompt
+    assert "other-chapter-h1" not in prompt
+
+
+def test_评审真实现_当前章节无假说时可引用池失败关闭(review_task: dict[str, Any]) -> None:
+    review_task["doc_type"] = "调研报告"
+    review_task["doc_variant"] = None
+    review_task["chapter_spec"]["hypotheses"] = []
+    review_task["chapter_text"] = "## 一、示例章节\n\n本章只做定性论述。"
+    fake = FakeLLM([_review_envelope([], [])])
+    adapter = make_chapter_reviewer(lambda unit: fake)
+    asyncio.run(adapter.run(review_task))
+
+    prompt = joined_prompt(fake.calls[0])
+    assert "本章无可引素材" in prompt
+    assert "不得出现任何" in prompt and "角标" in prompt
+    assert "m-h-1" not in prompt
+    assert "m-h-2" not in prompt
+
+
 def test_评审真实现_工厂路径_请求单元名(review_task: dict[str, Any]) -> None:
     seen_units: list[str] = []
     fake = FakeLLM([_review_envelope([], [])])

@@ -48,6 +48,7 @@ def _material(mat_id: str, chapter_id: str, verdict: str) -> Material:
         hypothesis_id=f"{chapter_id}-p1-h1",
         chapter_id=chapter_id,
         source=f"来源 {mat_id}",
+        source_ref={"kind": "fixture", "id": mat_id},
         excerpt=f"摘录 {mat_id}",
         relevance_score=0.8,
         verdict=verdict,  # type: ignore[arg-type]
@@ -392,6 +393,7 @@ def test_章节素材_取该章pass与弱佐证素材并JSON序列化():
     assert by_id["m-1"]["verdict"] == "pass"
     assert by_id["m-4"]["verdict"] == "inconclusive"
     assert by_id["m-1"]["excerpt"] == "摘录 m-1"
+    assert by_id["m-1"]["source_ref"] == {"kind": "fixture", "id": "m-1"}
 
 
 def test_章节素材_缺chapter_id时无该段且装配不抛错():

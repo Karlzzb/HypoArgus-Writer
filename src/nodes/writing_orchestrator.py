@@ -142,10 +142,11 @@ def chapter_spec_payload(chapter: ChapterSpec) -> ChapterSpecPayload:
 
 
 def materials_from_segment(chapter_materials_json: str) -> list[MaterialPayload]:
-    """把 chapter_materials 段（该章 verdict=pass 素材的 JSON）转为任务包条目。
+    """把 chapter_materials 段（该章可引用素材的 JSON）转为任务包条目。
 
     段文本由 context_assembler.extract_chapter_materials 装配（已按章过滤并只留
-    通过校验的素材），此处只取任务包所需字段，丢弃 chapter_id 等无关字段。
+    pass / inconclusive 可引用素材），此处只取任务包所需字段，丢弃 chapter_id 等
+    无关字段。
     段缺失（空串）时视为该章无素材。
     """
     if not chapter_materials_json:
@@ -157,6 +158,7 @@ def materials_from_segment(chapter_materials_json: str) -> list[MaterialPayload]
             source=material["source"],
             url=material["url"],
             source_kind=material["source_kind"],
+            source_ref=material.get("source_ref"),
             excerpt=material["excerpt"],
             relevance_score=material["relevance_score"],
             verdict=material["verdict"],

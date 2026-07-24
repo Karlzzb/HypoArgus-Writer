@@ -15,6 +15,10 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+from agents.citation_policy import (
+    EMPTY_CITABLE_MATERIALS_INSTRUCTION,
+    citable_materials,
+)
 from agents.chapter_reviewer.review_client import (
     ReviewConflict,
     ReviewEnvelope,
@@ -22,7 +26,6 @@ from agents.chapter_reviewer.review_client import (
 )
 from agents.contracts import MaterialPayload
 from agents.rewriter_loop.style_linter import AuditItem, audit_items_for
-from agents.rewriter_loop.writer_client import citable_materials
 from domain.doc_types import carried_doc_facts
 from llm.llm_client import LLM
 from llm.llm_json import JSON_ONLY_RULE, parse_json
@@ -65,15 +68,22 @@ def _format_materials(materials: Sequence[MaterialPayload]) -> str:
     )
 
 
+def _material_pool_block(materials: Sequence[MaterialPayload]) -> str:
+    if materials:
+        return f"素材池（仅可引用池内 id）：\n{_format_materials(materials)}"
+    return EMPTY_CITABLE_MATERIALS_INSTRUCTION
+
+
 def build_review_user(task: dict[str, Any]) -> str:
     """评审 user 提示词：给素材池、上一章摘要、用户意见（revise）与本章正文。"""
     prev = task.get("prev_chapter_summary") or "（首章，无上一章摘要）"
     user_feedback = task.get("user_feedback") or "（无用户意见）"
+    materials = citable_materials(task)
     return (
         f"{_REVIEW_TAG}按 system 中的裁决项逐项判断下面的本章正文。\n"
         f"上一章摘要：{prev}\n"
         f"用户意见（如有，冲突时用户意见优先）：{user_feedback}\n"
-        f"素材池（仅可引用池内 id）：\n{_format_materials(citable_materials(task))}\n\n"
+        f"{_material_pool_block(materials)}\n\n"
         f"本章正文：\n{task['chapter_text']}\n\n"
         "判断并返回 issues 与 conflicts（无则为空数组，不要臆造）。"
     )

@@ -23,10 +23,10 @@ from agents.chapter_reviewer.llm_adapter import LlmReviewClient
 from agents.chapter_reviewer.review_client import ReviewLlmClient
 from agents.chapter_reviewer.revision_note import assemble_revision_note
 from agents.chapter_reviewer.stub import UNIT
+from agents.citation_policy import citable_materials
 from agents.concurrency import make_thread_permit
 from agents.contracts import SelfCheckPayload, SubagentAdapter
 from agents.rewriter_loop.style_linter import CITATION_RULES, audit_items_for, lint
-from agents.rewriter_loop.writer_client import citable_materials
 from domain.doc_types import carried_doc_facts
 from domain.env_config import read_positive_int
 from domain.events import SUBAGENT_PROGRESS, EventHook, noop_hook

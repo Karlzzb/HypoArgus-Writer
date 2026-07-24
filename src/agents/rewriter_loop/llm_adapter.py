@@ -22,6 +22,10 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+from agents.citation_policy import (
+    EMPTY_CITABLE_MATERIALS_INSTRUCTION,
+    citable_materials,
+)
 from agents.contracts import MaterialPayload
 from agents.rewriter_loop.delta_merger import DeltaMerger
 from agents.rewriter_loop.style_linter import (
@@ -35,7 +39,6 @@ from agents.rewriter_loop.writer_client import (
     AuditEnvelope,
     AuditIssue,
     WriterEnvelope,
-    citable_materials,
 )
 from domain.doc_types import carried_doc_facts, tier_from_variant
 from domain.events import CONTENT_DELTA, EventHook, noop_hook
@@ -216,8 +219,8 @@ def _build_context_block(task: dict[str, Any]) -> str:
         # 又对 reconcile 的 ASCII 角标模式隐形（正文残留角注、书目为空、无警告）。
         # 根因修复：堵住源头，让模型在无可引素材时以定性陈述展开、不臆造角标。
         material_block = (
-            "\n本章无可引素材（素材池为空）：正文不得出现任何 `[...]` 角标，"
-            "不得臆造素材 id 或来源；无可引数据的论点按定性陈述展开，不得杜撰数值。\n"
+            f"\n{EMPTY_CITABLE_MATERIALS_INSTRUCTION}"
+            "无可引数据的论点按定性陈述展开，不得杜撰数值。\n"
         )
     word_count_section = f"{word_count_block}\n" if word_count_block else ""
     return f"""文种：{doc_type}
@@ -286,9 +289,15 @@ def _build_revise_user(
 
 def _build_audit_user(chapter_text: str, task: dict[str, Any]) -> str:
     """自审 user 提示词：给素材池 + 正文，要可机器判读的违规列表。"""
+    materials = citable_materials(task)
+    material_block = (
+        f"素材池（仅可引用池内 id）：\n{_format_materials(materials)}"
+        if materials
+        else EMPTY_CITABLE_MATERIALS_INSTRUCTION
+    )
     return (
         f"{_AUDIT_TAG}按 system 中的裁决项逐项判断下面的本章正文。\n"
-        f"素材池（仅可引用池内 id）：\n{_format_materials(citable_materials(task))}\n\n"
+        f"{material_block}\n\n"
         f"本章正文：\n{chapter_text}\n\n"
         "判断并返回 issues（无违规时为空数组，不要臆造）。"
     )

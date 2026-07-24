@@ -29,6 +29,7 @@
       "source": "来源一",
       "url": "https://example.com/m-h-1",
       "source_kind": "web",
+      "source_ref": { "url": "https://example.com/m-h-1" },
       "excerpt": "摘录一",
       "relevance_score": 0.9,
       "verdict": "pass"
@@ -39,6 +40,7 @@
       "source": "来源二",
       "url": null,
       "source_kind": "knowledge_base",
+      "source_ref": { "knowledge_id": "kb", "file_id": "f2", "chunk_id": "c2" },
       "excerpt": "摘录二",
       "relevance_score": 0.8,
       "verdict": "pass"
@@ -49,6 +51,7 @@
       "source": "来源三",
       "url": null,
       "source_kind": "structured_data",
+      "source_ref": { "dataset_id": "ds", "row_id": "r3" },
       "excerpt": "摘录三",
       "relevance_score": 0.1,
       "verdict": "fail"

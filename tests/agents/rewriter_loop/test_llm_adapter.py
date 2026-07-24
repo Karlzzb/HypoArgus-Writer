@@ -95,8 +95,45 @@ def test_真实适配器_draft正常_信封字段与提示词内容合规(draft_
     assert "m-h-1" in user
     assert "h-1" in user
     assert "上一章摘要：已完成背景铺陈。" in user
+    assert "【强支撑素材】" in user
+    assert "可作为量化断言、数据与结论的直接依据" in user
     # 只喂 pass 素材：fail 素材 id 不出现在提示词。
     assert "m-fail-x" not in user
+
+
+def test_真实适配器_只渲染当前章节假说可引用素材(draft_task: dict[str, Any]) -> None:
+    draft_task["materials"].append(
+        {
+            "id": "m-other-chapter",
+            "hypothesis_id": "other-chapter-h1",
+            "source": "其他章来源",
+            "url": "https://example.com/other",
+            "source_kind": "web",
+            "source_ref": {"url": "https://example.com/other"},
+            "excerpt": "其他章摘录",
+            "relevance_score": 0.95,
+            "verdict": "pass",
+        }
+    )
+    llm = FakeLLM(responses=[_writer_json("## 一、示例章节\n正文。[m-h-1]")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    user = llm.calls[0][1]["content"]
+    assert "m-h-1" in user
+    assert "m-other-chapter" not in user
+    assert "other-chapter-h1" not in user
+
+
+def test_真实适配器_当前章节无假说时可引用池失败关闭(draft_task: dict[str, Any]) -> None:
+    draft_task["chapter_spec"]["hypotheses"] = []
+    llm = FakeLLM(responses=[_writer_json("## 一、示例章节\n定性陈述正文。")])
+    _make_client(llm).draft(draft_task, _STYLE_PROSE)
+
+    user = llm.calls[0][1]["content"]
+    assert "本章无可引素材" in user
+    assert "不得出现任何" in user and "角标" in user
+    assert "m-h-1" not in user
+    assert "m-h-2" not in user
 
 
 def test_真实适配器_弱佐证素材分组渲染并进提示词(draft_task: dict[str, Any]) -> None:
@@ -107,8 +144,9 @@ def test_真实适配器_弱佐证素材分组渲染并进提示词(draft_task: 
             "id": "m-weak-1",
             "hypothesis_id": "h-1",
             "source": "弱来源",
-            "url": None,
+            "url": "https://example.com/m-weak-1",
             "source_kind": "web",
+            "source_ref": {"url": "https://example.com/m-weak-1"},
             "excerpt": "弱摘录",
             "relevance_score": 0.3,
             "verdict": "inconclusive",
@@ -413,6 +451,13 @@ def test_真实适配器_audit无pass素材_仅审非依赖素材裁决项(draft
     assert "summary_chain_consistency" in system
     assert "unmarked_derived_content" not in system
     assert "weak_material_assertion" not in system
+    user = llm.calls[0][1]["content"]
+    assert "本章无可引素材" in user
+    assert "不得出现任何" in user and "角标" in user
+    assert "不得生成 `[1]`" in user
+    assert "参考文献列表" in user
+    assert "仅可引用池内 id" not in user
+    assert "m-h-1" not in user
 
 
 def test_真实适配器_draft系统提示词_不含双方括号残留(draft_task: dict[str, Any]) -> None:

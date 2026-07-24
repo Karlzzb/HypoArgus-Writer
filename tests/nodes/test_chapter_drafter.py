@@ -58,16 +58,17 @@ def _chapter(chapter_id: str, title: str, planned: str) -> ChapterSpec:
     )
 
 
-def _material(chapter_id: str) -> Material:
+def _material(chapter_id: str, verdict: str = "pass") -> Material:
     return Material(
-        id=f"m-{chapter_id}",
+        id=f"m-{chapter_id}-{verdict}",
         hypothesis_id=f"{chapter_id}-p1-h1",
         chapter_id=chapter_id,
         source="来源",
         url=None,
+        source_ref={"fixture": chapter_id, "verdict": verdict},
         excerpt="摘录",
         relevance_score=0.9,
-        verdict="pass",
+        verdict=verdict,  # type: ignore[arg-type]
     )
 
 
@@ -77,7 +78,12 @@ def _state() -> WritingAgentState:
             _chapter("ch1", "第一章", "规划一。"),
             _chapter("ch2", "第二章", "规划二。"),
         ],
-        citation_library=[_material("ch1"), _material("ch2")],
+        citation_library=[
+            _material("ch1"),
+            _material("ch2"),
+            _material("ch2", "inconclusive"),
+            _material("ch2", "fail"),
+        ],
         chapter_drafts=[],
         doc_type="通用公文",
         doc_variant=None,
@@ -89,7 +95,7 @@ def test_载荷构造_全部未写章节各一份且引文库按章过滤():
     assert [payload[DRAFT_CHAPTER_ID_KEY] for payload in payloads] == ["ch1", "ch2"]
     for payload in payloads:
         chapter_id = payload[DRAFT_CHAPTER_ID_KEY]
-        assert [m.chapter_id for m in payload["citation_library"]] == [chapter_id]
+        assert {m.chapter_id for m in payload["citation_library"]} == {chapter_id}
         assert payload["doc_type"] == "通用公文"
         assert len(payload["outline"]) == 2
 
@@ -141,7 +147,12 @@ def test_节点单分支_任务包承接规划摘要链且只回写reducer字段
     (task,) = tasks
     assert task["mode"] == "draft"
     assert task["chapter_spec"]["id"] == "ch2"
-    assert [m["id"] for m in task["materials"]] == ["m-ch2"]
+    assert [m["id"] for m in task["materials"]] == [
+        "m-ch2-pass",
+        "m-ch2-inconclusive",
+    ]
+    assert "m-ch2-fail" not in {m["id"] for m in task["materials"]}
+    assert task["materials"][0]["source_ref"] == {"fixture": "ch2", "verdict": "pass"}
     assert task["prev_chapter_summary"] == "【第一章】规划一。"
 
     # 回写只含带合并 / keep_last reducer 的字段，避免并行分支写入冲突。

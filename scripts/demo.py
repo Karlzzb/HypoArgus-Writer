@@ -526,7 +526,7 @@ def _build_app(real: bool):
 
     from graph import checkpoint_serializer
     from llm.llm_client import FakeLLM
-    from tests.llm_response_plans import (
+    from service.llm_response_plans import (
         FRAMEWORK_KEYED_RESPONSES,
         TRUNK_RESPONSES,
         WRITER_KEYED_RESPONSES,
