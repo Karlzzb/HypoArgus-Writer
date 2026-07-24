@@ -299,3 +299,27 @@ def test_状态机推进到REFERENCE_FETCHING且记录节点配置():
 
     assert update["status"] == WorkflowStatus.REFERENCE_FETCHING
     assert update["current_node_llm_config"] == {"unit": "reference_orchestrator"}
+
+
+def test_检索适配器停顿超时抛出而非永久挂死(monkeypatch) -> None:
+    """issue #80 放大器：检索源停顿（如 http-200 空 Result 后挂起）时，
+    单章检索分支必须按硬超时失败上抛，不得把整张图拖入静默挂死。"""
+    import asyncio
+
+    import pytest
+
+    from nodes.reference_orchestrator import SEARCH_TIMEOUT_ENV
+
+    class 停顿适配器:
+        unit = "search_agent"
+
+        async def run(self, task: dict[str, Any]) -> dict[str, Any]:
+            await asyncio.sleep(3600)
+            return {"materials": []}
+
+    monkeypatch.setenv(SEARCH_TIMEOUT_ENV, "1")
+    node = make_reference_orchestrator_node(停顿适配器())
+    payload = reference_send_payloads(_build_state())[0]
+
+    with pytest.raises(TimeoutError):
+        node(payload)

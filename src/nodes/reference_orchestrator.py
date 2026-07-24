@@ -17,6 +17,7 @@ from typing import Any, Final, Protocol, cast
 
 from assembly.assembler_config import AssemblerConfig
 from assembly.context_assembler import assemble
+from domain.env_config import read_positive_int
 from domain.state import WorkflowStatus, WritingAgentState
 from agents.contracts import MaterialPayload, SearchTask, Subagent, material_from_payload
 from nodes.chapter_drafter import DRAFT_CHAPTER_ID_KEY
@@ -102,8 +103,27 @@ def make_reference_orchestrator_node(
     return node
 
 
-def _run_search_agent(search_agent: Subagent, task: dict[str, Any]) -> dict[str, Any]:
-    """在当前节点线程内执行异步检索适配器，避免嵌套占用 Pregel 执行器。"""
-    import asyncio
+SEARCH_TIMEOUT_ENV: Final = "REFERENCE_SEARCH_TIMEOUT_SECONDS"
+"""单章检索硬超时（秒）的环境变量名：缺省 600。"""
 
-    return asyncio.run(search_agent.run(task))
+_DEFAULT_SEARCH_TIMEOUT_SECONDS: Final = 600
+
+
+def _run_search_agent(search_agent: Subagent, task: dict[str, Any]) -> dict[str, Any]:
+    """在当前节点线程内执行异步检索适配器，避免嵌套占用 Pregel 执行器。
+
+    外层包 asyncio.wait_for 硬超时（issue #80 放大器）：检索源间歇停顿
+    （如 Volcano 返回 http-200 空 Result 后挂起）时该分支不得永不返回——
+    超时抛 TimeoutError 由图的错误路径兜底，任务失败可观测而非静默挂死。
+    """
+    import asyncio
+    import os
+
+    timeout_seconds = read_positive_int(
+        os.environ, SEARCH_TIMEOUT_ENV, _DEFAULT_SEARCH_TIMEOUT_SECONDS
+    )
+
+    async def _bounded() -> dict[str, Any]:
+        return await asyncio.wait_for(search_agent.run(task), timeout=timeout_seconds)
+
+    return asyncio.run(_bounded())

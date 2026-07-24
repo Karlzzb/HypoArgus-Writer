@@ -263,6 +263,47 @@ def test_六章检索首写管线_执行器并发四不自死锁():
     assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
 
 
+def test_无假说章不被检索流水线遗漏_全章成稿进终审():
+    """issue #80：某章假说为空时，图不得静默 END，须全章成稿进入人工中断点。
+
+    框架 LLM 对论点二返回空假说列表：ch2 不产生检索 Send。
+    回归行为是 route_after_reference_join 以大纲全部章为到齐判定，
+    ch2 永不落 chapter_drafts，所有汇合分支路由到 END，图静默终结
+    （既非 FINISHED 也非中断）。修复后 ch2 应走无素材首写，全文照常
+    汇合进终审并停在人工中断点。
+    """
+    keyed = {"待发散的论点：论点二": ["[]"]}
+    graph, _, config = _build(
+        [*FRAMEWORK_RESPONSES, SEMANTIC_PASS, SEMANTIC_PASS, DOCUMENT_REVIEW_PASS],
+        keyed=keyed,
+    )
+    result = graph.invoke(initial_state("意图", "身份", "trace-no-hypo"), config)
+
+    assert [draft.chapter_id for draft in result["chapter_drafts"]] == ["ch1", "ch2"]
+    assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+    assert "__interrupt__" in result
+
+    result = graph.invoke(Command(resume=FINALIZE), config)
+    assert result["status"] == WorkflowStatus.FINISHED
+
+
+def test_全部章无假说_直接进终审不静默终结():
+    """issue #80 边界：所有章都无假说时，框架后路由不得走向未声明的 END。"""
+    keyed = {
+        "待发散的论点：论点一": ["[]"],
+        "待发散的论点：论点二": ["[]"],
+    }
+    graph, _, config = _build(
+        [*FRAMEWORK_RESPONSES, SEMANTIC_PASS, SEMANTIC_PASS, DOCUMENT_REVIEW_PASS],
+        keyed=keyed,
+    )
+    result = graph.invoke(initial_state("意图", "身份", "trace-all-no-hypo"), config)
+
+    assert [draft.chapter_id for draft in result["chapter_drafts"]] == ["ch1", "ch2"]
+    assert result["status"] == WorkflowStatus.AWAIT_USER_REVIEW
+    assert "__interrupt__" in result
+
+
 def test_主节点清单与运行单元清单一致():
     # 6 个主节点必须都是合法运行单元，防止两处常量清单漂移。
     assert set(MAIN_NODES) <= set(RUNTIME_UNITS)

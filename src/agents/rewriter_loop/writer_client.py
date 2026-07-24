@@ -12,7 +12,6 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from agents.citation_policy import citable_materials
 from agents.rewriter_loop.style_linter import Violation
 
 

@@ -267,7 +267,6 @@ def search_result_from_engine_output(
     同一（假说, 引文）在多线出现时按 _VERDICT_RANK 取强者。
     回链不上任务包假说的裁决项（编码不合约定或假说未知）按脏数据丢弃。
     """
-    chapter_id = task["chapter_id"]
     hypothesis_ids = {hypothesis["id"] for hypothesis in task["hypotheses"]}
     citations = {
         citation["citation_id"]: citation for citation in output.get("citations", [])

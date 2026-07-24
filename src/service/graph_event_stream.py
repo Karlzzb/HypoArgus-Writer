@@ -30,7 +30,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from service.event_envelope import EventEnvelope, new_envelope
-from domain.units import GRAPH_UPDATE_NODES, PIPELINE_CHAPTER_DRAFTER_NODE, graph_node_unit
+from domain.units import GRAPH_UPDATE_NODES, graph_node_unit
 from domain.state import WorkflowStatus, status_text
 from domain.events import (
     CONTENT_DELTA,

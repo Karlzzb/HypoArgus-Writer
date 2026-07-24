@@ -287,6 +287,38 @@ async def _create_task(
     return body["thread_id"], body["execution_trace_id"]
 
 
+def test_图静默终结不挂死业务流_必发终结事件并关流():
+    """issue #80：图走到 END 且非 FINISHED 非中断时，业务流不得永久挂死。
+
+    框架 LLM 对论点二返回空假说列表复刻主因路径：回归行为下
+    route_after_reference_join 判定「未到齐」把全部分支路由到 END，
+    _finish_run 三不管（非中断、非 FINISHED），hub 永不 close，
+    SSE 消费循环 queue.get() 永久阻塞——demo 卡死的服务层根因。
+    修复后业务流必须收到终结类事件（正常路径 review_required；
+    静默终结兜底 error）且流正常收尾，不得触发本用例的读超时。
+    """
+
+    async def main() -> None:
+        keyed = {**FRAMEWORK_KEYED_RESPONSES, "待发散的论点：论点二": ["[]"]}
+        app = _make_app(
+            [*FRAMEWORK_RESPONSES, SEMANTIC_PASS, SEMANTIC_PASS, DOCUMENT_REVIEW_PASS],
+            keyed=keyed,
+        )
+        async with _client(app) as client:
+            thread_id, _ = await _create_task(client)
+            terminal_types = {"review_required", "finalized", "error"}
+            frames, _ = await _read_sse(
+                client,
+                f"/tasks/{thread_id}/stream",
+                lambda fs: bool(terminal_types & {f["event"] for f in fs}),
+                timeout=10.0,
+                last_event_id=FROM_START,
+            )
+            assert terminal_types & {f["event"] for f in frames}
+
+    asyncio.run(main())
+
+
 def test_主干闭环_创建审阅迭代到定稿且双通道各司其职():
     async def main() -> None:
         app = _make_app([*FIRST_PASS_RESPONSES, *REVISE_ROUND_RESPONSES])
@@ -2855,8 +2887,6 @@ def test_逐字流_合并粒度可配且stub链路不逐字流():
 
 
 # ---- mock 档（issue #61）：双栈装配 + 形如真场景库 + 清理 ----
-
-import re
 
 _SNAKE_CASE_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
 

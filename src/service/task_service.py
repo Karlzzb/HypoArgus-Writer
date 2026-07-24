@@ -912,7 +912,12 @@ class TaskManager:
                         )
 
     def _finish_run(self, entry: _TaskEntry, emitter: GraphRunEmitter) -> None:
-        """运行正常结束后的收尾：中断转审阅门双发，终态发布定稿全文。"""
+        """运行正常结束后的收尾：中断转审阅门双发，终态发布定稿全文。
+
+        第三种结局（图走到 END 但既非中断也非 FINISHED）是编排缺陷的静默
+        终结：不兜底则 hub 永不关闭、业务流 SSE 消费端永久挂死（issue #80）。
+        此处发 error 业务事件并关流，把编排缺陷暴露为可观测的任务失败。
+        """
         if emitter.interrupt_payload is not None:
             values = self._graph_for(entry.thread_id).get_state(
                 self._thread_config(entry.thread_id)
@@ -940,3 +945,16 @@ class TaskManager:
                 },
             )
             entry.hub.close()
+            return
+        self._publish_business(
+            entry,
+            "error",
+            {
+                "message": (
+                    "图运行静默终结：既未停在人工中断点也未到 FINISHED 终态"
+                    f"（last_status={status_text(emitter.last_status, '无')}），"
+                    "疑似编排缺陷，任务终止"
+                ),
+            },
+        )
+        entry.hub.close()
